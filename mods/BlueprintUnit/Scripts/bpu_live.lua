@@ -100,6 +100,16 @@ local function each(a, fn, depth)
         return
     end
     if type(a) ~= "userdata" then return end
+    -- index loop first: TArray:ForEach callbacks leave the Lua stack inconsistent in UE4SS (later bogus errors like
+    -- "bad argument #2 to 'for iterator'", "index a number value"); GetArrayNum + a[i] does not
+    local okC, cnt = pcall(function() return a:GetArrayNum() end)
+    if okC and type(cnt) == "number" then
+        for i = 1, cnt do
+            local okI, e = pcall(function() return a[i] end)
+            if okI then fn(unw(e)) end
+        end
+        return
+    end
     local okF, fe = pcall(function() return a.ForEach end)
     if okF and type(fe) == "function" then
         -- collect inside the native callback (no field reads there), process after it returns
