@@ -564,5 +564,27 @@ do
           "refund room: unit full -> error, nothing removed (" .. st.text .. ")")
 end
 
+-- moveout never completes (game accepts the quick move, nothing moves): best effort -> done with the soft text, build goes on, trace lines
+do
+    local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3), noop_moves = true,
+                     station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Gear = 2 } } })
+    local traces = {}
+    f.io.trace = function(t) traces[#traces + 1] = t end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_NEW", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                          refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD" } } }), {})
+    local st = run(b, f)
+    local sent, polls, chosen = false, false, false
+    for _, t in ipairs(traces) do
+        if t:find("moveout: inv_move(primary=101, secondary=202, slot0=1, action=2) -> sent=true", 1, true) then sent = true end
+        if t:find("moveout poll: totals player {", 1, true) then polls = true end
+        if t:find("moveout: chosen slot0=1 item=ITEM_Gear amount=2", 1, true) then chosen = true end
+    end
+    check(st.state == "done" and st.removed == 1 and st.placed == 1 and f.calls.mv >= 1
+          and starts_with(st.text, "removed 1, refund stayed in your inventory (could not move it into the unit); placed 1 machines"),
+          "moveout stalled: run ends done with the soft text, machine placed (" .. st.text .. ")")
+    check(sent and polls and chosen, "moveout stalled: inv_move args, chosen slots and totals traced")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)

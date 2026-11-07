@@ -210,7 +210,7 @@ local function new_run(plan)
         rneed = {}, remove_ids = {}, costs = {},
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
         chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
-        placed = 0, removed = 0, moved_out = 0, moved_in = 0,
+        placed = 0, removed = 0, moved_out = 0, moved_in = 0, refund_stayed = false,
         placed_list = {}, removed_list = {},   -- machines actually sent (io.note_build: live overlay)
         base_total = 0, base_ids = {},    -- live machine count and id set at start (diagnostics: new ids)
     }
@@ -305,8 +305,25 @@ function B.new(io)
         return norm(p), norm(u)
     end
     -- one quick move (action 2 = quick move; primary = inventory holding the slot, secondary = destination). i is 1-based.
-    local function send_move(prim, sec, i)
-        return io.send_move(prim, sec, i - 1, 2) and true or false
+    -- io.send_move gets the 0-based slot (i - 1). tag (optional): trace the exact args and the send result.
+    local function send_move(prim, sec, i, tag)
+        local ok, ret = io.send_move(prim, sec, i - 1, 2)
+        ok = ok and true or false
+        if tag then
+            trace(("%s: inv_move(primary=%s, secondary=%s, slot0=%d, action=2) -> sent=%s ret=%s"):format(tag,
+                tostring(prim), tostring(sec), i - 1, tostring(ok), tostring(ret)))
+        end
+        return ok
+    end
+    -- moveout diagnostics (trace only): both inventories' item totals with the ids; the chosen player slots (slot0 0-based)
+    local function trace_totals(tag, ps, us)
+        trace(("%s: totals player {%s} unit {%s} (player_inv=%s unit_inv=%s)"):format(tag, list(totals(ps)), list(totals(us)),
+            tostring(R.player_inv), tostring(R.unit_inv)))
+    end
+    local function trace_chosen(ps, mo)
+        for _, s in ipairs(mo) do
+            trace(("moveout: chosen slot0=%d item=%s amount=%d"):format(s - 1, ps[s].item, ps[s].amount))
+        end
     end
 
     -- DisassembleInput per planned removal. Stage 2 then waits for the refund (or REMOVE_MS). held = totals before.
@@ -399,7 +416,7 @@ function B.new(io)
         if #R.issued == 0 then return fail("items missing in unit and player: " .. list(sf)) end
         R.snap = us
         for _, i in ipairs(R.issued) do
-            if not send_move(R.unit_inv, R.player_inv, i) then return fail("InventoryInput refused") end
+            if not send_move(R.unit_inv, R.player_inv, i, "staging") then return fail("InventoryInput refused") end
         end
         R.moved_in = R.moved_in + #R.issued
         R.stage = 5
@@ -450,21 +467,31 @@ function B.new(io)
     end
 
     -- stage 3: refund stacks the build does not need must leave the player. Re-issued every 2 s, 3 rounds; 10 s -> fail.
+    -- Best effort: not moved within STAGE_MS -> the refund stays in the player inventory and the build goes on (run ends done).
     local function moveout_wait(now)
-        local ps, _, err = read_both()
+        local ps, us, err = read_both()
         if not ps then return fail(err) end
         local mo = moveout_slots(ps, moveset(R.plan.refund, R.plan.need))
+        trace_totals("moveout poll", ps, us)
         if #mo == 0 then
             R.stage = 4
             R.t_next = now
             return
         end
-        if now - R.t_stage > STAGE_MS then return fail("refund stacks could not be moved into the unit (unit full?)") end
+        if now - R.t_stage > STAGE_MS then
+            R.refund_stayed = true
+            trace(("moveout: refund not moved into the unit within %d ms, it stays in the player inventory"):format(STAGE_MS))
+            R.stage = 4
+            R.t_next = now
+            set_status("working", "refund stayed in your inventory, continuing")
+            return
+        end
         if R.rounds < 3 and now - R.t_issue >= 2000 then
             R.rounds = R.rounds + 1
             R.t_issue = now
+            trace_chosen(ps, mo)
             for _, s in ipairs(mo) do
-                if not send_move(R.player_inv, R.unit_inv, s) then return fail("InventoryInput refused") end
+                if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
             end
         end
         R.t_next = now + 250
@@ -488,8 +515,10 @@ function B.new(io)
             set_status("working", "removal done")
             return
         end
+        trace_totals("moveout start", ps, us)
+        trace_chosen(ps, mo)
         for _, s in ipairs(mo) do
-            if not send_move(R.player_inv, R.unit_inv, s) then return fail("InventoryInput refused") end
+            if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
         end
         R.moved_out = R.moved_out + #mo
         R.stage = 3
@@ -512,7 +541,7 @@ function B.new(io)
             R.t_issue = now
             local out = stage_out(ps, R.plan.need, math.max(refund_fit(ps, R.rneed).missing, 1))
             for _, s in ipairs(out) do
-                if not send_move(R.player_inv, R.unit_inv, s) then return fail("InventoryInput refused") end
+                if not send_move(R.player_inv, R.unit_inv, s, "room") then return fail("InventoryInput refused") end
                 R.moved_out = R.moved_out + 1
             end
             if #out > 0 then set_status("working", ("room for the refund: %d stacks moved to the unit, checking"):format(#out)) end
@@ -535,8 +564,12 @@ function B.new(io)
             local pex = present(chk, ex)
             if pex < #chk then trace(("diag: %d of %d at planned cells (position may differ from plan)"):format(pex, #chk)) end
         end
+        local txt = ("placed %d machines (the game updates its blueprint view in about 30 s)"):format(R.placed)
+        if R.refund_stayed then
+            txt = ("removed %d, refund stayed in your inventory (could not move it into the unit); "):format(R.removed) .. txt
+        end
         R.state = "done"
-        R.text = ("placed %d machines (the game updates its blueprint view in about 30 s)"):format(R.placed)
+        R.text = txt
         mark_changed()
     end
 
@@ -592,8 +625,10 @@ function B.new(io)
             else
                 -- refund does not fit: move the unneeded refund stacks to the unit, stage 1 re-checks
                 local mo = R.creative and {} or moveout_slots(ps, moveset(P.refund, P.need))
+                trace_totals("moveout start (room)", ps, us)
+                trace_chosen(ps, mo)
                 for _, s in ipairs(mo) do
-                    if not send_move(R.player_inv, R.unit_inv, s) then return start_fail("InventoryInput refused") end
+                    if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return start_fail("InventoryInput refused") end
                 end
                 R.moved_out = R.moved_out + #mo
                 R.stage = 1
