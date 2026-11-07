@@ -585,6 +585,16 @@ local function build(text, live, F, opts)
         for i = 1, math.min(5, #existing) do lb[i] = tostring(existing[i].bcls) end
         opts.trace("json bcls first5: " .. (#jb > 0 and table.concat(jb, ", ") or "-"))
         opts.trace("live bcls first5: " .. (#lb > 0 and table.concat(lb, ", ") or "-"))
+        -- identity mismatch diag: for each machine to be placed, the live machines on exactly the same x,y (any class)
+        local cl = {}
+        for _, m in ipairs(rest) do
+            local at = {}
+            for _, e in ipairs(existing) do
+                if e.x == m.x and e.y == m.y then at[#at + 1] = ("id=%s bcls=%s h=%s rot=%s"):format(tostring(e.id), tostring(e.bcls), tostring(e.h), tostring(e.rot)) end
+            end
+            cl[#cl + 1] = ("rest %s x=%s y=%s h=%s rot=%s -> live same x,y: [%s]"):format(tostring(m.bcls), tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot), table.concat(at, "; "))
+        end
+        if #cl > 0 then opts.trace(table.concat(cl, "\n")) end
     end
 
     -- placed = new machines + exit cells of placed pairs. Kept machines (game already has them) are never validated

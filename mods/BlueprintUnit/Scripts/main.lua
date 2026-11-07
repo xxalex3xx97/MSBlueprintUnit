@@ -51,6 +51,8 @@ local function unw(x) if type(x) == "userdata" then local s, r = pcall(function(
 -- true: print the arg classes of each opener once per signature (debug). Default off: other openers log nothing from us.
 local LOG_OPENERS = false
 local seen = {}
+local hookPause   -- defined with the ESC pause handling below; retried on every window open until it registers
+
 local function onOpen(src, self, a1, a2, a3, a4, a5)
   pcall(function()
     local args = { unw(a1), unw(a2), unw(a3), unw(a4), unw(a5) }
@@ -81,6 +83,7 @@ local function onOpen(src, self, a1, a2, a3, a4, a5)
     print(TAG .. "open request via " .. src .. " block=" .. cn(block) .. "\n")
     ExecuteInGameThread(function()
       pcall(function()
+        if hookPause then pcall(hookPause) end   -- no-op once registered
         -- game's own widget for the block (ToggleWidget only): hide it, as the Mining Unit does
         if ok(widget) and ok(ctl) then ctl:HideWidget(widget, false) end
         BPU.open(block, ok(player) and player or nil, ctl)
@@ -97,14 +100,17 @@ hookOne("/Script/MainSequence.WidgetSubsystem:ToggleWindow", "WidgetSubsystem:To
 hookOne("/Script/MainSequence.WidgetSubsystem:ShowWindow", "WidgetSubsystem:ShowWindow")
 hookOne("/Script/MainSequence.DMSPlayerController:ToggleWidget", "DMSPlayerController:ToggleWidget")
 
--- ESC close -> the same key press reaches the game's IA_Escape and opens the pause menu. lastEsc = time of our ESC close.
--- The pause menu SetupWidget post-hook closes it again when it fires within 0.3 s of that close.
-local lastEsc = -1e9
+-- ESC close -> the same key press reaches the game's IA_Escape and opens the pause menu.
+-- Main path: poll for WBP_PauseMenu_C at 50, 150, 300 ms after our ESC close (the class may not be loaded at startup, so
+-- no hook is relied on). Extra path: SetupWidget post-hook, registered at startup or on the next window open.
+-- esc = { t = clock of our ESC close, done = true once the pause menu was closed }; nil = no ESC pending.
 local PAUSE_CLS = "/Game/Blueprints/Widgets/Menus/WBP_PauseMenu.WBP_PauseMenu_C"
+local PAUSE_POLL_MS = { 50, 150, 300 }
 local pauseHooked = false
+local esc = nil
 
-local function closePause(w)
-  if not ok(w) then print(TAG .. "pause menu suppress: widget invalid\n") return end
+local function closePause(w, label)
+  if not ok(w) then print(TAG .. "pause menu suppress: widget invalid\n") return false end
   local okC, errC = pcall(function() w:CloseSelf() end)
   local okH, errH = false, nil
   if not okC then
@@ -112,17 +118,52 @@ local function closePause(w)
     okH, errH = pcall(function() pc:HideWidget(w, false) end)
   end
   local how = okC and "CloseSelf" or (okH and "HideWidget" or "failed")
-  print(TAG .. "pause menu suppressed after ESC via " .. how .. (okC and "" or (" err=" .. tostring(errC))) .. "\n")
+  -- what the game reports after the close (APlayerController:IsPaused may not exist: logged as n/a)
+  local pc = FindFirstOf("DMSPlayerController")
+  local okP, paused = false, nil
+  if ok(pc) then okP, paused = pcall(function() return pc:IsPaused() end) end
+  print(TAG .. "pause menu suppressed (" .. label .. ") via " .. how .. (okC and "" or (" err=" .. tostring(errC)))
+    .. " paused=" .. tostring(okP and paused or "n/a") .. "\n")
+  return okC or okH
+end
+
+-- game thread. Closes the pause menu when it is found on screen. true = handled.
+local function pausePoll(label)
+  local w = FindFirstOf("WBP_PauseMenu_C")
+  if not ok(w) then return false end
+  local okV, inV = pcall(function() return w:IsInViewport() end)
+  if okV and inV ~= true then return false end   -- object exists but is not on screen
+  if not okV then print(TAG .. "pause poll: IsInViewport unavailable, closing anyway\n") end
+  return closePause(w, label)
+end
+
+local function escPending(e) return esc == e and not e.done end
+
+local function schedulePausePoll()
+  local e = { t = os.clock(), done = false }
+  esc = e
+  for _, ms in ipairs(PAUSE_POLL_MS) do
+    ExecuteWithDelay(ms, function()
+      ExecuteInGameThread(function()
+        pcall(function()
+          if not escPending(e) then return end
+          if pausePoll("poll " .. ms .. " ms") then e.done = true end
+          if ms == PAUSE_POLL_MS[#PAUSE_POLL_MS] and not e.done then print(TAG .. "pause menu: not on screen within 300 ms of ESC\n") end
+        end)
+      end)
+    end)
+  end
+  return e
 end
 
 local function onPause(self)
-  if os.clock() - lastEsc >= 0.3 then return end
-  lastEsc = -1e9
+  if not esc or esc.done or os.clock() - esc.t >= 0.3 then return end
+  esc.done = true
   local w = unw(self)
-  ExecuteInGameThread(function() pcall(closePause, w) end)
+  ExecuteInGameThread(function() pcall(closePause, w, "hook") end)
 end
 
-local function hookPause()
+function hookPause()
   if pauseHooked then return true end
   local s, pre, post = pcall(RegisterHook, PAUSE_CLS .. ":SetupWidget", function() end, function(self) pcall(onPause, self) end)
   if s then pauseHooked = true end
@@ -141,8 +182,8 @@ end
 pcall(function()
   RegisterKeyBind(Key.ESCAPE, function()
     pcall(function()
-      if BPU.impOpen() then lastEsc = os.clock(); pcall(ExecuteInGameThread, BPU.impClose)
-      elseif BPU.isOpen() then lastEsc = os.clock(); pcall(ExecuteInGameThread, BPU.close) end
+      if BPU.impOpen() then schedulePausePoll(); pcall(ExecuteInGameThread, BPU.impClose)
+      elseif BPU.isOpen() then schedulePausePoll(); pcall(ExecuteInGameThread, BPU.close) end
     end)
   end)
 end)

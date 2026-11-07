@@ -335,6 +335,20 @@ local st = b:status()
 check(st.state == "done" and st.placed == 2 and st.placed == #plan2.place, ("integration: done, placed %d (%s)"):format(st.placed, st.text))
 check(st.text == "placed 2 machines (the game updates its blueprint view in about 30 s)" and #W2.machines == 2, "integration: final text, 2 machines on the station")
 
+-- live overlay: the game view is still the pre-build station (empty). Re-import right after the build plans place 0.
+do
+    fakeMachines = {}
+    local live3 = Live.snapshot(U2b, F)
+    local plan3, e3 = P.plan(read("belts2.json"), live3, F)
+    check(plan3 and plan3.valid and plan3.counts.place == 0 and plan3.counts.remove == 0 and plan3.counts.keep == 2,
+        "overlay: re-import right after the build plans place 0, keep 2 " .. tostring(e3))
+    local sc = io2.scan(42)
+    check(sc and #sc == 2 and sc[1].id < 0 and plan3.fp == io2.fingerprint(sc), "overlay: io.scan and snapshot agree (fingerprint)")
+    Live.now = function() return 1e12 end   -- 120 s passed: the overlay ends, the stale view plans place 2 again
+    local plan4 = P.plan(read("belts2.json"), Live.snapshot(U2b, F), F)
+    check(plan4 and plan4.counts.place == 2 and plan4.counts.keep == 0, "overlay: expired, stale view plans place 2")
+end
+
 -- real read path at Main-Base size: 2246 stub machine structs -> Live.snapshot -> P.plan (identity keep, no non-table entries)
 do
     local big, parts = {}, {}
@@ -352,6 +366,35 @@ do
     check(#liveB.existing == 2246 and type(liveB.existing[1]) == "table" and liveB.existing[2246].id == 3245, "snapshot: 2246 machine tables via read_machines")
     local pB, eB = P.plan(textB, liveB, F)
     check(pB and pB.valid and pB.counts.keep == 2246 and pB.counts.place == 0 and pB.counts.remove == 0, "plan: 2246 belts kept by identity, nothing placed/removed " .. tostring(eB))
+end
+
+-- live overlay on plain tables: placed merged until the fresh read shows them, removed ids dropped, 120 s end
+do
+    local t = 0
+    Live.now = function() return t end
+    local function flush() t = 1e12; Live.overlay({}) end   -- far future: ends every batch
+    local A = { bcls = "BP_A", dat = "DAT_A", x = 1, y = 2, h = 0, rot = 0 }
+    Live.note_build({ A }, { 5 })
+    local o1 = Live.overlay({ { id = 5, bcls = "BP_OLD", x = 9, y = 9, h = 0, rot = 0 }, { id = 7, bcls = "BP_B", x = 3, y = 3, h = 0, rot = 0 } })
+    check(#o1 == 2 and o1[1].id == 7 and o1[2].id == -1 and o1[2].bcls == "BP_A" and o1[2].dat == "DAT_A",
+        "overlay: placed added with negative id, removed id 5 dropped")
+    local o2 = Live.overlay({ { id = 7, bcls = "BP_B", x = 3, y = 3, h = 0, rot = 0 }, { id = 9, bcls = "BP_A", x = 1, y = 2, h = 0, rot = 0 } })
+    check(#o2 == 2 and o2[1].id == 7 and o2[2].id == 9, "overlay: fresh read shows the build, no virtual entries")
+    check(#Live.overlay({ { id = 7, bcls = "BP_B", x = 3, y = 3, h = 0, rot = 0 } }) == 1, "overlay: batch ended by the fresh read")
+
+    flush(); t = 0
+    Live.note_build({ A }, {})
+    local f3 = { { id = 4, bcls = "BP_Other", x = 1, y = 2, h = 0, rot = 0 } }
+    check(#Live.overlay(f3) == 2, "overlay: other class on the same cell does not match")
+    t = 119999
+    check(#Live.overlay(f3) == 2, "overlay: still active at 119.999 s")
+    t = 120000
+    check(#Live.overlay(f3) == 1, "overlay: expired at 120 s")
+
+    flush(); t = 0
+    Live.note_build({ A }, {})
+    check(#Live.overlay({ { bcls = "X", x = 0, y = 0, h = 0, rot = 0 } }) == 2, "overlay: entry without id does not break the merge")
+    flush()
 end
 
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")

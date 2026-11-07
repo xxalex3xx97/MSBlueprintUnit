@@ -11,18 +11,6 @@ local CHARGE_MS = 5000    -- chunk charge (player+unit items drop by the cost) m
 local REMOVE_MS = 3000    -- fixed settle after DisassembleInput (refund may show earlier)
 local POLL_MS = 500
 
--- The game's blueprint view (station.Blueprint.Machines) lags 20-30 s behind a build. Import and Build are refused for
--- GUARD_MS after a run that placed or removed machines (B.last_build_at, io.now clock, module level: survives window reopen).
-B.GUARD_MS = 45000
-B.last_build_at = nil
-
--- nil when no guard applies; else "wait Ns: ..." (N = seconds left, rounded up).
-function B.settle_msg(now)
-    if not B.last_build_at or now - B.last_build_at >= B.GUARD_MS then return nil end
-    local s = math.ceil((B.last_build_at + B.GUARD_MS - now) / 1000)
-    return ("wait %ds: the game is still updating its blueprint view after the build"):format(s)
-end
-
 local function get(m, k) return m[k] or 0 end
 
 local function sorted_keys(m)
@@ -200,6 +188,7 @@ local function new_run(plan)
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
         chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
         placed = 0, removed = 0, moved_out = 0, moved_in = 0,
+        placed_list = {}, removed_list = {},   -- machines actually sent (io.note_build: live overlay)
         base_total = 0, base_ids = {},    -- live machine count and id set at start (diagnostics: new ids)
     }
 end
@@ -235,6 +224,7 @@ end
 --   io.unit_ids() -> { unit_id=, player_id= }     io.creative() -> bool     io.costs(place) -> { cost map per machine }
 --   io.send_remove(id) | io.send_move(prim_id, sec_id, slot0, action) | io.send_place(machine) | io.send_changes(chg)
 --   io.now() -> ms
+--   io.note_build(placed, removed) optional: run end with machines placed (plan entries) / removed (live ids)
 --   io.trace(text) optional: diagnostics only (position differs from plan, nearest live machines on a count miss)
 -- plan (from bpu_plan): station, fp, place, kept, chg, removed={ {id=,bcls=} }, need, refund (ITEM -> n), recChanged, valid.
 function B.new(io)
@@ -258,9 +248,9 @@ function B.new(io)
                 tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
         end
     end
-    -- a run that placed or removed machines starts the blueprint-view guard (any end: done, error, cancel)
+    -- any end (done, error, cancel) with placed or removed machines: io.note_build keeps them as a live overlay
     local function mark_changed()
-        if R.placed + R.removed > 0 then B.last_build_at = io.now() end
+        if #R.placed_list + #R.removed_list > 0 and io.note_build then io.note_build(R.placed_list, R.removed_list) end
     end
     -- ends the run with error|msg (counts). Returns false.
     local function fail(msg)
@@ -300,7 +290,7 @@ function B.new(io)
     local function send_removals(now, held)
         local sent = 0
         for _, id in ipairs(R.remove_ids) do
-            if io.send_remove(id) then sent = sent + 1 end
+            if io.send_remove(id) then sent = sent + 1; R.removed_list[#R.removed_list + 1] = id end
         end
         R.removed = sent
         if sent ~= #R.remove_ids then
@@ -347,7 +337,7 @@ function B.new(io)
         end
         local count, n = R.chunk_to - R.chunk_from, 0
         for k = R.chunk_from, R.chunk_to - 1 do
-            if io.send_place(R.plan.place[k]) then n = n + 1 end
+            if io.send_place(R.plan.place[k]) then n = n + 1; R.placed_list[#R.placed_list + 1] = R.plan.place[k] end
         end
         R.placed = R.placed + n
         if n ~= count then
@@ -525,8 +515,6 @@ function B.new(io)
         if R.active then return false, "error: busy: another build is running" end
         R = new_run(nil)
         if not plan or not plan.valid then return start_fail("import first") end
-        local wait = B.settle_msg(io.now())
-        if wait then return start_fail(wait) end
         local P = {
             station = plan.station, fp = plan.fp,
             place = plan.place or {}, kept = plan.kept or {}, chg = plan.chg or {},

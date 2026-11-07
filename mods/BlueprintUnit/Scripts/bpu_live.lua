@@ -247,6 +247,63 @@ local function count(t)
     return n
 end
 
+-- Live overlay. The game's blueprint view (station.Blueprint.Machines, read_station) lags ~30 s behind a build, so after a
+-- build run (io.note_build) its placed machines and removed ids are merged into every fresh read: placed machines not
+-- matched in the fresh read by (bcls,x,y,h,rot) are added with a negative id, removed ids are dropped. A batch ends as soon
+-- as the fresh read shows all its placed machines and none of its removed ids, or after OV_MS. Module level: survives reopen.
+L.now = function() return os.clock() * 1000 end   -- ms clock (tests replace it)
+local OV_MS = 120000
+local OV = {}   -- batches { t = ms, placed = {plan machines}, removed = {ids} }
+
+function L.note_build(placed, removed)
+    if #placed + #removed == 0 then return end
+    OV[#OV + 1] = { t = L.now(), placed = placed, removed = removed }
+end
+
+local function cell_key(e) return tostring(e.bcls) .. "|" .. tostring(e.x) .. "|" .. tostring(e.y) .. "|" .. tostring(e.h) .. "|" .. tostring(e.rot) end
+
+-- fresh = read_machines list (not modified). Returns a new list: fresh minus removed ids, plus virtual placed machines.
+function L.overlay(fresh)
+    if #OV == 0 then return fresh end
+    local now = L.now()
+    local byKey, ids = {}, {}
+    for k, e in ipairs(fresh) do
+        if e.id ~= nil then ids[e.id] = true end
+        local key = cell_key(e)
+        byKey[key] = byKey[key] or {}
+        table.insert(byKey[key], k)
+    end
+    local used, gone, virt, active = {}, {}, {}, {}
+    for _, b in ipairs(OV) do
+        if now - b.t < OV_MS then
+            local complete = true
+            for _, p in ipairs(b.placed) do
+                local hit
+                for _, k in ipairs(byKey[cell_key(p)] or {}) do
+                    if not used[k] then hit = k break end
+                end
+                if hit then used[hit] = true else complete = false; virt[#virt + 1] = p end
+            end
+            for _, id in ipairs(b.removed) do
+                if ids[id] then complete = false end
+                gone[id] = true
+            end
+            if not complete then active[#active + 1] = b end
+        end
+    end
+    OV = active
+    local out = {}
+    for _, e in ipairs(fresh) do if not gone[e.id] then out[#out + 1] = e end end
+    for i, p in ipairs(virt) do
+        local v = {}
+        for k, x in pairs(p) do v[k] = x end
+        v.id = -i
+        v.cls = v.cls or v.bcls
+        out[#out + 1] = v
+    end
+    return out
+end
+
 function L.snapshot(U, F)
     cache = nil
     local st = U.station_obj
@@ -258,7 +315,7 @@ function L.snapshot(U, F)
         bl[i] = ("blk %d class=%s gx=%s gy=%s h=%s rot=%s"):format(i, tostring(b.class), tostring(b.gx), tostring(b.gy), tostring(b.h), tostring(b.rot))
     end
     TRACE_MANY(bl)
-    local existing = L.read_machines(st)
+    local existing = L.overlay(L.read_machines(st))
     TRACE("snapshot machines=" .. #existing)
     local recipes = L.read_recipes()
     TRACE("snapshot recipes=" .. count(recipes))
@@ -322,7 +379,7 @@ function L.make_io(ctx)
     function io.scan(station)
         local st = find_by_id(station)
         if not st then return nil, "station not found" end
-        local ok, res = pcall(L.read_machines, st)
+        local ok, res = pcall(function() return L.overlay(L.read_machines(st)) end)
         if not ok then return nil, tostring(res) end
         return res
     end
@@ -347,6 +404,7 @@ function L.make_io(ctx)
         return call(native.inv_move, prim, sec, slot0, action)
     end
     function io.send_remove(id)
+        if type(id) == "number" and id < 0 then return false, "machine not in the game view yet" end   -- overlay id
         return call(native.disassemble, id, 0)
     end
     function io.send_place(m)
@@ -375,7 +433,8 @@ function L.make_io(ctx)
         print(("[BPUnit] config changes: %d ok, %d failed"):format(okc, failc))
         return okc, failc
     end
-    function io.now() return os.clock() * 1000 end
+    function io.now() return L.now() end
+    function io.note_build(placed, removed) L.note_build(placed, removed) end
     io.trace = TRACE
     return io
 end

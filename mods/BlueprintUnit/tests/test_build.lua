@@ -34,7 +34,6 @@ local function M(bcls, x, y, cost) return { bcls = bcls, x = x, y = y, cost = co
 
 -- fake game: inventories, station, quick moves with partial fills, removals refund to the player
 local function fake(spec)
-    B.last_build_at = nil   -- guard state is module level: every fixture starts free
     local f = {
         calls = { rm = 0, mv = 0, pl = 0, ch = 0 }, moves = {}, clock = 1000,
         no_charge = spec.no_charge,
@@ -484,33 +483,42 @@ do
     check(st2.state == "done" and gap2 and gap2 >= 3000, "removal: refund not seen, placing waits the 3 s settle")
 end
 
--- guard: a build that placed machines refuses Import/Build for 45 s (B.settle_msg); a later start is free
+-- no settle refusal: a second build starts at once after a build that placed machines
 do
     local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local b = B.new(f.io)
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
     run(b, f)
-    local last = B.last_build_at
-    check(last ~= nil and B.settle_msg(last + 10000) == "wait 35s: the game is still updating its blueprint view after the build",
-          "guard: 35 s left 10 s after a build")
-    check(B.settle_msg(last + 44999) ~= nil and B.settle_msg(last + 45000) == nil, "guard: free at exactly 45 s")
     local b2 = B.new(f.io)
-    f.clock = last + 10000
     local ok2, msg2 = b2:start(plan_for(f, {}), {})
-    check(not ok2 and starts_with(msg2, "error: wait 35s: the game is still updating its blueprint view after the build"),
-          "guard: second build refused with the wait message")
-    f.clock = last + 45000
-    local b3 = B.new(f.io)
-    local ok3, msg3 = b3:start(plan_for(f, {}), {})
-    check(ok3 and msg3 == "ok nothing to build", "guard: second build allowed after 45 s")
+    check(ok2 and msg2 == "ok nothing to build", "no refusal: second build starts right after a build")
 end
 
--- guard: a run that placed nothing and removed nothing does not start the guard
+-- live overlay hook (io.note_build): a run that placed or removed machines reports them; a refused run reports nothing
 do
-    local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 1), unit = inv({ S("ITEM_Plate", 4) }, 1) })
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local noted
+    f.io.note_build = function(p, r) noted = { p = p, r = r } end
     local b = B.new(f.io)
-    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 9 }) }, need = { ITEM_Plate = 9 } }), {})
-    check(b:status().state == "error" and B.last_build_at == nil, "guard: refused build (nothing placed) leaves the guard off")
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
+    run(b, f)
+    check(noted and #noted.p == 1 and noted.p[1].bcls == "BP_A" and #noted.r == 0, "note_build: placed machine reported after the run")
+
+    local f2 = fake({ station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3) })
+    local noted2
+    f2.io.note_build = function(p, r) noted2 = { p = p, r = r } end
+    local b2 = B.new(f2.io)
+    b2:start(plan_for(f2, { place = { M("BP_NEW", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                            refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD" } } }), {})
+    run(b2, f2)
+    check(noted2 and #noted2.p == 1 and #noted2.r == 1 and noted2.r[1] == 7, "note_build: removed id reported")
+
+    local f3 = fake({ player = inv({ S("ITEM_Plate", 1) }, 1), unit = inv({ S("ITEM_Plate", 4) }, 1) })
+    local noted3
+    f3.io.note_build = function() noted3 = true end
+    local b3 = B.new(f3.io)
+    b3:start(plan_for(f3, { place = { M("BP_A", 0, 0, { ITEM_Plate = 9 }) }, need = { ITEM_Plate = 9 } }), {})
+    check(b3:status().state == "error" and noted3 == nil, "note_build: refused build (nothing placed) reports nothing")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

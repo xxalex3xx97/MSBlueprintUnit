@@ -31,6 +31,10 @@ local CONTRACT = { "Panel", "Txt_Title", "Btn_Close", "Txt_Close", "Txt_Status",
 -- S.imp = import modal shown. S.U = unit (Live.find_unit). S.plan / S.text = last import. S.run = token of the running build.
 local S = { h = nil, w = nil, p = nil, U = nil, player = nil, ctl = nil, tc = nil, imp = false,
   plan = nil, text = nil, builder = nil, io = nil, run = nil, stationBuild = false, t0 = 0 }
+-- KEPT (module level, survives close/reopen): last text of the result boxes and the cost rows, re-rendered by openWindow.
+-- has = an import or build ran in this session. S.plan / S.text are kept too (Build re-plans from S.text).
+local KEPT = { has = false, txt = {}, rows = {} }
+local KEPT_NAMES = { Txt_Status = true, Txt_Summary = true, Txt_Notes = true, Txt_Removes = true }
 
 -- ESlateVisibility: 0 Visible, 1 Collapsed
 local function setVis(o, shown) if ok(o) then try("vis", function() o:SetVisibility(shown and 0 or 1) end) end end
@@ -47,6 +51,7 @@ end
 
 -- SetText(FText) on the TextBlock; unchanged writes skipped (S.tc). Never read an edit box right after this.
 local function txt(name, s)
+  if KEPT_NAMES[name] then KEPT.txt[name] = s end
   S.tc = S.tc or {}
   if S.tc[name] == s then return end
   local tb = w(name); if not ok(tb) then return end
@@ -74,6 +79,7 @@ end
 -- cost list (Scr_Cost): need rows first, then refund rows, max COST_N. rows = P.cost_rows(plan).
 local missLogged = {}
 local function fillCost(rows)
+  KEPT.rows = rows or {}
   local host = w("Scr_Cost")
   if not ok(host) then return end
   pcall(function() host:ClearChildren() end)
@@ -158,8 +164,6 @@ end
 -- Btn_ImportOk: plan the pasted JSON against the live station. Error -> status, modal stays open.
 local function impOk()
   if not M.impOpen() then return end
-  local wait = Build.settle_msg(os.clock() * 1000)   -- the station view is stale for ~30 s after a build
-  if wait then txt("Txt_Status", "error: " .. wait); return end
   local box = w("Edt_ImportJson")
   local sr, text = pcall(function() return box:GetText():ToString() end)
   if not ok(box) or not sr or type(text) ~= "string" then txt("Txt_Status", "error: could not read text"); return end
@@ -180,6 +184,7 @@ local function impOk()
     Live.trace(("impOk plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
     S.plan, S.text = plan, text
+    KEPT.has = true
     txt("Txt_Status", "Blueprint: " .. (plan.name or "Ready"))
     showText("Txt_Summary", Plan.summary(plan))
     -- notes panel (right, scrollable): same text folded into "xN", no cap
@@ -211,8 +216,7 @@ local function finishBuild(run)
   S.run = nil
   setBuildBtns(true)
   showText("Txt_Summary", S.builder:status().text)
-  -- stale station right after a build: re-planning now would list the built machines as missing again
-  if Build.settle_msg(os.clock() * 1000) then return end
+  KEPT.has = true
   local okR, err = pcall(function()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F), F)
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
@@ -338,9 +342,12 @@ end
 function M.close()
   local h = S.h
   if not h then return end
-  if S.run and S.builder then pcall(function() S.builder:cancel() end) end
+  if S.run and S.builder then
+    pcall(function() S.builder:cancel() end)
+    KEPT.txt.Txt_Status = S.builder:status().text   -- the line shown on reopen: the cancelled result
+  end
   S.h, S.w, S.p, S.U, S.player, S.ctl = nil, nil, nil, nil, nil, nil
-  S.plan, S.text, S.builder, S.io, S.run, S.tc, S.imp = nil, nil, nil, nil, nil, nil, false
+  S.builder, S.io, S.run, S.tc, S.imp = nil, nil, nil, nil, false   -- S.plan / S.text stay (Build re-plans from S.text)
   MSCore.wbp.close(h)
   pcall(ExecuteWithDelay, 100, function() pcall(ExecuteInGameThread, MSCore.ui.clearClicks) end)
 end
@@ -361,7 +368,7 @@ local function openWindow(block, player, ctl)
   S.h, S.w, S.p = h, h.wbp, h.pc
   S.U, S.player, S.ctl = U, player, ctl
   S.t0, S.tc, S.imp = os.clock(), {}, false
-  S.plan, S.text, S.builder, S.io, S.run = nil, nil, nil, nil, nil
+  S.builder, S.io, S.run = nil, nil, nil
 
   local miss = {}
   for _, n in ipairs(CONTRACT) do if not ok(w(n)) then miss[#miss + 1] = n end end
@@ -383,7 +390,12 @@ local function openWindow(block, player, ctl)
   bind("Btn_ImportOk", impOk)
 
   setVis(w("Pnl_ImportModal"), false)
-  resetResults()
+  if KEPT.has then   -- reopen in the same session: the last results again
+    for _, n in ipairs({ "Txt_Status", "Txt_Summary", "Txt_Notes", "Txt_Removes" }) do showText(n, KEPT.txt[n] or "") end
+    fillCost(KEPT.rows)
+  else
+    resetResults()
+  end
   readStationBuild()
   L("open unit=" .. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
 end
