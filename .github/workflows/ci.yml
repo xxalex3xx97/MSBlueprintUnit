@@ -6,12 +6,13 @@ on:
     branches: [main]
 jobs:
   ci:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Lua
+      - name: Install Lua 5.4
         run: |
-          choco install lua -y --no-progress
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
       - name: Tests
-        run: powershell -NoProfile -File tests\run.ps1
+        run: pwsh tests/run.ps1
