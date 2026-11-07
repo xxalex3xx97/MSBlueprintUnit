@@ -26,7 +26,8 @@ if (-not $mm.Success) { throw "no min_mscore in $verFile" }
 if (-not (Test-Path -LiteralPath $releaseMod -PathType Leaf)) { throw "missing shared script: $releaseMod" }
 
 # <local>=<zip path> pairs
-$luaNames = 'main.lua', 'bpu_version.lua', 'bpu_window.lua', 'bpu_json.lua', 'bpu_plan.lua', 'bpu_live.lua', 'bpu_build.lua', 'bpu_ports.lua', 'bpu_port_data.lua'
+# every module in Scripts (a module missing from the zip breaks the load; bpu_invtrace.lua was once left out)
+$luaNames = @(Get-ChildItem -LiteralPath (Join-Path $root 'mods\BlueprintUnit\Scripts') -Filter '*.lua' | Sort-Object Name | ForEach-Object { $_.Name })
 $pakNames = foreach ($n in 'pakchunk97-BPUnitMesh_P', 'pakchunk100-BlueprintUnit_P', 'pakchunk102-BPUnitUI_P') {
     foreach ($e in 'pak', 'ucas', 'utoc') { "$n.$e" }
 }
