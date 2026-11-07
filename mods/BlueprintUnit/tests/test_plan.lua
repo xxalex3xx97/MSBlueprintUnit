@@ -266,6 +266,7 @@ local pr = P.plan(read("empty.json"), live({ items = ITEMS, existing = { old } }
 check("refund contents: removed container listed", pr and pr.counts.remove == 1 and pr.refund.ITEM_Plate == 7)
 check("refund contents: refund_cost has no contents", pr and pr.refund_cost.ITEM_Plate == nil)
 check("refund contents: refund row 7", pr and row_of(P.cost_rows(pr), "ITEM_Plate") and row_of(P.cost_rows(pr), "ITEM_Plate").refund == 7)
+check("refund contents: summary text lists Plate x7", pr and P.summary(pr):find("refund Plate x7", 1, true) ~= nil)
 
 -- cost rows: restore (need) and removed contents (refund) together
 local old2 = ex(61, "BP_ContainerObject_2", "DAT_Container_2", 300, 300)

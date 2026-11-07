@@ -1199,5 +1199,30 @@ do
     check(ok3, "total check: contents shortage never blocks the Build")
 end
 
+-- cancel during the restore: no further inventory command, the container keeps what it already got, no restore text
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local function cont_items()
+        local c = new_cont(f)
+        return c and tot(f.containers[c].slots, "ITEM_Plate") or 0
+    end
+    local n = 0
+    while b:status().state == "working" and cont_items() < 50 and n < 400 do
+        f.clock = f.clock + 250
+        b:tick(f.clock)
+        n = n + 1
+    end
+    local cmds_before, items_before = #f.cmds, cont_items()
+    local okc = b:cancel()
+    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
+    local st = b:status()
+    check(okc and st.state == "error" and starts_with(st.text, "cancelled") and st.text:find("restore", 1, true) == nil,
+          "cancel during restore: error|cancelled, no restore text (" .. st.text .. ")")
+    check(items_before == 50 and #f.cmds == cmds_before and cont_items() == items_before,
+          "cancel during restore: no further inventory command after cancel (cmds " .. cmds_before .. ", items " .. items_before .. ")")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)
