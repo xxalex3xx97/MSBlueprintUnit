@@ -259,6 +259,12 @@ check("contents: case/space/ITEM_ insensitive, duplicates summed", pci and pci.r
 
 local pb = P.plan(cont_doc('[{"Item":"ironore","Count":5}]', 1, 1, "BP_ConveyorBeltObject", "DAT_ConveyorBelt"), live({ items = ITEMS }), F)
 check("contents: on a non-container = note, nothing restored", pb and next(pb.restore) == nil and tostring(table.concat(pb.notes, ";")):find("Contents ignored", 1, true) ~= nil)
+-- per-container SiteOnly (website sim data) and Contents[].Infinite: both ignored, Contents still read
+do
+    local t = '{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"BP_ContainerObject_2","DefaultName":"DAT_Container_2","Transform":{"GridLocation":{"X":2,"Y":2},"Height":0,"GridRotation":0},"Contents":[{"Item":"ironore","Count":125,"Infinite":false}],"SiteOnly":{"Infinite":[{"Item":"warpfuel","Count":0}]}}],"SiteOnly":{"x":1}}'
+    local pp, ee = P.plan(t, live({ items = ITEMS }), F)
+    check("per-container SiteOnly + Infinite flag: plan ok", pp ~= nil and ee == nil)
+end
 
 local pj = P.plan(cont_doc('[{"Item":"ironore","Count":120}]', 2, 2), live({ items = ITEMS, memory = { ["BP_ContainerObject_2|2|2|0|0"] = { { name = "ITEM_Plate", count = 7 } } } }), F)
 check("contents: JSON wins over memory", pj and pj.restore.ITEM_IronOre == 120 and pj.restore.ITEM_Plate == nil)
