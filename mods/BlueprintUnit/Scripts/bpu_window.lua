@@ -7,7 +7,6 @@ local Live = require("bpu_live")
 local Plan = require("bpu_plan")
 local Build = require("bpu_build")
 
-local NOTE_LINES = 8
 local M = {}
 local MSCore, F, native   -- set by M.init
 
@@ -21,7 +20,7 @@ local function try(tag, f, ...) local s, r = pcall(f, ...) if not s then L("FAIL
 local WBP_CLS = "/Game/BlueprintUnitUI/WBP_BlueprintUnit.WBP_BlueprintUnit_C"
 local COST_N = 40
 -- widget names the WBP must provide (contract). Missing ones are logged once per open.
-local CONTRACT = { "Panel", "Txt_Title", "Btn_Close", "Txt_Close", "Txt_Status", "Txt_Summary", "Txt_Removes",
+local CONTRACT = { "Panel", "Txt_Title", "Btn_Close", "Txt_Close", "Txt_Status", "Txt_Summary", "Txt_Notes", "Txt_Removes",
   "Btn_Import", "Txt_Import", "Btn_Build", "Txt_Build",
   "Txt_CostHdr", "Scr_Cost", "Txt_CostEmpty", "Txt_UnitInvTitle", "Scr_UnitInv", "Txt_PlayerInvTitle", "Host_PlayerInv",
   "Pnl_ImportModal", "Txt_ImportTitle", "Btn_ImportClose", "Txt_ImportClose", "Edt_ImportJson", "Txt_ImportHint",
@@ -128,6 +127,7 @@ function M.impOpen() return S.imp == true and ok(S.w) end
 -- results area: summary, removes, cost rows back to empty
 local function resetResults()
   showText("Txt_Summary", "")
+  showText("Txt_Notes", "")
   showText("Txt_Removes", "")
   fillCost({})
 end
@@ -179,18 +179,18 @@ local function impOk()
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
     S.plan, S.text = plan, text
     txt("Txt_Status", "Blueprint: " .. (plan.name or "Ready"))
-    local lines = { Plan.summary(plan) }
-    -- notes: same text folded into "xN", at most NOTE_LINES shown (a big blueprint has hundreds, they pushed the whole window off screen)
+    showText("Txt_Summary", Plan.summary(plan))
+    -- notes panel (right, scrollable): same text folded into "xN", no cap
     local order, count = {}, {}
     for _, n in ipairs(plan.notes or {}) do
       if not count[n] then count[n] = 0; order[#order + 1] = n end
       count[n] = count[n] + 1
     end
-    for k, n in ipairs(order) do
-      if k > NOTE_LINES then lines[#lines + 1] = ("... +%d more kinds of notes"):format(#order - NOTE_LINES) break end
+    local lines = {}
+    for _, n in ipairs(order) do
       lines[#lines + 1] = count[n] > 1 and (n .. " x" .. count[n]) or n
     end
-    showText("Txt_Summary", table.concat(lines, "\n"))
+    showText("Txt_Notes", table.concat(lines, "\n"))
     showText("Txt_Removes", Plan.removes_text(plan))
     t0 = os.clock()
     local rows = Plan.cost_rows(plan)

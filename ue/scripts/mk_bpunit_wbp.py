@@ -183,7 +183,7 @@ border('Row_Body', 'Panel', BODY, (10, 10, 10, 10), h='Fill', v='Fill')
 box(U.HorizontalBox, 'Row_Cols', 'Row_Body', h='Fill', v='Fill')
 
 # LEFT ~28%: Modification Cost (rows = game WBP_ItemAmount_C added by Lua into Scr_Cost)
-box(U.VerticalBox, 'Row_CostCol', 'Row_Cols', fill=0.28, h='Fill', v='Fill', pad=(0, 0, 12, 0))
+box(U.VerticalBox, 'Row_CostCol', 'Row_Cols', fill=0.24, h='Fill', v='Fill', pad=(0, 0, 12, 0))
 header('Cost', 'Row_CostCol', 'Txt_CostHdr', u'\u25bc Modification Cost', 16)
 cap('Cost', 'Btn_CostPin', 'Txt_CostPin', 'Pin', 14, (12, 6, 12, 6))   # visual only
 border('Row_CostInset', 'Row_CostCol', INSET, (16, 12, 16, 12), fill=1.0, h='Fill', v='Fill', pad=(0, 8, 0, 0))
@@ -192,7 +192,7 @@ txt('Txt_CostEmpty', 'Row_CostStack', 'No import yet', 14, DIM, h='Fill', pad=(0
 box(U.ScrollBox, 'Scr_Cost', 'Row_CostStack', fill=1.0, h='Fill', v='Fill')
 
 # RIGHT: title bar + close X, status, Import/Build, unit grid, player grid
-box(U.VerticalBox, 'Row_Right', 'Row_Cols', fill=0.72, h='Fill', v='Fill')
+box(U.VerticalBox, 'Row_Right', 'Row_Cols', fill=0.46, h='Fill', v='Fill')
 header('Main', 'Row_Right', 'Txt_Title', 'Blueprint Unit', 20)
 cap('Main', 'Btn_Close', 'Txt_Close', 'X')
 
@@ -200,7 +200,6 @@ border('Row_Inset', 'Row_Right', INSET, (16, 12, 16, 12), fill=1.0, h='Fill', v=
 box(U.VerticalBox, 'Row_Stack', 'Row_Inset', h='Fill', v='Fill')
 txt('Txt_Status', 'Row_Stack', '', 16, WHITE, wrap=True, h='Fill', pad=(0, 0, 0, 8))
 txt('Txt_Summary', 'Row_Stack', '', 14, WHITE, wrap=True, h='Fill', pad=(0, 0, 0, 8))
-txt('Txt_Removes', 'Row_Stack', '', 12, DIM, wrap=True, h='Fill', pad=(0, 0, 0, 10)).set_visibility(U.SlateVisibility.COLLAPSED)
 box(U.HorizontalBox, 'Row_Buttons', 'Row_Stack', h='Fill', pad=(0, 4, 0, 12))
 big_btn('Btn_Import', 'Txt_Import', 'Import', 'Row_Buttons', (0, 0, 6, 0))
 big_btn('Btn_Build', 'Txt_Build', 'Build', 'Row_Buttons', (6, 0, 0, 0))
@@ -217,6 +216,13 @@ for n in ('Row_UnitInvFrame', 'Host_PlayerInv'):
     w = ELib.find_source_widget_by_name(wbp, n)
     w.set_editor_property('horizontal_alignment', U.HorizontalAlignment.H_ALIGN_LEFT)
     w.set_editor_property('vertical_alignment', U.VerticalAlignment.V_ALIGN_TOP)
+
+box(U.VerticalBox, 'Row_NotesCol', 'Row_Cols', fill=0.30, h='Fill', v='Fill', pad=(12, 0, 0, 0))
+header('Notes', 'Row_NotesCol', 'Txt_NotesHdr', 'Notes', 16)
+border('Row_NotesInset', 'Row_NotesCol', INSET, (16, 12, 16, 12), fill=1.0, h='Fill', v='Fill', pad=(0, 8, 0, 0))
+box(U.ScrollBox, 'Scr_Notes', 'Row_NotesInset', h='Fill', v='Fill')
+txt('Txt_Removes', 'Scr_Notes', '', 12, DIM, wrap=True, h='Fill', pad=(0, 0, 0, 10)).set_visibility(U.SlateVisibility.COLLAPSED)
+txt('Txt_Notes', 'Scr_Notes', '', 12, WHITE, wrap=True, h='Fill')
 
 # ---- Import modal: last child of Root overlay => on top. Pnl_ImportModal (Border, variable) = dim backdrop (blocks clicks) + centred 640x420 box.
 border('Pnl_ImportModal', 'Root', lin('000000', 0.6), None, h='Fill', v='Fill')
