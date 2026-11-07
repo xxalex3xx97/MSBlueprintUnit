@@ -302,6 +302,23 @@ local st = b:status()
 check(st.state == "done" and st.placed == 2 and st.placed == #plan2.place, ("integration: done, placed %d (%s)"):format(st.placed, st.text))
 check(st.verify == "2/2" and #W2.machines == 2, "integration: verify 2/2, 2 machines on the station")
 
+-- real read path at Main-Base size: 2246 stub machine structs -> Live.snapshot -> P.plan (identity keep, no non-table entries)
+do
+    local big, parts = {}, {}
+    for i = 0, 2245 do
+        local x, y = (i % 50) * 2 + 1, (i // 50) * 2 + 1
+        big[#big + 1] = mach(1000 + i, "BP_ConveyorBeltObject", x, y, nil)
+        parts[#parts + 1] = ('{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":%d,"Y":%d},"Height":0,"GridRotation":0}}'):format(x, y)
+    end
+    local WB = make_world(big, { slot() }, { slot(), slot() })
+    local UB = Live.find_unit(WB.block, nil)
+    local liveB = Live.snapshot(UB, F)
+    local textB = '{"Version":2,"DisplayName":"Big","Blocks":[{"Class":"/Game/Blueprints/BuildingBlocks/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}],"DefaultMachines":[' .. table.concat(parts, ",") .. ']}'
+    check(#liveB.existing == 2246 and type(liveB.existing[1]) == "table" and liveB.existing[2246].id == 3245, "snapshot: 2246 machine tables via read_machines")
+    local pB, eB = P.plan(textB, liveB, F)
+    check(pB and pB.valid and pB.counts.keep == 2246 and pB.counts.place == 0 and pB.counts.remove == 0, "plan: 2246 belts kept by identity, nothing placed/removed " .. tostring(eB))
+end
+
 check(#BAD == 0, "struct reads: only proven fields read (bad: " .. table.concat(BAD, ",") .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -342,7 +342,9 @@ local function build(text, live, F, opts)
     if type(text) ~= "string" then bail("plan: no blueprint text") end
     if type(live) ~= "table" or type(F) ~= "table" or type(F.tables) ~= "table" then bail("plan: live or factory module missing") end
     local buildables = live.buildables or {}
-    local existing = live.existing or {}
+    -- live machine entries must be tables (bpu_live builds them); any other value is dropped once here, so every loop below sees machines only
+    local existing = {}
+    for _, e in ipairs(live.existing or {}) do if type(e) == "table" then existing[#existing + 1] = e end end
     local recipes = live.recipes or {}
     local blocks = live.blocks or {}
     local notes, skipped_ug = {}, {}

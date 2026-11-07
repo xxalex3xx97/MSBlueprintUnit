@@ -202,5 +202,9 @@ do
     check("stress: time under 2 s", dt < 2.0)
 end
 
+-- live list holding a non-table entry (a number): dropped once in build; the two real machines still match
+local okn, pn = pcall(P.plan, read("belts2.json"), live({ existing = { ex(10, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 1, 1), 5, ex(11, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 3, 1) } }), F)
+check("non-table live entry: no error, both belts kept", okn and pn and pn.valid and pn.counts.keep == 2 and pn.counts.place == 0)
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
