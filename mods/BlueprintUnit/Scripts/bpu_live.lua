@@ -537,12 +537,14 @@ function L.make_io(ctx)
         if inv == nil then return nil end
         return L.read_inv(inv)
     end
-    -- one raw InventoryInteraction (exact-N restore recipe): action 0 TAKE, 1 PLACE_SINGLE, 4 DROP_CURSOR. No release after it.
-    -- the cursor restore crashed the game once (untested recipe): it only runs when Mods/BlueprintUnit/restore_on.txt exists
-    function io.restore_enabled()
+    -- restore mode: "on" when Mods/BlueprintUnit/restore_on.txt exists, "probe" when restore_probe.txt exists (5 items of
+    -- one item only), else "off". The cursor restore crashed the game once: off unless one of the files is there.
+    function io.restore_mode()
         local f = _G.io.open("Mods/BlueprintUnit/restore_on.txt", "rb")
-        if f then f:close() return true end
-        return false
+        if f then f:close() return "on" end
+        f = _G.io.open("Mods/BlueprintUnit/restore_probe.txt", "rb")
+        if f then f:close() return "probe" end
+        return "off"
     end
 
     function io.send_inv(prim, sec, slot0, action)

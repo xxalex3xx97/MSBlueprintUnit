@@ -12,9 +12,11 @@
 -- room to come back. A stall ends the run with a note. After the last command the run is done.
 -- Waits only where a later command needs an earlier one applied: staged items before the BuildInputs that charge them,
 -- a removal before a placement on the same cell, the charge before the next chunk (frees player space).
--- Restore (both flows, after the last placement): containers with plan.restore get their items from the unit by the exact-N
--- cursor recipe (drop cursor 4, TAKE 0, k x PLACE_SINGLE 1, surplus TAKE 0). Short items are skipped with a note; a Build never
--- fails because of contents. Each cycle is traced in bpu_trace.log ("restore cursor: ...").
+-- Restore (both flows, after the last placement): containers with plan.restore get their items from the unit, one step at a
+-- time: TAKE (0) a unit slot onto the cursor, then one whole-cursor TAKE (0) into the container or PLACE_SINGLE (1) batches,
+-- surplus back by TAKE (0). Every step is one command batch, then a wait until the game shows the expected change (STEP_MS,
+-- else a stall note and no more commands). Never action 3 or 4. Off by default (io.restore_mode).
+-- Short items are skipped with a note; a Build never fails because of contents. Steps are traced in bpu_trace.log.
 
 local B = {}
 
@@ -28,8 +30,10 @@ local POLL_MS = 250
 local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
-local CONT_MS = 60000        -- restore: new container ids must show within this after the last placement
-local CYCLE_MS = 2000        -- restore: one exact-N cycle must show its items in the container within this
+local CONT_MS = 60000        -- restore: new container ids and ready containers must show within this after the last placement
+local STEP_MS = 3000         -- restore: one step (its command batch) must show the expected change within this, else STALL
+local SINGLE_BATCH = 10      -- restore: PLACE_SINGLE commands per batch
+local CONT_READY_POLLS = 2   -- restore: container contents readable on this many polls in a row before the first step
 local RESTORE_MS = 300000    -- restore: whole restore phase cap
 
 local function get(m, k) return m[k] or 0 end
@@ -178,6 +182,17 @@ local function any_refund(refund)
     return false
 end
 
+-- restore: a TAKE needs an empty cursor. Returns the stall text when it is not empty, else nil.
+local function cursor_guard(cur)
+    if cur.amount ~= 0 then return "internal: cursor not empty" end
+    return nil
+end
+
+-- restore: cycle state of one container item (reset per item and per job)
+local function fresh_rs()
+    return { step = "take", cur = { item = "", amount = 0 } }
+end
+
 -- true when every refund item (refund > 0) rose by its amount since `before`. No refund items -> false.
 local function refund_arrived(refund, held, before)
     local any = false
@@ -249,7 +264,8 @@ local function new_run(plan)
     return {
         plan = plan, active = false, state = "idle", text = "", stage = 0, flow = "legacy",
         cids_before = {}, cplaced = {}, base = "",   -- restore: container ids before the Build, placed containers in order, text of the Build part
-        rjobs = {}, rj = 1, ri = 1, rem = nil, rnotes = {}, rseen = {}, rcount = 0, rcont = 0, restore_on = false, t_restore = 0, cyc = nil,
+        rjobs = {}, jobs_set = false, cready = 0, rj = 1, ri = 1, rs = {}, rnotes = {}, rseen = {}, rcount = 0, rcont = 0,
+        restore_on = false, probe = false, probe_started = false, t_restore = 0,
         queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
@@ -269,7 +285,8 @@ end
 --   io.read_inv('player'|'unit') -> { slots = { {item=,amount=,max=} | {item=""} }, id=, ok= }
 --   io.unit_ids() -> { unit_id=, player_id= }     io.creative() -> bool     io.costs(place) -> { cost map per machine }
 --   io.send_remove(id) | io.send_move(prim_id, sec_id, slot0, action) | io.send_place(machine) | io.send_changes(chg)
---   restore only: io.send_inv(prim, sec, slot0, action) (one raw command: 0 TAKE, 1 PLACE_SINGLE, 4 DROP_CURSOR) | io.container_ids() -> ids
+--   restore only: io.send_inv(prim, sec, slot0, action) (one raw command: 0 TAKE, 1 PLACE_SINGLE) | io.container_ids() -> ids
+--   io.restore_mode() -> "on" | "probe" | "off" (optional; absent = "on")
 --   io.remember(cell_key, list {name,count}) (optional, session memory of removed containers) | io.read_machine_inv(id) (contents)
 --   io.now() -> ms
 --   io.note_build(placed, removed) optional: run end with machines placed (plan entries) / removed (live ids)
@@ -398,12 +415,13 @@ function B.new(io)
             end
         end
         if want == 0 then return end_run(base) end
-        if io.restore_enabled and not io.restore_enabled() then
-            R.restore_on = true
-            R.rnotes[#R.rnotes + 1] = "container contents stay in the unit (restore is off: create Mods/BlueprintUnit/restore_on.txt to test it)"
+        local mode = io.restore_mode and io.restore_mode() or "on"
+        R.restore_on = true
+        if mode == "off" then
+            R.rnotes[#R.rnotes + 1] = "restore is off: create Mods/BlueprintUnit/restore_on.txt (or restore_probe.txt to test 5 items)"
             return end_run(base)
         end
-        R.restore_on = true
+        R.probe = (mode == "probe")
         R.stage = 12
         R.t_stage = now
         R.t_next = now + POLL_MS
@@ -776,18 +794,53 @@ function B.new(io)
     end
 
     -- ===== restore container contents (after the last placement, both flows) =====
+    -- Stepwise and state-verified: one command batch per step, then a wait until the game shows the step's change.
+    -- Only TAKE (0) from a unit slot, whole-cursor TAKE (0) or PLACE_SINGLE (1) into a container, surplus back by TAKE (0).
+    -- Never action 3 or 4. R.rs = { step, item, need, cur = {item, amount} (what the cursor may hold), src, dest, room,
+    -- before (unit slot), cbefore (container item total), c (taken), n_place, singles_left, last_b, target, full, t }.
+    -- step: take|place|singles|back (send, stage 13) and take_wait|place_wait|singles_wait|back_wait (wait, stage 14).
+    local SURPLUS_ACTION = 0   -- put back: TAKE with the cursor holding the surplus, into the same unit slot
+
     -- stage 12: new container ids (not in cids_before, ascending) are matched to the placed containers in placement order.
+    -- Probe: only the first item of the first container with contents, at most 5. Ready = contents readable on CONT_READY_POLLS polls in a row.
     local function cont_wait(now)
-        local ids = io.container_ids and io.container_ids() or {}
-        local new = {}
-        for _, id in ipairs(ids) do if not R.cids_before[id] then new[#new + 1] = id end end
-        table.sort(new)
-        if #new == #R.cplaced then
-            trace("restore: new container ids " .. (#new > 0 and table.concat(new, ",") or "none") .. " for the placed containers in order")
-            for i, pl in ipairs(R.cplaced) do
-                if pl.restore and #pl.restore > 0 then R.rjobs[#R.rjobs + 1] = { id = new[i], items = pl.restore } end
+        if not R.jobs_set then
+            local ids = io.container_ids and io.container_ids() or {}
+            local new = {}
+            for _, id in ipairs(ids) do if not R.cids_before[id] then new[#new + 1] = id end end
+            table.sort(new)
+            if #new ~= #R.cplaced then
+                R.cready = 0
+                if now - R.t_stage >= CONT_MS then
+                    R.rnotes[#R.rnotes + 1] = ("restore stalled: container ids not found (new %d, placed %d)"):format(#new, #R.cplaced)
+                    return end_run(R.base)
+                end
+                R.t_next = now + POLL_MS
+                return
             end
-            R.rj, R.ri, R.rem = 1, 1, nil
+            trace("restore: new container ids " .. (#new > 0 and table.concat(new, ",") or "none") .. " for the placed containers in order")
+            local jobs = {}
+            for i, pl in ipairs(R.cplaced) do
+                if pl.restore and #pl.restore > 0 then jobs[#jobs + 1] = { id = new[i], items = pl.restore } end
+            end
+            if R.probe then
+                if #jobs == 0 then
+                    R.rnotes[#R.rnotes + 1] = "probe: no container with contents to restore"
+                    return end_run(R.base)
+                end
+                local first = jobs[1].items[1]
+                jobs = { { id = jobs[1].id, items = { { name = first.name, count = math.min(5, first.count) } } } }
+            end
+            R.rjobs, R.jobs_set = jobs, true
+        end
+        local ready = true
+        for _, job in ipairs(R.rjobs) do
+            local inv = io.read_machine_inv and io.read_machine_inv(job.id)
+            if not (inv and inv.ok and #(inv.slots or {}) > 0) then ready = false end
+        end
+        R.cready = ready and R.cready + 1 or 0
+        if R.cready >= CONT_READY_POLLS then
+            R.rj, R.ri, R.rs = 1, 1, fresh_rs()
             R.t_restore = now
             R.stage = 13
             R.t_next = now
@@ -795,117 +848,222 @@ function B.new(io)
             return
         end
         if now - R.t_stage >= CONT_MS then
-            R.rnotes[#R.rnotes + 1] = ("restore stalled: container ids not found (new %d, placed %d)"):format(#new, #R.cplaced)
+            R.rnotes[#R.rnotes + 1] = ("restore stalled: container ids not found (new %d, placed %d)"):format(#R.rjobs, #R.cplaced)
             return end_run(R.base)
         end
         R.t_next = now + POLL_MS
     end
 
-    local function next_item() R.ri = R.ri + 1; R.rem = nil end
-    local function next_job() R.rj = R.rj + 1; R.ri = 1; R.rem = nil end
+    local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
+    local function next_item() R.ri = R.ri + 1; R.rs = fresh_rs() end
+    local function next_job() R.rj = R.rj + 1; R.ri = 1; R.rs = fresh_rs() end
+    -- end of the restore phase (probe: its summary note first)
+    local function restore_end()
+        local j = R.rjobs[1]
+        if R.probe and j then
+            rs_note(("probe: restored %d of %s into container id %s"):format(R.rcount, shortname(j.items[1].name), tostring(j.id)))
+        end
+        end_run(R.base)
+    end
+    -- rcount / rcont (containers that got items)
+    local function delivered(n)
+        R.rcount = R.rcount + n
+        if not R.rseen[R.rj] then R.rseen[R.rj] = true; R.rcont = R.rcont + 1 end
+    end
+    local function slot_amount(slots, i) return slots[i] and slots[i].amount or 0 end
+    local function slots_text(slots)
+        local parts = {}
+        for _, s in ipairs(slots) do
+            local item, amount = s.item or "", s.amount or 0
+            parts[#parts + 1] = (item ~= "" and amount > 0) and (shortname(item) .. ":" .. amount) or "-"
+        end
+        return table.concat(parts, " ")
+    end
+    -- probe: slot lists of the unit and the container
+    local function probe_trace(us, cslots)
+        trace(("probe: unit=[%s] cont=[%s]"):format(slots_text(us), slots_text(cslots)))
+    end
+    -- one step line: step, item, cursor state before the step, slots, command (action x count), expected change
+    local function step_trace(step, rs, action, count, kind, n, now)
+        trace(("restore step: %s item=%s need=%d cur=%d src=%d dest=%d cmd=%dx%d expect=%s=%d t=%d"):format(step, rs.item,
+            rs.need, rs.cur.amount, (rs.src or 0) - 1, (rs.dest or 0) - 1, action, count, kind, n, now))
+    end
+    -- the cycle of one item ends: next item when all of it is placed, else the next cycle (take) from the unit
+    local function cycle_done()
+        if R.rs.need <= 0 then next_item() else R.rs.step = "take" end
+    end
 
-    -- stage 13: one exact-N cycle per call. Unit short of an item (at the start of that item) -> skipped with a note.
-    -- Cycle: DROP_CURSOR (4), TAKE unit slot (0), k x PLACE_SINGLE container slot (1), surplus TAKE back to the unit slot (0).
-    -- No action 3 (release) anywhere. Stage 14 checks the container.
-    local function restore_next(now)
+    -- stage 13: send the next step of the current item (one command batch). Stage 14 waits for it.
+    local function restore_send(now)
         if now - R.t_restore > RESTORE_MS then
-            R.rnotes[#R.rnotes + 1] = "restore stalled: timeout after 300 s"
-            return end_run(R.base)
+            rs_note("restore stalled: timeout after 300 s")
+            return restore_end()
         end
         local job = R.rjobs[R.rj]
-        if not job then return end_run(R.base) end
+        if not job then return restore_end() end
         local it = job.items[R.ri]
         if not it then next_job(); R.t_next = now; return end
+        local rs = R.rs
         local ps, us, err = read_both()
         if not ps then return fail(err) end
-        local have = get(totals(us), it.name)
-        if R.rem == nil then
+        if rs.need == nil then
+            -- an item the unit lacks at its start is skipped with a note (nothing sent)
+            local have = get(totals(us), it.name)
             if have < it.count then
-                R.rnotes[#R.rnotes + 1] = ("%s x%d not restored (unit has %d)"):format(shortname(it.name), it.count, have)
+                rs_note(("%s x%d not restored (unit has %d)"):format(shortname(it.name), it.count, have))
                 next_item(); R.t_next = now; return
             end
-            R.rem = it.count
+            rs.need, rs.item = it.count, it.name
         end
-        if R.rem <= 0 then next_item(); R.t_next = now; return end
-        local map, _, cinv = contents_of(job)
-        if not map then
-            R.rnotes[#R.rnotes + 1] = ("container id %s cannot be read"):format(tostring(job.id))
-            next_job(); R.t_next = now; return
+        -- a cycle starts only while items are still needed (a singles batch can use up the need before the put-back)
+        if rs.step == "take" and rs.need <= 0 then next_item(); R.t_next = now; return end
+
+        if rs.step == "take" then
+            local map, _, cinv = contents_of(job)
+            if not map then
+                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+                next_job(); R.t_next = now; return
+            end
+            local cn = norm(cinv)
+            local cmax = capmap(io, cn, us)
+            local dest
+            for i, s in ipairs(cn) do
+                if s.item == it.name and s.amount > 0 and s.amount < cmax[it.name] then dest = i break end
+            end
+            if not dest then
+                for i, s in ipairs(cn) do if s.amount <= 0 then dest = i break end end
+            end
+            if not dest then
+                rs_note(("container id %s full"):format(tostring(job.id)))
+                next_job(); R.t_next = now; return
+            end
+            local room = cmax[it.name] - ((cn[dest].item == it.name) and cn[dest].amount or 0)
+            local src
+            for i, s in ipairs(us) do if s.item == it.name and s.amount > 0 then src = i break end end
+            if not src then
+                rs_note(("%s x%d not restored (unit has %d)"):format(shortname(it.name), rs.need, get(totals(us), it.name)))
+                next_item(); R.t_next = now; return
+            end
+            local expect = math.min(us[src].amount, capmap(io, us, cn)[it.name])
+            local guard = cursor_guard(rs.cur)
+            if guard then rs_note(guard); return restore_end() end
+            if R.probe and not R.probe_started then
+                R.probe_started = true
+                probe_trace(us, cinv.slots)
+            end
+            rs.src, rs.dest, rs.room = src, dest, room
+            rs.before, rs.cbefore = us[src].amount, get(map, it.name)
+            step_trace("take", rs, 0, expect, "unit", rs.before - expect, now)
+            local taken = io.send_inv(R.unit_inv, 0, src - 1, 0)
+            trace(("restore cursor: take unit slot0=%d item=%s expect=%d sent=%s"):format(src - 1, it.name, expect, tostring(taken)))
+            if not taken then
+                rs_note("restore stalled: take refused")
+                return restore_end()
+            end
+            rs.cur = { item = it.name, amount = expect }   -- the cursor may hold this much after the take
+            rs.step, rs.t = "take_wait", now
+            R.stage = 14
+            R.t_next = now + POLL_MS
+            set_status("working", ("restoring %s into container id %s"):format(shortname(it.name), tostring(job.id)))
+            return
         end
-        local cn = norm(cinv)
-        local cmax = capmap(io, cn, us)
-        local dest
-        for i, s in ipairs(cn) do
-            if s.item == it.name and s.amount > 0 and s.amount < cmax[it.name] then dest = i break end
+
+        if rs.step == "place" then
+            step_trace("place", rs, 0, rs.c, "cont", rs.cbefore + rs.c, now)
+            local sent = io.send_inv(job.id, 0, rs.dest - 1, 0)
+            trace(("restore cursor: place whole %d into container id=%s slot0=%d sent=%s"):format(rs.c, tostring(job.id), rs.dest - 1, tostring(sent)))
+            rs.step, rs.t = "place_wait", now
+        elseif rs.step == "singles" then
+            local b = math.min(SINGLE_BATCH, rs.singles_left)
+            step_trace("singles", rs, 1, b, "cont", rs.cbefore + b, now)
+            local placed = 0
+            for _ = 1, b do if io.send_inv(job.id, 0, rs.dest - 1, 1) then placed = placed + 1 end end
+            trace(("restore cursor: k=%d place_single into container id=%s slot0=%d sent=%d"):format(b, tostring(job.id), rs.dest - 1, placed))
+            rs.last_b = b
+            rs.step, rs.t = "singles_wait", now
+        elseif rs.step == "back" then
+            rs.target = rs.before - rs.c + rs.cur.amount
+            step_trace("back", rs, SURPLUS_ACTION, rs.cur.amount, "unit", rs.target, now)
+            local back = io.send_inv(R.unit_inv, 0, rs.src - 1, SURPLUS_ACTION)
+            trace(("restore cursor: surplus=%d put back to unit slot0=%d sent=%s"):format(rs.cur.amount, rs.src - 1, tostring(back)))
+            rs.step, rs.t = "back_wait", now
+        else
+            rs_note("internal: restore step " .. tostring(rs.step))
+            return restore_end()
         end
-        if not dest then
-            for i, s in ipairs(cn) do if s.amount <= 0 then dest = i break end end
-        end
-        if not dest then
-            R.rnotes[#R.rnotes + 1] = ("container id %s full"):format(tostring(job.id))
-            next_job(); R.t_next = now; return
-        end
-        local room = cmax[it.name] - ((cn[dest].item == it.name) and cn[dest].amount or 0)
-        local src
-        for i, s in ipairs(us) do if s.item == it.name and s.amount > 0 then src = i break end end
-        if not src then
-            R.rnotes[#R.rnotes + 1] = ("%s x%d not restored (unit has %d)"):format(shortname(it.name), it.count, have)
-            next_item(); R.t_next = now; return
-        end
-        local expect = math.min(us[src].amount, capmap(io, us, cn)[it.name])
-        local k = math.min(R.rem, expect, room)
-        if k <= 0 then
-            R.rnotes[#R.rnotes + 1] = ("restore stalled: no room in container id %s"):format(tostring(job.id))
-            return end_run(R.base)
-        end
-        local dropped = io.send_inv(R.player_inv, 0, 0, 4)
-        trace(("restore cursor: drop cursor (action 4) sent=%s"):format(tostring(dropped)))
-        local taken = io.send_inv(R.unit_inv, 0, src - 1, 0)
-        trace(("restore cursor: take unit slot0=%d item=%s expect=%d sent=%s"):format(src - 1, it.name, expect, tostring(taken)))
-        if not taken then
-            R.rnotes[#R.rnotes + 1] = "restore stalled: take refused"
-            return end_run(R.base)
-        end
-        local placed = 0
-        for _ = 1, k do if io.send_inv(job.id, 0, dest - 1, 1) then placed = placed + 1 end end
-        trace(("restore cursor: k=%d place_single into container id=%s slot0=%d sent=%d"):format(k, tostring(job.id), dest - 1, placed))
-        local surplus = expect - k
-        if surplus > 0 then
-            local back = io.send_inv(R.unit_inv, 0, src - 1, 0)
-            trace(("restore cursor: surplus=%d put back to unit slot0=%d sent=%s"):format(surplus, src - 1, tostring(back)))
-        end
-        R.cyc = { before = get(map, it.name), k = placed }
         R.stage = 14
-        R.t_stage = now
         R.t_next = now + POLL_MS
     end
 
-    -- stage 14: the container must show the cycle's items (CYCLE_MS). None -> restore stalled, stop. Short -> full (or cursor short), next container.
-    local function restore_verify(now)
+    -- stage 14: wait for the step's change, polled every POLL_MS. Not seen within STEP_MS -> STALL note, nothing more sent.
+    local function restore_wait(now)
+        if now - R.t_restore > RESTORE_MS then
+            rs_note("restore stalled: timeout after 300 s")
+            return restore_end()
+        end
         local job = R.rjobs[R.rj]
-        local it = job and job.items[R.ri]
-        if not it then return end_run(R.base) end
-        local map = contents_of(job)
+        if not job then return restore_end() end
+        local rs = R.rs
+        local ps, us, err = read_both()
+        if not ps then return fail(err) end
+        local map, _, cinv = contents_of(job)
         if not map then
-            R.rnotes[#R.rnotes + 1] = ("container id %s cannot be read"):format(tostring(job.id))
-            next_job(); R.stage = 13; R.t_next = now; return
+            rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+            return restore_end()
         end
-        local delta = get(map, it.name) - R.cyc.before
-        if delta < R.cyc.k and now - R.t_stage < CYCLE_MS then R.t_next = now + POLL_MS; return end
-        trace(("restore cursor: container id=%s delta=%d (sent %d)"):format(tostring(job.id), delta, R.cyc.k))
-        if delta <= 0 then
-            R.rnotes[#R.rnotes + 1] = ("restore stalled: container id %s took no items"):format(tostring(job.id))
-            return end_run(R.base)
+        local cont_now, slot_now = get(map, rs.item), slot_amount(us, rs.src)
+        local done
+        if rs.step == "take_wait" then done = slot_now < rs.before
+        elseif rs.step == "place_wait" then done = cont_now >= rs.cbefore + rs.c
+        elseif rs.step == "singles_wait" then done = cont_now >= rs.cbefore + rs.last_b
+        elseif rs.step == "back_wait" then done = slot_now >= rs.target
+        else
+            rs_note("internal: restore step " .. tostring(rs.step))
+            return restore_end()
         end
-        if not R.rseen[R.rj] then R.rseen[R.rj] = true; R.rcont = R.rcont + 1 end
-        R.rcount = R.rcount + delta
-        R.rem = R.rem - delta
+        if not done then
+            if now - rs.t >= STEP_MS then
+                trace(("restore step: STALL %s after %d ms"):format(rs.step, now - rs.t))
+                rs_note(("restore stalled at %s (container id %s, %s); cursor may hold %d %s, take it by hand"):format(
+                    rs.step, tostring(job.id), shortname(rs.item), rs.cur.amount, shortname(rs.item)))
+                return restore_end()
+            end
+            R.t_next = now + POLL_MS
+            return
+        end
+        trace(("restore step: ok %s unit=%d cont=%d"):format(rs.step:match("^(%a+)_wait$"), get(totals(us), rs.item), cont_now))
+        if rs.step == "take_wait" then
+            rs.c = rs.before - slot_now   -- > 0: the unit slot decreased
+            rs.cur = { item = rs.item, amount = rs.c }
+            rs.n_place = math.min(rs.need, rs.c, rs.room)
+            if rs.n_place == rs.c then rs.step = "place"
+            elseif rs.n_place > 0 then rs.step, rs.singles_left = "singles", rs.n_place
+            else rs.step, rs.full = "back", true end
+        elseif rs.step == "place_wait" then
+            rs.need = rs.need - rs.c
+            delivered(rs.c)
+            rs.cur = { item = "", amount = 0 }
+            cycle_done()
+        elseif rs.step == "singles_wait" then
+            local b = rs.last_b
+            rs.singles_left = rs.singles_left - b
+            rs.cur.amount = rs.cur.amount - b
+            rs.need = rs.need - b
+            rs.cbefore = rs.cbefore + b
+            delivered(b)
+            rs.step = rs.singles_left > 0 and "singles" or "back"
+        elseif rs.step == "back_wait" then
+            rs.cur = { item = "", amount = 0 }
+            if rs.full then
+                rs_note(("container id %s full"):format(tostring(job.id)))
+                next_job()
+            else
+                cycle_done()
+            end
+        end
+        if R.probe then probe_trace(us, cinv.slots) end
         R.stage = 13
         R.t_next = now
-        if delta < R.cyc.k then
-            R.rnotes[#R.rnotes + 1] = ("container id %s full or cursor short (took %d of %d)"):format(tostring(job.id), delta, R.cyc.k)
-            next_job()
-        end
     end
 
     local builder = {}
@@ -1027,8 +1185,8 @@ function B.new(io)
         local s = R.stage
         if s == 11 then send_queue(now)
         elseif s == 12 then cont_wait(now)
-        elseif s == 13 then restore_next(now)
-        elseif s == 14 then restore_verify(now)
+        elseif s == 13 then restore_send(now)
+        elseif s == 14 then restore_wait(now)
         elseif s == 2 then arrival_wait(now)
         elseif s == 4 or s == 9 then chunk_start(now)
         elseif s == 5 then staging_wait(now)
@@ -1063,7 +1221,7 @@ end
 B.pure = {
     totals = totals, maxes = maxes, list = list, shortfall = shortfall, total_check = total_check,
     stage_moves = stage_moves, refund_fit = refund_fit, room_ok = room_ok, chunk_len = chunk_len,
-    overlaps = overlaps,
+    overlaps = overlaps, cursor_guard = cursor_guard,
 }
 
 return B
