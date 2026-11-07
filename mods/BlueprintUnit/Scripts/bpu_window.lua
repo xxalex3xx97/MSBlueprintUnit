@@ -7,6 +7,7 @@ local Live = require("bpu_live")
 local Plan = require("bpu_plan")
 local Build = require("bpu_build")
 
+local NOTE_LINES = 8
 local M = {}
 local MSCore, F, native   -- set by M.init
 
@@ -179,7 +180,16 @@ local function impOk()
     S.plan, S.text = plan, text
     txt("Txt_Status", "Blueprint: " .. (plan.name or "Ready"))
     local lines = { Plan.summary(plan) }
-    for _, n in ipairs(plan.notes or {}) do lines[#lines + 1] = n end
+    -- notes: same text folded into "xN", at most NOTE_LINES shown (a big blueprint has hundreds, they pushed the whole window off screen)
+    local order, count = {}, {}
+    for _, n in ipairs(plan.notes or {}) do
+      if not count[n] then count[n] = 0; order[#order + 1] = n end
+      count[n] = count[n] + 1
+    end
+    for k, n in ipairs(order) do
+      if k > NOTE_LINES then lines[#lines + 1] = ("... +%d more kinds of notes"):format(#order - NOTE_LINES) break end
+      lines[#lines + 1] = count[n] > 1 and (n .. " x" .. count[n]) or n
+    end
     showText("Txt_Summary", table.concat(lines, "\n"))
     showText("Txt_Removes", Plan.removes_text(plan))
     t0 = os.clock()
