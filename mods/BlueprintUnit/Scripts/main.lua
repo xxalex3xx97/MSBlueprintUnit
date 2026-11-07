@@ -109,22 +109,65 @@ local PAUSE_POLL_MS = { 50, 150, 300 }
 local pauseHooked = false
 local esc = nil
 
-local function closePause(w, label)
-  if not ok(w) then print(TAG .. "pause menu suppress: widget invalid\n") return false end
-  local okC, errC = pcall(function() w:CloseSelf() end)
-  local okH, errH = false, nil
-  if not okC then
-    local pc = FindFirstOf("DMSPlayerController")
-    okH, errH = pcall(function() pc:HideWidget(w, false) end)
+local LIB = "/Script/UMG.Default__WidgetBlueprintLibrary"
+
+-- explicit input restore (as MSCore.wbp.close teardown). Skipped while a pause menu is still on screen.
+local function restoreInput(label)
+  local pm = FindFirstOf("WBP_PauseMenu_C")
+  if ok(pm) then
+    local s, inV = pcall(function() return pm:IsInViewport() end)
+    if not s or inV == true then print(TAG .. "input restore skipped (" .. label .. "): pause menu still open\n") return end
   end
-  local how = okC and "CloseSelf" or (okH and "HideWidget" or "failed")
-  -- what the game reports after the close (APlayerController:IsPaused may not exist: logged as n/a)
   local pc = FindFirstOf("DMSPlayerController")
-  local okP, paused = false, nil
-  if ok(pc) then okP, paused = pcall(function() return pc:IsPaused() end) end
-  print(TAG .. "pause menu suppressed (" .. label .. ") via " .. how .. (okC and "" or (" err=" .. tostring(errC)))
-    .. " paused=" .. tostring(okP and paused or "n/a") .. "\n")
-  return okC or okH
+  if not ok(pc) then print(TAG .. "input restore skipped (" .. label .. "): controller invalid\n") return end
+  local r = {}
+  local function step(name, f)
+    local s, e = pcall(f)
+    r[#r + 1] = name .. "=" .. (s and "ok" or ("err " .. tostring(e)))
+  end
+  step("look", function() pc:SetIgnoreLookInput(false) end)
+  step("move", function() pc:SetIgnoreMoveInput(false) end)
+  step("mouse", function() pc.bShowMouseCursor = false end)
+  step("gameOnly", function() StaticFindObject(LIB):SetInputMode_GameOnly(pc, false) end)
+  -- movement gate: only when readable and currently false
+  local okR, cie = pcall(function() return pc.CharacterInputEnabled end)
+  if okR and cie == false then
+    step("charInput", function() pc.CharacterInputEnabled = true end)
+  else
+    r[#r + 1] = "charInput=" .. (okR and tostring(cie) or "unreadable")
+  end
+  local okP, paused = pcall(function() return pc:IsPaused() end)
+  print(TAG .. "input restore (" .. label .. "): " .. table.concat(r, " ") .. " paused=" .. tostring(okP and paused or "n/a") .. "\n")
+end
+
+-- game's own close first (CloseWidgetOrPause = second ESC press: closes the tracked window or pause menu, restores input).
+-- Fallback only when that call is missing/errors: pause widget CloseSelf, then HideWidget. Input restore 150 ms later.
+local function closePause(w, label)
+  local pc = FindFirstOf("DMSPlayerController")
+  local how, why = nil, nil
+  if ok(pc) then
+    local s, e = pcall(function() pc:CloseWidgetOrPause() end)
+    if s then how = "CloseWidgetOrPause" else why = "CloseWidgetOrPause err=" .. tostring(e) end
+  else
+    why = "controller invalid"
+  end
+  if not how then
+    if not ok(w) then print(TAG .. "pause menu close: widget invalid (" .. label .. ") " .. tostring(why) .. "\n") return false end
+    local s, e = pcall(function() w:CloseSelf() end)
+    if s then
+      how = "CloseSelf"
+    else
+      why = tostring(why) .. " CloseSelf err=" .. tostring(e)
+      if ok(pc) then
+        local s2, e2 = pcall(function() pc:HideWidget(w, false) end)
+        if s2 then how = "HideWidget" else why = why .. " HideWidget err=" .. tostring(e2) end
+      end
+    end
+  end
+  print(TAG .. "pause menu closed (" .. label .. ") via " .. tostring(how or "FAILED") .. (how and "" or (" " .. tostring(why))) .. "\n")
+  if not how then return false end
+  ExecuteWithDelay(150, function() ExecuteInGameThread(function() pcall(restoreInput, label) end) end)
+  return true
 end
 
 -- game thread. Closes the pause menu when it is found on screen. true = handled.
