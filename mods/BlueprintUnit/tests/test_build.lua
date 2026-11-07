@@ -86,6 +86,9 @@ local function fake(spec)
     end
 
     local io = {}
+    local redirect = type(spec.redirect) == "string" and spec.redirect:sub(1, 2) == "on"
+    if spec.redirect ~= nil then io.redirect_status = function() return spec.redirect end end
+    f.order = {}   -- sent commands in order: "rm:<id>" / "pl:<x>"
     function io.now() return f.clock end
     function io.creative() return f.creative end
     function io.scan(station)
@@ -122,7 +125,16 @@ local function fake(spec)
         for i, m in ipairs(f.station) do
             if m.id == id then
                 table.remove(f.station, i)
-                for item, n in pairs(f.refund_of[id] or {}) do put(f.inv.player.slots, item, n, mx(item)) end
+                f.order[#f.order + 1] = "rm:" .. id
+                f.last_rm_at = f.clock
+                for item, n in pairs(f.refund_of[id] or {}) do
+                    if redirect then
+                        local left = put(f.inv.unit.slots, item, n, mx(item))
+                        if left > 0 then put(f.inv.player.slots, item, left, mx(item)) end
+                    else
+                        put(f.inv.player.slots, item, n, mx(item))
+                    end
+                end
                 return true
             end
         end
@@ -148,7 +160,15 @@ local function fake(spec)
     function io.send_place(m)
         f.calls.pl = f.calls.pl + 1
         local cost = m.cost or {}
-        if not f.creative then
+        f.order[#f.order + 1] = "pl:" .. m.x
+        f.place_gap = f.place_gap or (f.last_rm_at and f.clock - f.last_rm_at)
+        if redirect and not f.creative then   -- charge: unit first, player second
+            for item, n in pairs(cost) do
+                local t = math.min(have(f.inv.unit.slots, item), n)
+                take(f.inv.unit.slots, item, t)
+                take(f.inv.player.slots, item, n - t)
+            end
+        elseif not f.creative then
             for item, n in pairs(cost) do if have(f.inv.player.slots, item) < n then return false end end
             if not f.no_charge then for item, n in pairs(cost) do take(f.inv.player.slots, item, n) end end
         end
@@ -827,6 +847,149 @@ do
     local st = run(b, f, 4000)
     check(st.state == "error" and f.calls.rm == 0 and #f.moves == 0 and st.text ==
           "the unit inventory is full, empty it and Build again (container id 8 holds items)", "container: unit full -> stall before moves (" .. st.text .. ")")
+end
+
+-- ===== redirect flow (io.redirect_status 'on...'): everything sent, FIFO, capped per tick, no waits =====
+do
+    local on = "on: redirect=on probe_log=off groups=yes"
+    local function ids_station(n)
+        local st = {}
+        for i = 1, n do st[i] = { id = i, bcls = "BP_OLD", x = 100 + i, y = 0 } end
+        return st
+    end
+    local function removed_of(n, refund)
+        local r = {}
+        for i = 1, n do r[i] = { id = i, bcls = "BP_OLD", x = 100 + i, y = 0, refund = refund } end
+        return r
+    end
+    local function places(n)
+        local p = {}
+        for i = 1, n do p[i] = M("BP_NEW", 1000 + i, 0, { ITEM_Plate = 1 }) end
+        return p
+    end
+
+    -- 400 removals + 300 placements: 150 per tick, FIFO (all removals first), no wait, done after the last send
+    local f = fake({ redirect = on, player = inv({}, 4), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 50),
+                       S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 50) }, 120), station = ids_station(400) })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = places(300), need = { ITEM_Plate = 300 }, removed = removed_of(400, {}) }), {})
+    check(ok and #f.order == 150 and b:status().state == "working", "redirect: start sends exactly 150 commands (cap), still working (" .. #f.order .. ")")
+    local ticks = 0
+    while b:status().state == "working" and ticks < 50 do
+        f.clock = f.clock + 1
+        b:tick(f.clock)
+        ticks = ticks + 1
+    end
+    local st = b:status()
+    local fifo = true
+    for i, c in ipairs(f.order) do
+        local want = i <= 400 and ("rm:" .. i) or ("pl:" .. (1000 + i - 400))
+        if c ~= want then fifo = false end
+    end
+    check(st.state == "done" and #f.order == 700 and fifo, "redirect: 700 commands in FIFO order, removals first")
+    check(ticks == 4, "redirect: 700 commands = start + 4 ticks, 1 ms apart (no waits) (" .. ticks .. ")")
+    check(st.text == "sent: placed 300, removed 400 (refund goes into the unit; the game updates its blueprint view in about 30 s)",
+          "redirect: done text (" .. st.text .. ")")
+    check(f.calls.mv == 0 and f.calls.ch == 1, "redirect: no inventory moves, changes sent once")
+end
+
+-- removal refund goes to the unit, charge from the unit: no staging, no moveout, no waits
+do
+    local f = fake({ redirect = "on: redirect=on probe_log=off groups=yes", player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5) }, 3),
+                     station = { { id = 7, bcls = "BP_OLD", x = 9, y = 0 } }, refund_of = { [7] = { ITEM_Gear = 2 } } })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_NEW", 5, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                                     refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 9, y = 0, refund = { ITEM_Gear = 2 } } } }), {})
+    local st = b:status()
+    check(ok and st.state == "done" and f.calls.rm == 1 and f.calls.pl == 1 and f.calls.mv == 0,
+          "redirect: removal+placement both sent inside start, done at once, no moves (" .. st.text .. ")")
+    check(f.inv.unit.slots[2].item == "ITEM_Gear" and f.inv.unit.slots[1].amount == 4 and f.inv.player.slots[1].item == "",
+          "redirect: refund in the unit, charge taken from the unit")
+    check(st.text == "sent: placed 1, removed 1 (refund goes into the unit; the game updates its blueprint view in about 30 s)", "redirect: done text, single")
+end
+
+-- overlap: the placement waits SETTLE_MS (500) from the last removal, once
+do
+    local f = fake({ redirect = "on", player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5) }, 3),
+                     station = { { id = 7, bcls = "BP_OLD", x = 1, y = 0 } } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_NEW", 1, 0, { ITEM_Plate = 1 }), M("BP_NEW", 2, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 2 },
+                          removed = { { id = 7, bcls = "BP_OLD", x = 1, y = 0, refund = {} } } }), {})
+    check(f.calls.rm == 1 and f.calls.pl == 0 and b:status().state == "working", "redirect overlap: removal sent, placement held back")
+    local n = 0
+    while b:status().state == "working" and n < 40 do f.clock = f.clock + 100; b:tick(f.clock); n = n + 1 end
+    check(b:status().state == "done" and f.calls.pl == 2 and f.place_gap >= 500 and f.place_gap < 700,
+          "redirect overlap: placements after ~500 ms settle (" .. tostring(f.place_gap) .. " ms)")
+end
+
+-- total check still refuses before any command; unit-full pre-check
+do
+    local f = fake({ redirect = "on", player = inv({}, 3), unit = inv({}, 3), station = { { id = 1, bcls = "BP_OLD", x = 101, y = 0 } } })
+    local b = B.new(f.io)
+    local ok, msg = b:start(plan_for(f, { place = { M("BP_NEW", 1, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                                          removed = { { id = 1, bcls = "BP_OLD", x = 101, y = 0, refund = {} } } }), {})
+    check(not ok and msg:find("not enough items: Plate x1", 1, true) and f.calls.rm == 0, "redirect: total check refuses, nothing sent")
+
+    local function unit_case(unit, raw, item_max_nil, amount)
+        local g = fake({ redirect = "on", player = inv({}, 2), unit = unit, raw = raw,
+                         station = { { id = 1, bcls = "BP_OLD", x = 101, y = 0 } }, refund_of = { [1] = { ITEM_Gear = amount } } })
+        if item_max_nil then g.io.item_max = function() return nil end end
+        local okk, m = B.new(g.io):start(plan_for(g, { refund = { ITEM_Gear = amount },
+            removed = { { id = 1, bcls = "BP_OLD", x = 101, y = 0, refund = { ITEM_Gear = amount } } } }), {})
+        return okk, m, g
+    end
+    local ok2, msg2, g2 = unit_case(inv({ S("ITEM_Gear", 50), S("ITEM_Gear", 50) }, 2), { ITEM_Gear = 50 }, false, 10)
+    check(not ok2 and msg2 == "error: the unit inventory is full, empty it and Build again" and g2.calls.rm == 0,
+          "redirect: unit cannot hold the refund -> unit full, nothing sent (" .. tostring(msg2) .. ")")
+    local ok3, _, g3 = unit_case(inv({ S("ITEM_Gear", 50) }, 2), { ITEM_Gear = 50 }, false, 10)
+    check(ok3 and g3.calls.rm == 1, "redirect: unit has room -> sent")
+    local ok4 = unit_case(inv({ S("ITEM_Gear", 50) }, 2), nil, true, 10000)
+    check(ok4, "redirect: unknown item max is optimistic")
+end
+
+-- refused removal ends the run with an error, no placement sent
+do
+    local f = fake({ redirect = "on", player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5) }, 3), station = {} })
+    local b = B.new(f.io)
+    local ok, msg = b:start(plan_for(f, { place = { M("BP_NEW", 1, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                                          removed = { { id = 9, bcls = "BP_OLD", x = 3, y = 0, refund = {} } } }), {})
+    check(not ok and msg:find("removal refused", 1, true) and f.calls.pl == 0, "redirect: refused removal -> error, nothing placed (" .. tostring(msg) .. ")")
+end
+
+-- detection: only a status starting with 'on' selects the redirect flow
+do
+    local function flow(status)
+        local traces = {}
+        local f = fake({ redirect = status, player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+        if status == nil then f.io.redirect_status = nil end
+        f.io.trace = function(t) traces[#traces + 1] = t end
+        local b = B.new(f.io)
+        b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+        run(b, f)
+        for _, t in ipairs(traces) do
+            local fl = t:match("^build flow: (%a+)")
+            if fl then return fl, b:status() end
+        end
+    end
+    check(flow("on: redirect=on probe_log=off groups=yes") == "redirect", "detect: 'on: ...' = redirect")
+    check(flow("off") == "legacy", "detect: 'off' = legacy")
+    check(flow("COMPAT refund failed: exe size") == "legacy", "detect: COMPAT = legacy")
+    check(flow(nil) == "legacy", "detect: no redirect_status in io = legacy")
+    check(flow("") == "legacy", "detect: empty = legacy")
+    local _, st = flow("off")
+    check(st.state == "done" and st.text == "sent: placed 1, removed 0 (the game updates its blueprint view in about 30 s)", "detect: legacy text unchanged")
+end
+
+-- overlay: the redirect flow reports what it sent
+do
+    local got
+    local f = fake({ redirect = "on", player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5) }, 3),
+                     station = { { id = 1, bcls = "BP_OLD", x = 101, y = 0 }, { id = 2, bcls = "BP_OLD", x = 102, y = 0 } } })
+    f.io.note_build = function(pl, rm) got = { #pl, #rm } end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_NEW", 1, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+        removed = { { id = 1, bcls = "BP_OLD", x = 101, y = 0, refund = {} }, { id = 2, bcls = "BP_OLD", x = 102, y = 0, refund = {} } } }), {})
+    check(got and got[1] == 1 and got[2] == 2, "redirect: note_build gets the sent placements and removals")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

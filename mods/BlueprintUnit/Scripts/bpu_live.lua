@@ -435,7 +435,16 @@ function L.make_io(ctx)
         if which == "player" then return L.read_inv(rd(player, "Inventory")) end
         return L.read_inv(U.unit_inv)
     end
-    function io.item_max(name) return L.item_raw(name) or 1 end   -- raw MaxStackSize; bpu_build applies the inventory multiplier
+    function io.item_max(name) return L.item_raw(name) end   -- raw MaxStackSize, nil when unknown; bpu_build applies the inventory multiplier
+    -- MSCore 0.7.5 refund/charge redirect status: string starting with 'on' = active. Anything else (missing native, error) = 'off ...'.
+    function io.redirect_status()
+        local N = L.mscore and L.mscore.native
+        local fn = (N and N.redirect_status) or rawget(_G, "MSCoreNative_redirect_status")
+        if type(fn) ~= "function" then return "off (redirect_status missing, MSCore older than 0.7.5)" end
+        local okc, r = pcall(fn)
+        if okc and type(r) == "string" then return r end
+        return "off (redirect_status failed)"
+    end
     function io.unit_ids()
         return { unit_id = unw(rd(U.unit_inv, "ID")), player_id = unw(rd(rd(player, "Inventory"), "ID")) }
     end

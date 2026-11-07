@@ -5,6 +5,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Changed
+- Build uses the MSCore 0.7.5 refund/charge redirect when it is on: refunds land in the unit, the charge takes unit first. All removals then all placements are sent back to back (150 commands per tick), no staging, batching or waits. Old flow kept as fallback when the redirect is off. Requires MSCore 0.7.5.
 - Reads station blocks/machines through MSCore 0.7.2 native read_station (no more Lua struct reads, which crashed UE4SS). Requires MSCore 0.7.2.
 - Inventory slots (unit and player) read natively via MSCore 0.7.3 read_inventory. Requires MSCore 0.7.3.
 

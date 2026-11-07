@@ -2,6 +2,11 @@
 -- No game globals. Every game call goes through the injected `io` table (see B.new).
 -- Lua side: slots and machines are 1-based. io.send_move gets the 0-based game slot index.
 -- Items are matched by item name (ITEM_HullPlate), same keys as plan.need / plan.refund.
+-- Two flows, chosen at start() by io.redirect_status() (MSCore 0.7.5 refund/charge redirect, string starting with 'on'):
+--   redirect: refunds land in the unit and the build charge takes unit first, player second. After the checks every
+--     DisassembleInput then every BuildInput is sent FIFO, at most CMD_PER_TICK per tick, no waits (only SETTLE_MS once
+--     between the last removal and a placement when a placement overlaps a removed machine). Done after the last send.
+--   legacy (old MSCore / redirect off): the staged flow below, untouched.
 -- Checks run in start() before the first command. Removals go in batches sized by the free player room (a refund lands in
 -- the player inventory): a batch waits for its refund, moves the unneeded refund to the unit, the next batch waits for that
 -- room to come back. A stall ends the run with a note. After the last command the run is done.
@@ -17,6 +22,7 @@ local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the playe
 local DRAIN_MS = 2000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
 local POLL_MS = 250
+local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
 
@@ -214,7 +220,8 @@ end
 
 local function new_run(plan)
     return {
-        plan = plan, active = false, state = "idle", text = "", stage = 0,
+        plan = plan, active = false, state = "idle", text = "", stage = 0, flow = "legacy",
+        queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false,
@@ -651,6 +658,47 @@ function B.new(io)
         return after_removals(now)
     end
 
+    -- ===== redirect flow: send everything, no waits =====
+    -- queue = removals (live ids) then placements (plan entries). One slice of CMD_PER_TICK per call; true when anything was sent.
+    local function send_queue(now)
+        local q = R.queue
+        local sent = 0
+        while R.qpos <= #q and sent < CMD_PER_TICK do
+            local c = q[R.qpos]
+            if c.rm then
+                if not io.send_remove(c.rm) then return fail("removal refused for machine id " .. tostring(c.rm)) end
+                R.removed = R.removed + 1
+                R.removed_list[#R.removed_list + 1] = c.rm
+                R.t_removed = now
+            else
+                -- a placement on a removed cell waits once for the removals (SETTLE_MS from the last one)
+                if R.overlap and R.removed > 0 and now < R.t_removed + SETTLE_MS then
+                    R.t_next = R.t_removed + SETTLE_MS
+                    return
+                end
+                send_changes_once()
+                if not io.send_place(c.pl) then return fail(("BuildInput refused for the machine at %s,%s"):format(tostring(c.pl.x), tostring(c.pl.y))) end
+                R.placed = R.placed + 1
+                R.placed_list[#R.placed_list + 1] = c.pl
+            end
+            R.qpos = R.qpos + 1
+            sent = sent + 1
+        end
+        if R.qpos > #q then
+            send_changes_once()
+            R.chunks, R.chunks_done = 1, 1
+            R.active = false
+            R.stage = 0
+            R.state = "done"
+            R.text = ("sent: placed %d, removed %d (refund goes into the unit; the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed)
+            mark_changed()
+            return
+        end
+        set_status("working", ("sending commands: %d of %d"):format(R.qpos - 1, #q))
+        R.stage = 11
+        R.t_next = now   -- next slice on the next tick, no waiting
+    end
+
     local builder = {}
 
     -- start(plan, opts): checks station, totals, creative; sends the first removal batch. Nothing is sent on a refusal.
@@ -692,7 +740,27 @@ function B.new(io)
             local terr = total_check(P.need, P.refund, totals(ps), totals(us))
             if terr ~= "" then return start_fail(terr) end
         end
-        for _, m in ipairs(P.removed) do
+        local rs = "off"
+        if io.redirect_status then
+            local okr, rv = pcall(io.redirect_status)
+            if okr and type(rv) == "string" then rs = rv end
+        end
+        R.flow = (rs:sub(1, 2) == "on") and "redirect" or "legacy"
+        trace("build flow: " .. R.flow .. " (redirect status: " .. rs .. ")")
+        if R.flow == "redirect" then
+            -- only pre-check: the unit must hold the refund (optimistic when an item's max stack is unknown)
+            local rmax = setmetatable({}, { __index = function(_, k)
+                local raw = io.item_max and io.item_max(k)
+                if raw and raw > 0 then return math.floor(raw * (us.mult or 1)) end
+                return 1000000   -- unknown max stack: assume it fits
+            end })
+            if any_refund(P.refund) and not room_ok(us, build_rneed(P.refund, rmax), 0) then
+                return start_fail("the unit inventory is full, empty it and Build again")
+            end
+            for _, m in ipairs(P.removed) do R.queue[#R.queue + 1] = { rm = m.id } end
+            for _, m in ipairs(P.place) do R.queue[#R.queue + 1] = { pl = m } end
+        end
+        for _, m in ipairs(R.flow == "legacy" and P.removed or {}) do
             -- per-machine refund is what the batches are sized by: without it a batch could overflow the player
             if type(m.refund) ~= "table" then return start_fail("refund unknown for " .. tostring(m.bcls) .. ", import again") end
             R.rem_list[#R.rem_list + 1] = { id = m.id, bcls = m.bcls, refund = m.refund }
@@ -705,7 +773,10 @@ function B.new(io)
 
         R.active = true
         R.overlap = overlaps(P.removed, P.place)
-        if #R.rem_list > 0 then
+        if R.flow == "redirect" then
+            R.stage = 11
+            send_queue(now)   -- first slice sent here (a refusal before any command: start returns false)
+        elseif #R.rem_list > 0 then
             send_batches(now)   -- first batch sent here (a refusal before any command: start returns false)
         else
             chunk_start(now)    -- no removal: the placements go back to back
@@ -719,7 +790,8 @@ function B.new(io)
         if not R.active or now < R.t_next then return end
         if now - R.t_start > TOTAL_MS then return fail("timeout after 300 s") end
         local s = R.stage
-        if s == 2 then arrival_wait(now)
+        if s == 11 then send_queue(now)
+        elseif s == 2 then arrival_wait(now)
         elseif s == 4 or s == 9 then chunk_start(now)
         elseif s == 5 then staging_wait(now)
         elseif s == 6 then charge_wait(now)
@@ -742,7 +814,7 @@ function B.new(io)
             state = R.state, text = R.text, stage = R.stage,
             placed = R.placed, kept = P and #P.kept or 0, removed = R.removed,
             recipe = P and P.recChanged or 0, moved_in = R.moved_in,
-            chunk = R.chunks_done .. "/" .. R.chunks,
+            chunk = R.chunks_done .. "/" .. R.chunks, flow = R.flow,
         }
     end
 
