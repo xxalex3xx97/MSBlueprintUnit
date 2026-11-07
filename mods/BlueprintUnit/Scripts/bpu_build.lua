@@ -1206,13 +1206,28 @@ function B.new(io)
     end
 
     -- the model matches the game: unit totals and every container's totals
+    -- only the restored items are compared: the unit also changes for other reasons while the restore runs (build charges of the
+    -- placed machines, refunds), which made a good restore look like a stall (probe 2026-11-07 23:37)
     local function pipe_matches(us)
-        if not same_totals(totals(us), totals(R.pm.unit)) then return false end
+        local touched = {}
         for _, jm in ipairs(R.pm.jobs) do
-            local map = contents_of(jm)
-            if not map or not same_totals(totals(jm.slots), map) then return false end
+            for k in pairs(totals(jm.slots)) do touched[k] = true end
         end
-        return true
+        local function only(t)
+            local o = {}
+            for k, v in pairs(t) do if touched[k] then o[k] = v end end
+            return o
+        end
+        local why
+        if not same_totals(only(totals(us)), only(totals(R.pm.unit))) then why = "unit" end
+        for _, jm in ipairs(R.pm.jobs) do
+            if not why then
+                local map = contents_of(jm)
+                if not map or not same_totals(totals(jm.slots), map) then why = "container " .. tostring(jm.id) end
+            end
+        end
+        R.pipe_why = why
+        return why == nil
     end
 
     -- verified (or nothing to send): count the containers, hand the shortfall to the stepwise cycle, else done
@@ -1278,7 +1293,7 @@ function B.new(io)
             return pipe_finish(now)
         end
         if now - R.t_pipe >= STEP_MS then
-            trace(("restore pipeline: STALL after %s ms"):format(tostring(now - R.t_pipe)))
+            trace(("restore pipeline: STALL after %s ms (mismatch: %s)"):format(tostring(now - R.t_pipe), tostring(R.pipe_why)))
             rs_note(("restore stalled at pipeline (%s of %s commands sent); cursor may hold items, check the cursor and both inventories by hand"):format(
                 tostring(R.qpos - 1), tostring(#R.pq)))
             return restore_end()
