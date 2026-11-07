@@ -847,13 +847,15 @@ function P.cost_rows(plan)
     return rows
 end
 
--- FNV-1a 32-bit over id,bcls,x,y,h,rot of each existing machine, in order
+-- rolling hash over id,bcls,x,y,h,rot of each existing machine, in order. Arithmetic only (no bitwise ops):
+-- hv < 2^32, so hv*31 + byte < 2^38 stays exact in integer and float. Lua 5.4 coerces numeric strings for + and *,
+-- not for bitwise ops (the game error "bitwise operation on a string value").
 function P.fingerprint(existing)
     local hv = 2166136261
     for _, e in ipairs(existing or {}) do
         local s = string.format("%s|%s|%s|%s|%s|%s;", tostring(e.id), tostring(e.bcls), tostring(e.x), tostring(e.y), tostring(e.h), tostring(e.rot))
         for i = 1, #s do
-            hv = ((hv ~ s:byte(i)) * 16777619) & 0xffffffff
+            hv = (hv * 31 + s:byte(i)) % 4294967296
         end
     end
     return hv

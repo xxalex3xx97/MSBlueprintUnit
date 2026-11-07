@@ -369,7 +369,7 @@ while b:status().state == "working" and n < 800 do
 end
 local st = b:status()
 check(st.state == "done" and st.placed == 2 and st.placed == #plan2.place, ("integration: done, placed %d (%s)"):format(st.placed, st.text))
-check(st.text == "placed 2 machines (the game updates its blueprint view in about 30 s)" and #W2.machines == 2, "integration: final text, 2 machines on the station")
+check(st.text == "sent: placed 2, removed 0 (the game updates its blueprint view in about 30 s)" and #W2.machines == 2, "integration: final text, 2 machines on the station")
 
 -- live overlay: the game view is still the pre-build station (empty). Re-import right after the build plans place 0.
 do

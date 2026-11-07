@@ -157,6 +157,24 @@ check("fingerprint: stable", fa == P.fingerprint({ e1, e2 }))
 check("fingerprint: moved machine changes it", fa ~= P.fingerprint({ e1, e2m }))
 check("fingerprint: removed machine changes it", fa ~= P.fingerprint({ e1 }))
 
+-- overlay-style entries (virtual machines: negative ids, string/float coordinates, nil fields): no error, stable
+do
+    local ov1 = { id = -1, bcls = "BP_A", x = 0.5, y = "3", rot = 0 }
+    local ov2 = { id = -2, bcls = nil, x = nil, y = 4, h = 1, rot = "2" }
+    local okv, fv = pcall(P.fingerprint, { e1, ov1, ov2 })
+    check("fingerprint: overlay-style entries ok, stable", okv and fv == P.fingerprint({ e1, ov1, ov2 }) and fv ~= fa)
+    check("fingerprint: overlay machine added changes it", fv ~= P.fingerprint({ e1, ov1 }))
+    -- root cause: Lua 5.4 coerces numeric strings for + and *, never for ~ / &. A string byte raises the game error.
+    local sb = string.byte
+    string.byte = function(...) return tostring(sb(...)) end
+    local okp, fp2 = pcall(P.fingerprint, { e1, ov1, ov2 })
+    string.byte = sb
+    check("fingerprint: string.byte returning strings, same value (arithmetic coerces)", okp and fp2 == fv)
+    local okb, msgb = pcall(function() return 5 ~ tostring(65) end)
+    check("root cause: '~' on a string operand raises 'bitwise operation on a string value'",
+          not okb and tostring(msgb):find("bitwise operation on a string value", 1, true) ~= nil)
+end
+
 -- floor check only for placed machines: a live container outside every floor, identical in the JSON, is kept (no validation)
 local function one_container(x, y)
     return '{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"BP_ContainerObject_2","DefaultName":"DAT_Container_2","Transform":{"GridLocation":{"X":' .. x .. ',"Y":' .. y .. '},"Height":0,"GridRotation":0}}]}'
