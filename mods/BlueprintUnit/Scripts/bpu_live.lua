@@ -4,6 +4,7 @@
 -- Never call ForEach on a TrivialObject: each() checks for it first (P0 R1d).
 
 local L = {}
+L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
 -- Trace trail for native crashes: print + append to <mod dir>pu_trace.log (open/append/flush/close per call).
 local TRACE_PATH = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../bpu_trace.log"
@@ -20,12 +21,6 @@ local function TRACE(m)
     end)
 end
 L.trace = TRACE
-
--- per-field trace for late machine entries only (crash hunt); i < TRACE_FROM writes nothing
-local TRACE_FROM = 1
-local function MT(i, m)
-    if i and i >= TRACE_FROM then TRACE("m" .. i .. " " .. m) end
-end
 
 -- many lines, one io open (prints each line too)
 local function TRACE_MANY(lines)
@@ -129,31 +124,6 @@ local function each(a, fn, depth)
     end
 end
 
--- Transform -> gx, gy, h, rot. Only Transform{GridLocation{X,Y},Height,GridRotation} is read (P0 R1b/R1c).
--- Struct field reads per entry type (all in P0 order, all after the native ForEach returns):
---   Blocks:    Class, Transform.{GridLocation.X, GridLocation.Y, Height, GridRotation}
---   Machines:  MachineID (else ID), Class, Transform.{...same...}, SerializedMachineConfig (bytes)
---   ItemCost:  Item, Amount (P0 R2)
-local function xf(e, i)
-    MT(i, "xf Transform")
-    local t = rd(e, "Transform")
-    MT(i, "xf GridLocation")
-    local gl = unw(rd(t, "GridLocation"))
-    MT(i, "xf X")
-    local x = unw(rd(gl, "X"))
-    MT(i, "xf Y")
-    local y = unw(rd(gl, "Y"))
-    MT(i, "xf Height")
-    local h = unw(rd(t, "Height"))
-    MT(i, "xf GridRotation")
-    local rot = unw(rd(t, "GridRotation"))
-    return x, y, h, rot
-end
-
-local function bp_arr(st, key)
-    return rd(rd(st, "Blueprint"), key)
-end
-
 local function idOf(o)
     return unw(rd(o, "ID"))
 end
@@ -163,21 +133,6 @@ local function find_by_id(sid)
         if valid(s) and nm(s):find("^Default__") == nil and idOf(s) == sid then return s end
     end
     return nil
-end
-
--- first station with Blueprint.Blocks, BP_StationObject_C preferred
-local function fallback_station()
-    local pick
-    for _, s in ipairs(FindAllOf("StationObject") or {}) do
-        if valid(s) and nm(s):find("^Default__") == nil then
-            local n = 0
-            each(bp_arr(s, "Blocks"), function() n = n + 1 end)
-            if n > 0 and (pick == nil or (clsname(s) == "BP_StationObject" and clsname(pick) ~= "BP_StationObject")) then
-                pick = s
-            end
-        end
-    end
-    return pick
 end
 
 -- Station id candidates, best first. GetFrame (pcall) first, then block.ParentID, then the block's own ID as a
@@ -214,7 +169,7 @@ function L.find_unit(block, player_hint)
     local station_id = unw(rd(cont, "ParentID"))
     local unit_inv = rd(cont, "Inventory")
     if unit_inv == nil then return nil, "unit inventory unreadable" end
-    local st = find_by_id(station_id) or fallback_station()
+    local st = find_by_id(station_id)
     if not st then return nil, "station object not found" end
     return { block = block, cont = cont, unit_inv = unit_inv, station = station_id, station_obj = st }
 end
@@ -223,48 +178,30 @@ function L.player()
     return FindFirstOf("DMSPlayerObject")
 end
 
--- Blocks entries are structs: only Class (object property, P0 R1b path), Transform. No GetClass, no ID.
+-- MSCore 0.7.2 native read: one call per station gives blocks and machines (plain tables, no struct reads).
+-- Cached per station id; snapshot() and reset() clear it.
+local cache
+local function station_data(st)
+    local sid = idOf(st)
+    if cache and cache.sid == sid then return cache end
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.read_station) then
+        error("MSCore 0.7.2 or newer is needed (factory_native.read_station missing)", 0)
+    end
+    TRACE("read_station native sid=" .. tostring(sid))
+    local b, m = FN.read_station(sid)
+    if not b then error("read_station: " .. tostring(m), 0) end
+    cache = { sid = sid, blocks = b, machines = m }
+    TRACE("read_station done blocks=" .. #b .. " machines=" .. #m)
+    return cache
+end
+
 function L.read_blocks(st)
-    local out = {}
-    each(bp_arr(st, "Blocks"), function(e)
-        local gx, gy, h, rot = xf(e)
-        out[#out + 1] = { class = short(nm(rd(e, "Class"))), gx = gx, gy = gy, h = h, rot = rot }
-    end)
-    return out
+    return station_data(st).blocks
 end
 
-local function cfg_bytes(e, i)
-    MT(i, "cfg SerializedMachineConfig")
-    local bytes = rd(e, "SerializedMachineConfig")
-    if bytes == nil then return nil end
-    local ok, s = pcall(function()
-        local t = {}
-        MT(i, "cfg bytes walk")
-        each(bytes, function(b) t[#t + 1] = string.char(unw(b)) end)
-        return table.concat(t)
-    end)
-    if ok then return s end
-    return nil
-end
-
--- Machines entries are structs: MachineID (ID fallback as P0 R1c), Class (object property), Transform, SerializedMachineConfig.
 function L.read_machines(st)
-    local out, i = {}, 0
-    each(bp_arr(st, "Machines"), function(e)
-        i = i + 1
-        if i == 1 or i % 50 == 0 then TRACE("machine[" .. i .. "] reading") end
-        -- MachineID is the id field on Machines entries (in-game trace 2026-11-07: ID is absent). Never probe a missing struct field:
-        -- the throw corrupts UE4SS Lua state ("Ref was not function", bogus index errors, native crashes).
-        local id = unw(rd(e, "MachineID"))
-        MT(i, "class")
-        local cls = short(nm(rd(e, "Class")))
-        MT(i, "class=" .. cls)
-        local x, y, h, rot = xf(e, i)
-        out[#out + 1] = { id = id, cls = cls, bcls = cls, x = x, y = y, h = h, rot = rot, cfg = cfg_bytes(e, i) }
-        MT(i, "done")
-    end)
-    TRACE("read_machines done n=" .. #out)
-    return out
+    return station_data(st).machines
 end
 
 local BUILDABLES
@@ -311,6 +248,7 @@ local function count(t)
 end
 
 function L.snapshot(U, F)
+    cache = nil
     local st = U.station_obj
     TRACE("snapshot start station=" .. tostring(U.station))
     local blocks = L.read_blocks(st)
@@ -370,6 +308,7 @@ function L.item_by_name(name)
 end
 
 function L.reset()
+    cache = nil
     BUILDABLES = nil
     ITEMS = nil
     L._recobj = {}

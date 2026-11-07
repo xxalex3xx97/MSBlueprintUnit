@@ -35,7 +35,7 @@ $expected = @($files | ForEach-Object { $_.Substring($_.LastIndexOf('=') + 1) })
 $expected += 'Mods/BlueprintUnit/enabled.txt', 'Mods/BlueprintUnit/mscore.mod'
 $expected = @($expected | Sort-Object)
 
-& $releaseMod -Name BlueprintUnit -Repo xxalex3xx97/MSBlueprintUnit -Version $Version -MinNative 0.7.1 -Files $files -Empty @('Mods/BlueprintUnit/enabled.txt') -OutDir $OutDir
+& $releaseMod -Name BlueprintUnit -Repo xxalex3xx97/MSBlueprintUnit -Version $Version -MinNative 0.7.2 -Files $files -Empty @('Mods/BlueprintUnit/enabled.txt') -OutDir $OutDir
 if ($LASTEXITCODE -ne 0) { throw 'release-mod.ps1 failed' }
 
 # listing check on the built zip

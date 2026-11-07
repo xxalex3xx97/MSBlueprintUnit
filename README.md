@@ -11,7 +11,7 @@ A **Blueprint Unit** station block, cloned from the Command Module and researche
 ## Requirements
 
 - Main Sequence Demo (Steam).
-- **MSCore 0.7.1 or newer**, installed with **MSCoreManager.exe**.
+- **MSCore 0.7.2 or newer**, installed with **MSCoreManager.exe**.
 - No other mod needed. Does not need MiningBenchMod or the Mining Unit.
 
 ## Install

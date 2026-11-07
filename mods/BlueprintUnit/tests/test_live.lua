@@ -32,32 +32,25 @@ local function named(s, extra)
     o.GetClass = function() return c or named("?") end
     return o
 end
--- UScriptStruct stand-in: only the listed fields exist. Reading any other field is recorded in BAD
--- (the real game crashes UE4SS on such a read, so the audit must keep BAD empty).
-local BAD = {}
-local function strukt(t, allowed)
-    return setmetatable({}, { __index = function(_, k)
-        if allowed[k] == nil then BAD[#BAD + 1] = tostring(k); error("struct has no field " .. tostring(k), 2) end
-        return t[k]
-    end })
-end
-local BLK_OK = { Class = true, Transform = true }
-local MACH_OK = { Class = true, MachineID = true, ID = true, Transform = true, SerializedMachineConfig = true }
-local XF_OK = { GridLocation = true, Height = true, GridRotation = true }
-local GL_OK = { X = true, Y = true }
-local function xform(x, y, h, rot)
-    return strukt({ GridLocation = strukt({ X = x, Y = y }, GL_OK), Height = h, GridRotation = rot }, XF_OK)
+-- MSCore 0.7.2 native read: Live.read_blocks / read_machines take their data from here (no Lua struct reads).
+-- fakeMachines is what make_world sets for the station; fakeCalls counts native calls.
+local fakeCalls = 0
+local fakeMachines = {
+    { id = 10, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", x = 1, y = 1, h = 0, rot = 0, cfg = "\1\2\255" },
+    { id = 11, cls = "BP_Splitter", bcls = "BP_Splitter", x = 3, y = 1, h = 0, rot = 0, cfg = "" },
+    { id = 12, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", x = 5, y = 1, h = 0, rot = 0 },
+}
+Live.mscore = { factory_native = { read_station = function(sid)
+    fakeCalls = fakeCalls + 1
+    return { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0 } }, fakeMachines
+end } }
+-- native machine entry (read_station shape)
+local function rm(id, cls, x, y, cfg, h, rot)
+    return { id = id, cls = cls, bcls = cls, x = x, y = y, h = h or 0, rot = rot or 0, cfg = cfg }
 end
 local function iname(it) return it:GetFName():ToString() end
 local function slot(name, amount)
     return { Item = name and named(name, { MaxStackSize = 50 }) or nil, Amount = amount or 0 }
-end
-local function blk(cls, x, y)
-    return strukt({ Class = named(cls), Transform = xform(x, y, 0, 0) }, BLK_OK)
-end
-local function mach(id, cls, x, y, cfg, h, rot)
-    return strukt({ Class = named(cls), MachineID = id, SerializedMachineConfig = cfg,
-             Transform = xform(x, y, h or 0, rot or 0) }, MACH_OK)
 end
 -- a Buildable keeps a real "Class" PROPERTY (the machine class it builds); its UClass is "Buildable"
 local function bld(dat, cls, cost)
@@ -68,11 +61,9 @@ end
 
 -- station 42 (block at 0,0) with container 77 (unit inv 8), decoy container for station 99, player inv 7
 local function make_world(machines, uslots, pslots)
-    local st = named("BP_StationObject_C_0", { ID = 42, Class = named("BP_StationObject_C"), Blueprint = {
-        -- stand-in with no array part and no ForEach: bpu_live must unwrap it through get()
-        Blocks = { get = function() return { blk("BPO_Station_01_C", 0, 0) } end },
-        Machines = machines,
-    } })
+    fakeMachines = machines
+    -- no Blueprint table on the station: a Lua struct read of Blocks/Machines would fail
+    local st = named("BP_StationObject_C_0", { ID = 42, Class = named("BP_StationObject_C") })
     local unit = { ID = 8, IsValid = alive, slots = uslots, GetItemSlots = function(self) return self.slots end }
     local pinv = { ID = 7, IsValid = alive, ItemSlots = pslots }
     local player = named("BP_PlayerObject_C", { bCreative = false, Inventory = pinv })
@@ -97,9 +88,9 @@ end
 
 -------------------------------------------------------------------- reads
 local machinesA = {
-    mach(10, "BP_ConveyorBeltObject_C", 1, 1, { 1, 2, 255 }),
-    mach(11, "BP_Splitter_C", 3, 1, {}),
-    mach(12, "BP_ConveyorBeltObject_C", 5, 1, nil),
+    rm(10, "BP_ConveyorBeltObject", 1, 1, "\1\2\255"),
+    rm(11, "BP_Splitter", 3, 1, ""),
+    rm(12, "BP_ConveyorBeltObject", 5, 1, nil),
 }
 local W = make_world(machinesA, { slot("ITEM_A", 5), slot() }, { slot(), slot() })
 
@@ -113,12 +104,11 @@ world.ContainerObject = {}
 local U3, err3 = Live.find_unit(W.block, nil)
 check(U3 == nil and type(err3) == "string", "find_unit: no container -> nil, err")
 world.ContainerObject = saved
--- real game: block ID 261217 is not the station id. Station 163811 holds the block in Blueprint.Blocks (struct, no ID),
+-- real game: block ID 261217 is not the station id. Station 163811 holds the block (no ID),
 -- container 77 has ParentID 163811. The station id comes from the block's GetFrame (first candidate).
 local keepWorld = world
 local W4 = make_world({}, { slot() }, { slot(), slot() })
 W4.station.ID = 163811
-W4.station.Blueprint.Blocks = { get = function() return { blk("BPO_Station_01_C", 0, 0) } end }
 world.ContainerObject[2].ParentID = 163811
 local U4, e4 = Live.find_unit({ ID = 261217, IsValid = alive, GetFrame = function() return { ID = 163811, IsValid = alive } end }, nil)
 check(U4 ~= nil and U4.station == 163811 and U4.cont.ID == 77 and U4.station_obj == W4.station,
@@ -127,6 +117,7 @@ check(U4 ~= nil and U4.station == 163811 and U4.cont.ID == 77 and U4.station_obj
 local U5, e5 = Live.find_unit({ ID = 261217, IsValid = alive }, nil)
 check(U5 == nil and type(e5) == "string", "find_unit: no station candidate -> nil, err (Blocks never scanned)")
 world = keepWorld
+fakeMachines = W.machines
 Live.reset()
 
 local ms = Live.read_machines(W.station)
@@ -135,12 +126,23 @@ check(ms[1].bcls == "BP_ConveyorBeltObject" and ms[1].cls == "BP_ConveyorBeltObj
 check(ms[1].x == 1 and ms[1].y == 1 and ms[1].h == 0 and ms[1].rot == 0, "read_machines: x,y,h,rot")
 check(ms[1].cfg == "\1\2\255" and ms[2].cfg == "" and ms[3].cfg == nil, "read_machines: cfg bytes, empty, unreadable=nil")
 
--- trace trail: read_machines writes "machine[1] reading" to <mod dir>pu_trace.log
+-- trace trail: the native read writes "read_station done" to <mod dir>bpu_trace.log
 do
     local tf = io.open(dir .. "../bpu_trace.log", "r")
     local tt = tf and tf:read("a") or ""
     if tf then tf:close() end
-    check(tt:find("machine%[1%] reading") ~= nil and tt:find("read_machines done n=3") ~= nil, "trace: bpu_trace.log written by read_machines")
+    check(tt:find("read_station done blocks=1 machines=3") ~= nil, "trace: bpu_trace.log written by read_station")
+end
+
+-- no MSCore 0.7.2 native read: clear error naming 0.7.2, nothing cached
+do
+    local saved = Live.mscore
+    Live.mscore = {}
+    Live.reset()
+    local okN, errN = pcall(Live.read_machines, W.station)
+    Live.mscore = saved
+    Live.reset()
+    check(not okN and tostring(errN):find("0.7.2", 1, true) ~= nil, "read_machines without read_station: error names 0.7.2 (" .. tostring(errN) .. ")")
 end
 
 local bl = Live.read_blocks(W.station)
@@ -223,7 +225,7 @@ local plan2, perr = P.plan(read("belts2.json"), Live.snapshot(U2b, F), F)
 check(plan2 and plan2.valid and plan2.counts.place == 2, "integration: plan belts2 places 2 " .. tostring(perr))
 
 local nextid = 100
-local BUILD_CLS = { DAT_ConveyorBelt = "BP_ConveyorBeltObject_C" }
+local BUILD_CLS = { DAT_ConveyorBelt = "BP_ConveyorBeltObject" }
 local BUILD_COST = { DAT_ConveyorBelt = { ITEM_A = 2 } }
 local function inv_by(id)
     if id == W2.pinv.ID then return W2.pslots end
@@ -281,7 +283,7 @@ function mnative.place(station, dat, x, y, h, rot, cfg)
     end
     for name, n in pairs(BUILD_COST[dat]) do take(W2.pslots, name, n) end
     nextid = nextid + 1
-    table.insert(W2.machines, mach(nextid, BUILD_CLS[dat], x, y, nil, h, rot))
+    table.insert(W2.machines, rm(nextid, BUILD_CLS[dat], x, y, nil, h, rot))
     return true
 end
 function mnative.disassemble() return false, "not expected" end
@@ -310,18 +312,20 @@ do
     local big, parts = {}, {}
     for i = 0, 2245 do
         local x, y = (i % 50) * 2 + 1, (i // 50) * 2 + 1
-        big[#big + 1] = mach(1000 + i, "BP_ConveyorBeltObject", x, y, nil)
+        big[#big + 1] = rm(1000 + i, "BP_ConveyorBeltObject", x, y, nil)
         parts[#parts + 1] = ('{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":%d,"Y":%d},"Height":0,"GridRotation":0}}'):format(x, y)
     end
     local WB = make_world(big, { slot() }, { slot(), slot() })
     local UB = Live.find_unit(WB.block, nil)
+    local callsB = fakeCalls
     local liveB = Live.snapshot(UB, F)
+    check(fakeCalls == callsB + 1, "snapshot: one read_station call serves blocks and machines")
     local textB = '{"Version":2,"DisplayName":"Big","Blocks":[{"Class":"/Game/Blueprints/BuildingBlocks/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}],"DefaultMachines":[' .. table.concat(parts, ",") .. ']}'
     check(#liveB.existing == 2246 and type(liveB.existing[1]) == "table" and liveB.existing[2246].id == 3245, "snapshot: 2246 machine tables via read_machines")
     local pB, eB = P.plan(textB, liveB, F)
     check(pB and pB.valid and pB.counts.keep == 2246 and pB.counts.place == 0 and pB.counts.remove == 0, "plan: 2246 belts kept by identity, nothing placed/removed " .. tostring(eB))
 end
 
-check(#BAD == 0, "struct reads: only proven fields read (bad: " .. table.concat(BAD, ",") .. ")")
+check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

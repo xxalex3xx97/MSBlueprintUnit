@@ -1,5 +1,5 @@
 -- BlueprintUnit: Blueprint Unit window (bpu_window.lua) on MSCore. F / ESC = close (ESC closes the import modal first).
--- Needs MSCore >= 0.7.1 (Lua api 3 + native api 4). Opened by post-hooks on WidgetSubsystem:ToggleWindow, WidgetSubsystem:ShowWindow
+-- Needs MSCore >= 0.7.2 (Lua api 3 + native api 4). Opened by post-hooks on WidgetSubsystem:ToggleWindow, WidgetSubsystem:ShowWindow
 -- and DMSPlayerController:ToggleWidget (ONLY when an arg is the block, class BPO_BlueprintUnit_C). Blocks and research come from pak100.
 
 local TAG = "[BPUnit] "
@@ -38,6 +38,7 @@ print(TAG .. "loaded " .. V.version .. " on MSCore " .. tostring(MSCore.version)
 
 local BPU = require("bpu_window")
 BPU.init(MSCore)
+require("bpu_live").mscore = MSCore  -- station blocks/machines via factory_native.read_station (0.7.2)
 
 local function ok(o) if o == nil or type(o) ~= "userdata" then return false end local s, v = pcall(function() return o:IsValid() end) return s and v == true end
 local function nm(o) if not ok(o) then return "?" end local s, v = pcall(function() return o:GetFName():ToString() end) return s and v or "?" end

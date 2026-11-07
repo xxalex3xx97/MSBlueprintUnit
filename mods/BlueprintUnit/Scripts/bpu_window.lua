@@ -190,7 +190,7 @@ local function impOk()
     Live.trace("impOk done")
   end)
   collectgarbage("restart")
-  if not okRun then L("import failed: " .. tostring(err)); txt("Txt_Status", "error: import failed") end
+  if not okRun then L("import failed: " .. tostring(err)); txt("Txt_Status", "error: import failed: " .. tostring(err)) end
 end
 
 -- end of a build run: buttons back, result line, cost list re-planned from the saved text (what is still missing)
@@ -251,7 +251,7 @@ local function buildClick()
     L("build failed: " .. tostring(err))
     S.run = nil
     setBuildBtns(true)
-    txt("Txt_Status", "error: build failed")
+    txt("Txt_Status", "error: build failed: " .. tostring(err))
   end
 end
 
