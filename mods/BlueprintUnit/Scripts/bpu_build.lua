@@ -187,7 +187,45 @@ local function new_run(plan)
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
         chunk_need = {}, snap = {}, issued = {},
         placed = 0, removed = 0, moved_out = 0, moved_in = 0, verify_p = -1, verify_n = 0,
+        base = {}, rem = {}, want = {},   -- live count per bcls at start, planned removals per bcls, placed per bcls (cumulative)
     }
+end
+
+-- live machines per bcls
+local function count_by(list)
+    local c = {}
+    for _, m in ipairs(list) do c[m.bcls] = get(c, m.bcls) + 1 end
+    return c
+end
+
+-- expected live count of a class: start count - removed + placed so far. Position is not part of it.
+local function expected_of(R, bcls)
+    return get(R.base, bcls) - get(R.rem, bcls) + get(R.want, bcls)
+end
+
+-- classes (set) whose live count is below expected: { {bcls, expected, live}, ... } and the total short count.
+local function short_classes(R, classes, live)
+    local lc, out, total = count_by(live), {}, 0
+    for _, k in ipairs(sorted_keys(classes)) do
+        local e, l = expected_of(R, k), get(lc, k)
+        if l < e then
+            out[#out + 1] = { bcls = k, expected = e, live = l }
+            total = total + (e - l)
+        end
+    end
+    return out, total
+end
+
+local function short_text(sc)
+    local parts = {}
+    for _, s in ipairs(sc) do parts[#parts + 1] = ("%s expected %d, live %d"):format(s.bcls, s.expected, s.live) end
+    return table.concat(parts, "; ")
+end
+
+-- first machine of class bcls in list (the wanted cell), or nil
+local function first_of(list, bcls)
+    for _, m in ipairs(list) do if m.bcls == bcls then return m end end
+    return nil
 end
 
 -- io (injected, plain Lua values). Every send_* returns true when the game accepted it.
@@ -197,6 +235,7 @@ end
 --   io.unit_ids() -> { unit_id=, player_id= }     io.creative() -> bool     io.costs(place) -> { cost map per machine }
 --   io.send_remove(id) | io.send_move(prim_id, sec_id, slot0, action) | io.send_place(machine) | io.send_changes(chg)
 --   io.now() -> ms
+--   io.trace(text) optional: diagnostics only (position differs from plan, nearest live machines on a count miss)
 -- plan (from bpu_plan): station, fp, place, kept, chg, removed={ {id=,bcls=} }, need, refund (ITEM -> n), recChanged, valid.
 function B.new(io)
     local R = new_run(nil)
@@ -205,6 +244,21 @@ function B.new(io)
         return ("placed %d, removed %d, moved_out %d, moved_in %d"):format(R.placed, R.removed, R.moved_out, R.moved_in)
     end
     local function set_status(state, text) R.state = state; R.text = text end
+    local function trace(msg) if io.trace then io.trace(msg) end end
+    -- up to 3 live machines of class bcls nearest to the wanted machine wm (trace only)
+    local function trace_near(wm, bcls, live)
+        if not wm then return end
+        local c = {}
+        for _, m in ipairs(live) do if m.bcls == bcls then c[#c + 1] = m end end
+        local function d2(m) return ((m.x or 0) - wm.x) ^ 2 + ((m.y or 0) - wm.y) ^ 2 end
+        table.sort(c, function(a, b) return d2(a) < d2(b) end)
+        if #c == 0 then trace(("no live %s on the station"):format(bcls)) end
+        for i = 1, math.min(3, #c) do
+            local m = c[i]
+            trace(("near %s@(%d,%d): id=%s x=%s y=%s h=%s rot=%s"):format(bcls, wm.x, wm.y,
+                tostring(m.id), tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
+        end
+    end
     -- ends the run with error|msg (counts). Returns false.
     local function fail(msg)
         R.state = "error"
@@ -274,7 +328,11 @@ function B.new(io)
         send_changes_once()
         local count, n = R.chunk_to - R.chunk_from, 0
         for k = R.chunk_from, R.chunk_to - 1 do
-            if io.send_place(R.plan.place[k]) then n = n + 1 end
+            local m = R.plan.place[k]
+            if io.send_place(m) then
+                n = n + 1
+                R.want[m.bcls] = get(R.want, m.bcls) + 1
+            end
         end
         R.placed = R.placed + n
         if n ~= count then
@@ -346,15 +404,20 @@ function B.new(io)
         R.t_next = now + 250
     end
 
-    -- stage 6: the chunk's machines on the station. All there -> next chunk. PLACE_MS without them -> fail with the missing list.
+    -- stage 6: per class, live count >= expected (all chunks so far) -> next chunk at once. Position only traced.
+    -- PLACE_MS without the count -> fail with expected vs live.
     local function place_wait(now)
         local P = R.plan
         local ex, err = io.scan(P.station)
         if not ex then return fail(err or "live read fault while placing") end
-        local slice = {}
-        for k = R.chunk_from, R.chunk_to - 1 do slice[#slice + 1] = P.place[k] end
-        local pres, missing = present(slice, ex)
-        if pres == #slice then
+        local _, total = short_classes(R, R.want, ex)
+        if total == 0 then
+            local slice = {}
+            for k = R.chunk_from, R.chunk_to - 1 do slice[#slice + 1] = P.place[k] end
+            local pres, missing = present(slice, ex)
+            if pres < #slice then
+                trace(("chunk %d: count met, %d of %d at planned cells (position differs from plan): %s"):format(R.chunks_done + 1, pres, #slice, missing))
+            end
             R.chunks_done = R.chunks_done + 1
             R.chunk_from = R.chunk_to
             R.stage_rounds = 0
@@ -363,7 +426,9 @@ function B.new(io)
             return
         end
         if now - R.t_stage > PLACE_MS then
-            return fail(("chunk %d: %d machines not placed (%s)"):format(R.chunks_done + 1, #slice - pres, missing))
+            local sc, _ = short_classes(R, R.want, ex)
+            for _, s in ipairs(sc) do trace_near(first_of(P.place, s.bcls), s.bcls, ex) end
+            return fail(("chunk %d: %d machines not placed (%s)"):format(R.chunks_done + 1, total, short_text(sc)))
         end
         R.t_next = now + 500
     end
@@ -453,15 +518,22 @@ function B.new(io)
             R.text = "verify could not read the station (" .. counts() .. ")"
             return
         end
-        local pres, missing = present(chk, ex)
-        R.verify_p, R.verify_n = pres, #chk
-        if pres < #chk then
+        local classes = {}
+        for k in pairs(R.want) do classes[k] = true end
+        for _, m in ipairs(P.kept) do classes[m.bcls] = true end
+        local sc, total = short_classes(R, classes, ex)
+        R.verify_p, R.verify_n = math.max(#chk - total, 0), #chk
+        if total > 0 then
+            for _, s in ipairs(sc) do trace_near(first_of(chk, s.bcls), s.bcls, ex) end
             R.state = "error"
-            R.text = "verify missing " .. missing .. " (" .. counts() .. ")"
-        else
-            R.state = "done"
-            R.text = counts()
+            R.text = ("verify missing %d machines: %s (%s)"):format(total, short_text(sc), counts())
+            return
         end
+        local pex = present(chk, ex)
+        local off = #chk - pex
+        if off > 0 then trace(("verify: count met, %d of %d at planned cells (position differs from plan)"):format(pex, #chk)) end
+        R.state = "done"
+        R.text = counts() .. (off > 0 and (" (%d position differs from plan)"):format(off) or "")
     end
 
     local builder = {}
@@ -487,6 +559,7 @@ function B.new(io)
         local ex, err = io.scan(P.station)
         if not ex then return start_fail(err or "live read fault") end
         if io.fingerprint(ex) ~= P.fp then return start_fail("station changed since import, import again") end
+        R.base = count_by(ex)
         local ps, us, rerr = read_both()
         if not ps then return start_fail(rerr) end
         local ids = io.unit_ids()
@@ -500,6 +573,7 @@ function B.new(io)
             if terr ~= "" then return start_fail(terr) end
         end
         for _, m in ipairs(P.removed) do R.remove_ids[#R.remove_ids + 1] = m.id end
+        R.rem = count_by(P.removed)
         if #P.place == 0 and #R.remove_ids == 0 and #P.chg == 0 then
             R.state = "done"
             R.text = "nothing to build"

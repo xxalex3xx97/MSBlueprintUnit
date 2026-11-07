@@ -376,6 +376,7 @@ function L.make_io(ctx)
         return okc, failc
     end
     function io.now() return os.clock() * 1000 end
+    io.trace = TRACE
     return io
 end
 

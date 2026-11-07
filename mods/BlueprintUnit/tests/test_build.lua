@@ -38,7 +38,7 @@ local function fake(spec)
         calls = { rm = 0, mv = 0, pl = 0, ch = 0 }, moves = {}, clock = 1000,
         station = spec.station or {}, next_id = 100, creative = spec.creative or false,
         max = spec.max or {}, refund_of = spec.refund_of or {}, max_per_move = spec.max_per_move,
-        noop_moves = spec.noop_moves,
+        noop_moves = spec.noop_moves, shift_x = spec.shift_x or 0, drop_place = spec.drop_place,
         inv = { player = { id = 101, slots = spec.player }, unit = { id = 202, slots = spec.unit } },
     }
     local function mx(item) return f.max[item] or 50 end
@@ -142,8 +142,9 @@ local function fake(spec)
             for item, n in pairs(cost) do if have(f.inv.player.slots, item) < n then return false end end
             for item, n in pairs(cost) do take(f.inv.player.slots, item, n) end
         end
+        if f.drop_place then return true end   -- accepted, never shows up on the station
         f.next_id = f.next_id + 1
-        f.station[#f.station + 1] = { id = f.next_id, bcls = m.bcls, x = m.x, y = m.y, h = 0, rot = 0 }
+        f.station[#f.station + 1] = { id = f.next_id, bcls = m.bcls, x = m.x + f.shift_x, y = m.y, h = 0, rot = 0 }
         return true
     end
     function io.send_changes(chg)
@@ -374,6 +375,36 @@ do
     local st = b:status()
     check(rm_at ~= nil and rm_at >= 1500 and f.calls.rm == 1 and st.state == "done" and st.removed == 1,
           "room_wait: removal sent once on a tick at or after 1500 (now passed in), done")
+end
+
+-- placed machine one cell off the plan: count met -> done as soon as seen (well before PLACE_MS), position only traced
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), shift_x = 1 })
+    local traces = {}
+    f.io.trace = function(t) traces[#traces + 1] = t end
+    local b = B.new(f.io)
+    local t0 = f.clock
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
+    local st = run(b, f)
+    local traced = false
+    for _, t in ipairs(traces) do if t:find("position differs from plan", 1, true) then traced = true end end
+    check(st.state == "done" and st.verify == "1/1" and st.text:find("1 position differs from plan", 1, true)
+          and traced and f.clock - t0 < 20000, "count met, position shifted: done before PLACE_MS, position traced")
+end
+
+-- placed count short (accepted but never seen): error with expected vs live, nearest live machine traced
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true,
+                     station = { { id = 3, bcls = "BP_A", x = 5, y = 5 } } })
+    local traces = {}
+    f.io.trace = function(t) traces[#traces + 1] = t end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
+    local st = run(b, f)
+    local near = false
+    for _, t in ipairs(traces) do if t:find("near BP_A@(0,0): id=3 x=5 y=5", 1, true) then near = true end end
+    check(st.state == "error" and st.text:find("chunk 1: 1 machines not placed (BP_A expected 2, live 1)", 1, true)
+          and near, "count short: error names expected 2 / live 1, nearest BP_A traced")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))
