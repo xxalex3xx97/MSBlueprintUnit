@@ -1,0 +1,10 @@
+build/
+out/
+stage/
+stage_mesh/
+*.log
+prev/
+dump_*.txt
+probe_*.txt
+.claude/
+node_modules/
