@@ -88,22 +88,35 @@ local function fake(spec)
     -- the fake game applies inventory commands (see io.send_inv). Violations: game-rule breaks the restore must never make.
     -- action 4 DROP_CURSOR (cursor -> player), 0 TAKE (empty cursor: min(slot, max); holding: whole cursor into the slot),
     -- 1 PLACE_SINGLE (holding: one item into the slot). Only the press is modelled.
-    local function apply_inv(prim, slot0, action)
-        local slots
-        if prim == 101 then slots = f.inv.player.slots elseif prim == 202 then slots = f.inv.unit.slots
-        elseif prim > 5000 and f.containers[prim - 5000] then slots = f.containers[prim - 5000].slots   -- container INVENTORY id = machine id + 5000
-        elseif f.containers[prim] then
-            -- a machine id is not a registered inventory: the game derefs null on PLACE_SINGLE (crash 2026-11-07 23:05)
-            f.violations[#f.violations + 1] = ("action %d on machine id %d, not an inventory id"):format(action, prim)
-            return
-        end
+    -- registered inventory id -> slots. A machine id or an unknown id is a violation (the game derefs null on PLACE_SINGLE and
+    -- TRANSFER: crash 2026-11-07 23:05). Container INVENTORY id = machine id + 5000.
+    local function inv_slots(id, action)
+        if id == 101 then return f.inv.player.slots end
+        if id == 202 then return f.inv.unit.slots end
+        if id > 5000 and f.containers[id - 5000] then return f.containers[id - 5000].slots end
+        f.violations[#f.violations + 1] = ("action %s on id %s, not a registered inventory id"):format(tostring(action), tostring(id))
+        return nil
+    end
+    local function apply_inv(prim, sec, slot0, action)
         if action == 3 or action == 4 then f.violations[#f.violations + 1] = ("action %d sent"):format(action) end
         if action == 4 then
             if f.cursor.amount > 0 then put(f.inv.player.slots, f.cursor.item, f.cursor.amount, mx(f.cursor.item)) end
             f.cursor = { item = "", amount = 0 }
             return
         end
-        local s = slots and slots[slot0 + 1]
+        if action == 2 then
+            -- TRANSFER: whole source slot into the secondary inventory (same-item stacks, then empty slots); the rest stays
+            local src, dst = inv_slots(prim, action), inv_slots(sec, action)
+            if not src or not dst then return end
+            local s = src[slot0 + 1]
+            if not s or s.amount <= 0 then return end
+            s.amount = put(dst, s.item, s.amount, mx(s.item))
+            if s.amount <= 0 then s.item, s.amount = "", 0 end
+            return
+        end
+        local slots = inv_slots(prim, action)
+        if not slots then return end
+        local s = slots[slot0 + 1]
         if not s then return end
         if action == 0 then
             if f.cursor.amount > 0 and s.amount > 0 and s.item ~= f.cursor.item then
@@ -283,17 +296,19 @@ local function fake(spec)
     -- io.send_inv: one raw InventoryInteraction. f.cmd_log records every send. f.stall_after = n: sends after the n-th return
     -- true and apply nothing. f.delay = ms: applied when the clock reaches send time + delay. A send while an earlier delayed
     -- batch is still pending counts in f.inflight.
+    -- f.refuse_after = n: send n+1 returns false (not recorded as applied). f.stall_after: as above.
     function io.send_inv(prim, sec, slot0, action)
         f.cmd_log[#f.cmd_log + 1] = { prim, sec, slot0, action, f.clock }
         if #f.cmd_log == 1 then f.first_unready = f.unready end
+        if f.refuse_after and #f.cmd_log > f.refuse_after then return false end
         if f.noop_inv then return true end
         if f.stall_after and #f.cmd_log > f.stall_after then return true end
         flush()
         if f.delay then
             if #f.pending > 0 and f.pending[1].sent < f.clock then f.inflight = f.inflight + 1 end
-            f.pending[#f.pending + 1] = { sent = f.clock, at = f.clock + f.delay, run = function() apply_inv(prim, slot0, action) end }
+            f.pending[#f.pending + 1] = { sent = f.clock, at = f.clock + f.delay, run = function() apply_inv(prim, sec, slot0, action) end }
         else
-            apply_inv(prim, slot0, action)
+            apply_inv(prim, sec, slot0, action)
         end
         return true
     end
@@ -1106,13 +1121,13 @@ do
     check(got and got[1] == 1 and got[2] == 2, "redirect: note_build gets the sent placements and removals")
 end
 
--- ===== container contents restore (after the placements): stepwise recipe on the fake cursor model =====
+-- ===== container contents restore (after the placements): pipelined plan on the fake cursor model =====
 local function tot(slots, item)
     local n = 0
     for _, s in ipairs(slots) do if s.item == item then n = n + s.amount end end
     return n
 end
-local function new_cont(f)   -- id of the container the Build placed (ids > 500 in the fake), lowest first
+local function new_cont(f)   -- id of the container the Build placed (machine ids > 500 in the fake), lowest first
     local best
     for id in pairs(f.containers) do if id > 500 and (not best or id < best) then best = id end end
     return best
@@ -1126,7 +1141,7 @@ local function cmds_of(f, action)
     for _, c in ipairs(f.cmd_log) do if c[4] == action then n = n + 1 end end
     return n
 end
-local function batches_of(f, action)   -- distinct send times of one action (one batch = one tick)
+local function batches_of(f, action)   -- distinct send times of one action (one tick = one batch)
     local seen, n = {}, 0
     for _, c in ipairs(f.cmd_log) do
         if c[4] == action and not seen[c[5]] then seen[c[5]] = true; n = n + 1 end
@@ -1158,7 +1173,7 @@ local function start_cont(f, restore)
     return b, ok
 end
 
--- whole stacks 50 + 50 + 20 -> restore 120: three TAKE + whole-cursor place cycles, no singles, no surplus
+-- whole stacks 50 + 50 + 20 -> restore 120: three TRANSFERs (2), no cursor command, no action 0/1/3/4
 do
     local f = whole_fake()
     local traces = tracer(f)
@@ -1168,20 +1183,14 @@ do
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
           "restore: 120 Plate back into the new container, unit empty (" .. st.text .. ")")
     check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil, "restore: status text")
-    check(#f.cmd_log == 6 and cmds_of(f, 0) == 6 and cmds_of(f, 1) == 0 and cmds_of(f, 3) == 0 and cmds_of(f, 4) == 0,
-          "restore whole stacks: 6 TAKE commands, no singles, no action 3/4 (" .. #f.cmd_log .. " sent)")
-    check(#f.violations == 0, "restore whole stacks: no game-rule violation")
-    check(starts(traces, "restore step: take item=ITEM_Plate need=120 cur=0 src=0 dest=0 cmd=0x50 expect=unit=0 t=")
-          and starts(traces, "restore step: place item=ITEM_Plate need=120 cur=50 src=0 dest=0 cmd=0x50 expect=cont=50 t=")
-          and starts(traces, "restore step: take item=ITEM_Plate need=70 cur=0 src=1 dest=1 cmd=0x50 expect=unit=0 t=")
-          and starts(traces, "restore step: place item=ITEM_Plate need=70 cur=50 src=1 dest=1 cmd=0x50 expect=cont=100 t=")
-          and starts(traces, "restore step: take item=ITEM_Plate need=20 cur=0 src=2 dest=2 cmd=0x20 expect=unit=0 t=")
-          and starts(traces, "restore step: place item=ITEM_Plate need=20 cur=20 src=2 dest=2 cmd=0x20 expect=cont=120 t="),
-          "restore whole stacks: step traces (take, place, need, cur, src, dest, expect)")
-    check(starts(traces, "restore cursor: take unit slot0=0 item=ITEM_Plate expect=50 sent=true"), "restore whole stacks: take traced")
+    check(#f.cmd_log == 3 and cmds_of(f, 2) == 3 and cmds_of(f, 0) == 0 and cmds_of(f, 1) == 0 and cmds_of(f, 3) == 0 and cmds_of(f, 4) == 0,
+          "restore whole stacks: 3 TRANSFER (2), no cursor command, no action 3/4 (" .. #f.cmd_log .. " sent)")
+    check(#f.violations == 0 and f.cmd_log[1][1] == 202 and f.cmd_log[1][2] == cid + 5000,
+          "restore whole stacks: unit inventory -> container INVENTORY id, no violation")
+    check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=120 whole=3 remainder=0 short=0"), "restore whole stacks: plan trace")
 end
 
--- surplus: unit 500 (5 x 100), restore 30 -> TAKE 100, 30 singles in 3 batches, surplus 70 back to the same slot
+-- surplus: unit 500 (5 x 100), restore 30 -> TAKE 100, 30 singles, surplus 70 back to the same slot, all in one tick
 do
     local f = surplus_fake()
     local traces = tracer(f)
@@ -1189,14 +1198,14 @@ do
     local st = run(b, f, 400)
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 470
-          and f.inv.unit.slots[1].amount == 70, "restore surplus: 30 into the container, 70 back in the same unit slot, unit 470 (" .. st.text .. ")")
-    check(cmds_of(f, 0) == 2 and cmds_of(f, 1) == 30 and batches_of(f, 1) == 3 and cmds_of(f, 3) == 0 and #f.violations == 0,
-          "restore surplus: TAKE, 30 singles in 3 batches, put back (TAKE), no action 3, no violation")
-    check(starts(traces, "restore cursor: take unit slot0=0 item=ITEM_Plate expect=100 sent=true")
-          and starts(traces, "restore cursor: surplus=70 put back to unit slot0=0 sent=true"), "restore surplus: traced")
+          and f.inv.unit.slots[1].amount == 70, "restore surplus: 30 into the container, 70 back in the same unit slot (" .. st.text .. ")")
+    check(cmds_of(f, 0) == 2 and cmds_of(f, 1) == 30 and cmds_of(f, 2) == 0 and cmds_of(f, 3) == 0 and #f.violations == 0,
+          "restore surplus: TAKE, 30 singles, put back (TAKE), no TRANSFER, no action 3, no violation")
+    check(batches_of(f, 1) == 1, "restore surplus: 30 singles in one batch (one tick)")
+    check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=30 whole=0 remainder=30 short=0"), "restore surplus: plan trace")
 end
 
--- unit 1000 (10 x 100), restore 250 -> 2 whole stacks, 50 singles into slot 3, surplus 50 back to slot 3
+-- unit 1000 (10 x 100), restore 250 -> 2 TRANSFERs, then TAKE slot 3, 50 singles, put back 50 (54 commands)
 do
     local slots = {}
     for i = 1, 10 do slots[i] = S("ITEM_Plate", 100, 100) end
@@ -1207,72 +1216,94 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 250 and tot(f.inv.unit.slots, "ITEM_Plate") == 750
           and f.inv.unit.slots[3].amount == 50 and #f.violations == 0, "restore 250: 2 whole + 50 singles, unit 750 (" .. st.text .. ")")
-    check(cmds_of(f, 0) == 6 and cmds_of(f, 1) == 50 and batches_of(f, 1) == 5,
-          "restore 250: 3 TAKE + 2 whole places + put back (6 action 0), 50 singles in 5 batches")
+    check(cmds_of(f, 2) == 2 and cmds_of(f, 0) == 2 and cmds_of(f, 1) == 50 and #f.cmd_log == 54,
+          "restore 250: 2 TRANSFER, TAKE, 50 singles, put back (54 commands)")
 end
 
--- delay 800 ms: each batch lands after 800 ms, the next batch waits for it (never two in flight)
+-- unit slot 1 = 30, slot 2 = 100, restore 110: TRANSFER 30; TAKE 100; 80 singles = 70 into slot 1 (to 100) + 10 into slot 2;
+-- put back 20. Two container slots (100 + 10), unit slot 2 keeps 20
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 30, 100), S("ITEM_Plate", 100, 100) }, 3),
+                     station = {}, max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 } })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 110 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 110 and f.containers[cid].slots[1].amount == 100
+          and f.containers[cid].slots[2].amount == 10 and f.inv.unit.slots[2].amount == 20 and #f.violations == 0,
+          "restore 110: singles over two container slots (100 + 10), 20 back (" .. st.text .. ")")
+    check(cmds_of(f, 2) == 1 and cmds_of(f, 0) == 2 and cmds_of(f, 1) == 80, "restore 110: 1 TRANSFER, 2 TAKE, 80 singles")
+end
+
+-- delay 800 ms: the batch lands after 800 ms, the verify waits for it (never two batches in flight)
 do
     local f = whole_fake()
     f.delay = 800
     local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 800)
     local cid = new_cont(f)
-    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and #f.cmd_log == 6 and f.inflight == 0 and #f.violations == 0,
-          "delay 800 ms: restore 120, one batch in flight at a time (" .. st.text .. ")")
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and #f.cmd_log == 3 and f.inflight == 0 and #f.violations == 0,
+          "delay 800 ms: restore 120, verify waits for the batch (" .. st.text .. ")")
 end
 
--- stall take: the TAKE is sent but nothing moves -> STALL after STEP_MS, no further command
+-- stall: nothing shows -> all 3 commands sent, no further command, STALL after STEP_MS (3000) from the last send
 do
     local f = whole_fake({ stall_after = 0 })
     local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    local sent = f.cmd_log[1] and f.cmd_log[1][5] or 0
-    check(st.state == "done" and #f.cmd_log == 1 and cid and f.clock - sent >= 3000 and f.clock - sent <= 3250
-          and st.text:find("restore stalled at take_wait (container id " .. cid .. ", Plate); cursor may hold 50 Plate, take it by hand", 1, true) ~= nil,
-          "stall take: note 'restore stalled at take_wait', nothing more sent, ends within STEP_MS + POLL_MS (" .. st.text .. ")")
-    check(#f.violations == 0 and cont_plate(f, cid) == 0, "stall take: nothing placed, no violation")
+    local last = f.cmd_log[#f.cmd_log] and f.cmd_log[#f.cmd_log][5] or 0
+    check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 0 and f.clock - last >= 3000 and f.clock - last <= 3250
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent)", 1, true) ~= nil,
+          "stall: note 'restore stalled at pipeline', nothing more sent, ends within STEP_MS + POLL_MS (" .. st.text .. ")")
+    check(#f.violations == 0, "stall: no violation")
 end
 
--- stall place: the TAKE applied, the whole-cursor place did not -> cursor holds 50
+-- stall partial: the first TRANSFER shows (50), the other two do not -> STALL
 do
     local f = whole_fake({ stall_after = 1 })
     local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    local sent = f.cmd_log[2] and f.cmd_log[2][5] or 0
-    check(st.state == "done" and #f.cmd_log == 2 and cid and f.clock - sent >= 3000 and f.clock - sent <= 3250
-          and st.text:find("restore stalled at place_wait (container id " .. cid .. ", Plate); cursor may hold 50 Plate, take it by hand", 1, true) ~= nil,
-          "stall place: note 'restore stalled at place_wait', no further command (" .. st.text .. ")")
-    check(#f.violations == 0, "stall place: no violation")
+    check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 50
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent)", 1, true) ~= nil,
+          "stall partial: 50 shown, 2 transfers not, STALL (" .. st.text .. ")")
 end
 
--- stall singles: batch 1 (10 singles) lands, batch 2 does not -> cursor holds 90
+-- stall in the cycle: the TAKE shows, the 30 singles and the put-back do not -> STALL (cursor may hold items)
+do
+    local f = surplus_fake({ stall_after = 1 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and #f.cmd_log == 32 and cid and cont_plate(f, cid) == 0 and #f.violations == 0
+          and st.text:find("restore stalled at pipeline (32 of 32 commands sent)", 1, true) ~= nil,
+          "stall cycle: TAKE shows, singles do not, STALL, nothing more sent (" .. st.text .. ")")
+end
+
+-- stall in the singles: TAKE + 10 singles show, 20 singles do not -> STALL
 do
     local f = surplus_fake({ stall_after = 11 })
     local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    check(st.state == "done" and #f.cmd_log == 21 and cid and cont_plate(f, cid) == 10
-          and st.text:find("restore stalled at singles_wait (container id " .. cid .. ", Plate); cursor may hold 90 Plate, take it by hand", 1, true) ~= nil,
-          "stall singles: note 'restore stalled at singles_wait', 10 landed, no further command (" .. st.text .. ")")
-    check(#f.violations == 0, "stall singles: no violation")
+    check(st.state == "done" and #f.cmd_log == 32 and cid and cont_plate(f, cid) == 10 and #f.violations == 0
+          and st.text:find("restore stalled at pipeline (32 of 32 commands sent)", 1, true) ~= nil,
+          "stall singles: 10 shown, rest not, STALL (" .. st.text .. ")")
 end
 
--- stall back: the 30 singles land, the put-back does not -> cursor holds 70
+-- refused command (io.send_inv returns false): the restore ends with a note, nothing after it is sent
 do
-    local f = surplus_fake({ stall_after = 31 })
-    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local f = whole_fake()
+    f.refuse_after = 1
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    check(st.state == "done" and #f.cmd_log == 32 and cid and cont_plate(f, cid) == 30
-          and st.text:find("restore stalled at back_wait (container id " .. cid .. ", Plate); cursor may hold 70 Plate, take it by hand", 1, true) ~= nil,
-          "stall back: note 'restore stalled at back_wait', no further command (" .. st.text .. ")")
-    check(#f.violations == 0, "stall back: no violation")
+    check(st.state == "done" and #f.cmd_log == 2 and cid and cont_plate(f, cid) == 50
+          and st.text:find("restore stalled: command refused after 1 of 3 commands; cursor may hold items, check it by hand", 1, true) ~= nil,
+          "refused: note after 1 of 3, the refused command and the rest not sent (" .. st.text .. ")")
 end
 
--- container full: one slot, 120 to restore -> 50 in (whole stack), then the container is full, 70 stay in the unit
+-- container full: one slot -> 50 in (one TRANSFER), the other stacks do not fit, the cycle sends nothing, 70 stay in the unit
 do
     local f = whole_fake({ cont_slots = 1 })
     local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
@@ -1281,7 +1312,8 @@ do
     check(st.state == "done" and cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 70
           and st.text:find("restored 50 items into 1 container(s)", 1, true) ~= nil
           and st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
-    check(#f.violations == 0, "restore full: no violation")
+    check(cmds_of(f, 2) == 1 and cmds_of(f, 0) == 0 and cmds_of(f, 1) == 0 and #f.violations == 0,
+          "restore full: one TRANSFER, nothing else sent, no violation")
 end
 
 -- unit short of an item: skipped with a note before anything is sent, the Build is still done
@@ -1295,7 +1327,7 @@ do
     check(st.text:find("; restore: Plate x120 not restored (unit has 100)", 1, true) ~= nil, "restore short: note text")
 end
 
--- cursor guard: a TAKE is refused while the cursor may hold items
+-- cursor guard: a TAKE is refused while the cursor may hold items (stepwise fallback)
 do
     check(P.cursor_guard({ item = "ITEM_Plate", amount = 3 }) == "internal: cursor not empty" and P.cursor_guard({ item = "", amount = 0 }) == nil,
           "cursor guard: TAKE refused while the cursor holds items")
@@ -1327,8 +1359,10 @@ do
           and tot(f.inv.unit.slots, "ITEM_Plate") == 45 and tot(f.inv.unit.slots, "ITEM_Gear") == 10 and #f.violations == 0,
           "probe: 5 Plate into the first container, nothing else moved (" .. st.text .. ")")
     check(st.text:find("probe: restored 5 of Plate into container id " .. tostring(ids[1]), 1, true) ~= nil
-          and starts(tr, "probe: unit=[") and starts(tr, "restore step: singles item=ITEM_Plate need=5 cur=50"),
-          "probe: summary note, probe lines and step trace")
+          and starts(tr, "probe: unit=[")
+          and starts(tr, "restore pipe: take primary=202 secondary=0 slot0=0 action=0 sent=true")
+          and starts(tr, "restore pipe: single primary=" .. tostring(ids[1] + 5000) .. " secondary=0 slot0=0 action=1 sent=true"),
+          "probe: summary note, probe lines and per-command trace")
 end
 
 -- probe, item under 5: 3 Plate -> 3 in
@@ -1342,7 +1376,7 @@ do
           and st.text:find("probe: restored 3 of Plate into container id " .. tostring(cid), 1, true) ~= nil, "probe under 5: 3 in (" .. st.text .. ")")
 end
 
--- container not ready: unreadable for 3 polls -> the first step starts after 2 ready reads in a row
+-- container not ready: unreadable for 3 polls -> the first command after 2 ready reads in a row
 do
     local f = whole_fake({ unready = 3 })
     local t0 = f.clock
@@ -1363,7 +1397,7 @@ do
           and st.text:find("restore stalled: container ids not found (new 1, placed 1)", 1, true) ~= nil, "container never ready: stall note after CONT_MS, nothing sent (" .. st.text .. ")")
 end
 
--- RESTORE_MS passed (clock jump): timeout note, nothing more sent
+-- RESTORE_MS passed (clock jump) during the verify: timeout note, nothing more sent
 do
     local f = whole_fake({ stall_after = 0 })
     local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
@@ -1373,35 +1407,31 @@ do
         b:tick(f.clock)
         n = n + 1
     end
+    local sent = #f.cmd_log
     f.clock = f.clock + 300001
     b:tick(f.clock)
     local st = b:status()
-    check(st.state == "done" and #f.cmd_log == 1 and st.text:find("restore stalled: timeout after 300 s", 1, true) ~= nil,
+    check(st.state == "done" and sent == 3 and #f.cmd_log == sent and st.text:find("restore stalled: timeout after 300 s", 1, true) ~= nil,
           "restore timeout: 300 s passed -> note, nothing more sent (" .. st.text .. ")")
 end
 
--- cancel during the restore: no further inventory command, the container keeps what it already got, no restore text
+-- cancel during the pipeline: 200 singles = 202 commands, the first tick sends the cap (150), none after the cancel
 do
-    local f = whole_fake()
-    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
-    local function cont_items()
-        local c = new_cont(f)
-        return c and cont_plate(f, c) or 0
-    end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 1000, 1000) }, 3), station = {},
+                     max = { ITEM_Plate = 1000 }, raw = { ITEM_Plate = 1000 } })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 200 } })
     local n = 0
-    while b:status().state == "working" and cont_items() < 50 and n < 400 do
+    while b:status().state == "working" and #f.cmd_log == 0 and n < 400 do
         f.clock = f.clock + 250
         b:tick(f.clock)
         n = n + 1
     end
-    local cmds_before, items_before = #f.cmd_log, cont_items()
+    local cmds_before = #f.cmd_log
     local okc = b:cancel()
     for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
     local st = b:status()
-    check(okc and st.state == "error" and starts_with(st.text, "cancelled") and st.text:find("restore", 1, true) == nil,
-          "cancel during restore: error|cancelled, no restore text (" .. st.text .. ")")
-    check(items_before == 50 and #f.cmd_log == cmds_before and cont_items() == items_before,
-          "cancel during restore: no further inventory command after cancel (cmds " .. cmds_before .. ", items " .. items_before .. ")")
+    check(cmds_before == 150 and okc and st.state == "error" and starts_with(st.text, "cancelled") and st.text:find("restore", 1, true) == nil
+          and #f.cmd_log == cmds_before, "cancel during the pipeline: first tick sends 150 (the cap), no command after cancel")
 end
 
 -- legacy flow (no redirect): the last placement restores too
@@ -1412,6 +1442,24 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and #f.violations == 0,
           "restore legacy: 120 back after the last placement (" .. st.text .. ")")
+end
+
+-- speed: 20 containers x 5 Plate from 10 stacks of 50 -> done within 60 ticks of 250 ms (150 commands per tick)
+do
+    local slots = {}
+    for i = 1, 10 do slots[i] = S("ITEM_Plate", 50) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(slots, 10), station = {} })
+    local places = {}
+    for i = 1, 20 do places[i] = cont_at(i * 2, { { name = "ITEM_Plate", count = 5 } }) end
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local t0 = f.clock
+    local st = run(b, f, 60)
+    local ids = f.io.container_ids()
+    local all = #ids == 20
+    for _, id in ipairs(ids) do if cont_plate(f, id) ~= 5 then all = false end end
+    check(ok and st.state == "done" and all and tot(f.inv.unit.slots, "ITEM_Plate") == 400 and #f.violations == 0 and f.clock - t0 <= 60 * 250,
+          "speed: 20 containers x 5 Plate done in " .. tostring((f.clock - t0) / 250) .. " ticks, " .. #f.cmd_log .. " commands (" .. st.text .. ")")
 end
 
 -- container ids never show: 60 s, then a note; the Build itself stays done
