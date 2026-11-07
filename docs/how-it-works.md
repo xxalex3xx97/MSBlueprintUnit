@@ -8,7 +8,7 @@ All scripts live in `mods/BlueprintUnit/Scripts/`.
 
 | File | Role |
 |---|---|
-| `main.lua` | Entry point. Registers the block with `MSCore.blocks`, wires the window and the build state machine. |
+| `main.lua` | Entry point. Checks the MSCore version, wires the window and the build state machine. |
 | `bpu_version.lua` | Version string. `scripts/release.ps1` refuses a release whose `-Version` differs. |
 | `bpu_json.lua` | Parses the pasted blueprint JSON. |
 | `bpu_plan.lua` | Sync planner. Compares the blueprint with the factory on the station and returns the plan: KEEP, PLACE, STALE (remove), and recipe changes, with the net cost. |

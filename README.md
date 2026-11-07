@@ -42,7 +42,7 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 **What Build does:**
 - Places the factory on your station.
 - Never rebuilds identical machines. It only changes recipes.
-- Stages the items it needs from the unit's own inventory first, then from your inventory.
+- Takes the items it needs from the unit's inventory first, then from your inventory.
 - Refunds go into the unit inventory.
 - Leftover items stay with you.
 

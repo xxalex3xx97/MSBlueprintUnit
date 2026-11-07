@@ -15,9 +15,13 @@ $OutDir = [IO.Path]::GetFullPath($OutDir)
 # version guard: bpu_version.lua must carry the same x.y.z
 $verFile = Join-Path $root 'mods\BlueprintUnit\Scripts\bpu_version.lua'
 if (-not (Test-Path -LiteralPath $verFile -PathType Leaf)) { throw "missing file: $verFile" }
-$vm = [regex]::Match((Get-Content -LiteralPath $verFile -Raw), '["''](\d+\.\d+\.\d+)["'']')
+$verText = Get-Content -LiteralPath $verFile -Raw
+$vm = [regex]::Match($verText, 'version\s*=\s*["''](\d+\.\d+\.\d+)["'']')
 if (-not $vm.Success) { throw "no x.y.z version string in $verFile" }
 if ($vm.Groups[1].Value -ne $Version) { throw "version mismatch: -Version $Version, bpu_version.lua says $($vm.Groups[1].Value)" }
+# minimum MSCore the mod needs goes into the manifest (min_mscore_native)
+$mm = [regex]::Match($verText, 'min_mscore\s*=\s*["''](\d+\.\d+\.\d+)["'']')
+if (-not $mm.Success) { throw "no min_mscore in $verFile" }
 
 if (-not (Test-Path -LiteralPath $releaseMod -PathType Leaf)) { throw "missing shared script: $releaseMod" }
 
@@ -35,7 +39,7 @@ $expected = @($files | ForEach-Object { $_.Substring($_.LastIndexOf('=') + 1) })
 $expected += 'Mods/BlueprintUnit/enabled.txt', 'Mods/BlueprintUnit/mscore.mod'
 $expected = @($expected | Sort-Object)
 
-& $releaseMod -Name BlueprintUnit -Repo xxalex3xx97/MSBlueprintUnit -Version $Version -MinNative 0.7.2 -Files $files -Empty @('Mods/BlueprintUnit/enabled.txt') -OutDir $OutDir
+& $releaseMod -Name BlueprintUnit -Repo xxalex3xx97/MSBlueprintUnit -Version $Version -MinNative $mm.Groups[1].Value -Files $files -Empty @('Mods/BlueprintUnit/enabled.txt') -OutDir $OutDir
 if ($LASTEXITCODE -ne 0) { throw 'release-mod.ps1 failed' }
 
 # listing check on the built zip
