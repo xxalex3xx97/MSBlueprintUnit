@@ -18,6 +18,7 @@ local DRAIN_MS = 2000        -- refund moved to the unit must leave the player w
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
 local POLL_MS = 250
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
+local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
 
 local function get(m, k) return m[k] or 0 end
 
@@ -195,6 +196,12 @@ local function moveout_slots(slots, set)
     return out
 end
 
+-- removed conveyor, splitter or underground: its items come back to the player on top of the refund
+local function is_carrier(bcls)
+    local s = tostring(bcls or "")
+    return s:find("Conveyor", 1, true) ~= nil or s:find("Splitter", 1, true) ~= nil or s:find("Underground", 1, true) ~= nil
+end
+
 -- a placed machine on the cell of a removed machine: that placement must wait for the removal
 local function overlaps(removed, place)
     local cells = {}
@@ -212,7 +219,7 @@ local function new_run(plan)
         t_next = 0, t_start = 0, t_stage = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false,
         rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
-        drain = {}, costs = {},   -- rem_list = { {id, bcls, refund = cost map} } in removal order; batch = rem_pos..last sent
+        drain = {}, costs = {}, emp = nil,   -- rem_list = { {id, bcls, refund = cost map} } in removal order; batch = rem_pos..last sent
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
         chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
         placed = 0, removed = 0, moved_in = 0, refund_moved = false,
@@ -465,6 +472,22 @@ function B.new(io)
         R.t_next = now + POLL_MS
     end
 
+    -- trace only: per item, held now - before the batch - batch refund (batch refund items and every other item)
+    local function batch_extra(held)
+        local seen, keys, parts = {}, {}, {}
+        for _, src in ipairs({ R.batch_refund, held, R.rem_before }) do
+            for k in pairs(src) do
+                if not seen[k] then seen[k] = true; keys[#keys + 1] = k end
+            end
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local x = get(held, k) - get(R.rem_before, k) - get(R.batch_refund, k)
+            if x ~= 0 then parts[#parts + 1] = ("%s %+d"):format(k, x) end
+        end
+        trace("batch extra: " .. (#parts > 0 and table.concat(parts, ", ") or "none"))
+    end
+
     local function arrival_wait(now)
         local ps, us, err = read_both()
         if not ps then return fail(err) end
@@ -476,6 +499,7 @@ function B.new(io)
             return
         end
         R.removal_confirmed = true
+        batch_extra(totals(ps))
         return move_out(now, ps, us)
     end
 
@@ -497,18 +521,94 @@ function B.new(io)
         return send_batches(now)
     end
 
+    -- machine contents: nil = not a container, false = unreadable, else map (item -> amount), total, inv
+    local function contents_of(entry)
+        if not io.read_machine_inv then return nil, 0 end
+        local inv = io.read_machine_inv(entry.id)
+        if inv == nil then return nil, 0 end
+        if not inv.ok then return false, 0 end
+        local map, total = {}, 0
+        for _, s in ipairs(inv.slots or {}) do
+            if (s.item or "") ~= "" and (s.amount or 0) > 0 then
+                map[s.item] = get(map, s.item) + s.amount
+                total = total + s.amount
+            end
+        end
+        return map, total, inv
+    end
+
+    -- stage 10 starter: a container with items at the head of the removal list is emptied into the unit first.
+    local function start_empty(now, entry)
+        local map, total, read = contents_of(entry)
+        if not map then return stall(("container id %s cannot be read, Build again"):format(tostring(entry.id))) end
+        if total == 0 then return send_batches(now) end
+        local ps, us, err = read_both()
+        if not ps then return fail(err) end
+        if not room_ok(us, build_rneed(map, capmap(io, us, ps)), 0) then
+            return stall(("the unit inventory is full, empty it and Build again (container id %s holds items)"):format(tostring(entry.id)))
+        end
+        local sent = 0
+        for i, s in ipairs(read.slots or {}) do
+            if (s.item or "") ~= "" and (s.amount or 0) > 0 then
+                sent = sent + 1
+                if not send_move(read.id, R.unit_inv, i, "cempty") then return fail("InventoryInput refused") end
+            end
+        end
+        R.stage = 10
+        R.t_stage = now
+        R.t_next = now + POLL_MS
+        R.emp = { entry = entry, slots = sent }
+        set_status("working", ("emptying container id %s into the unit"):format(tostring(entry.id)))
+    end
+
+    -- stage 10: the container's items must leave it. Empty -> it is an ItemCost-only removal (send_batches).
+    local function empty_wait(now)
+        local e = R.emp
+        local map, total, inv = contents_of(e.entry)
+        if not map then return fail(("container id %s cannot be read, Build again"):format(tostring(e.entry.id))) end
+        if total == 0 then
+            R.emp = nil
+            return send_batches(now)
+        end
+        if now - R.t_stage >= DRAIN_MS then
+            local n_now = 0
+            for _, s in ipairs(inv.slots or {}) do
+                if (s.item or "") ~= "" and (s.amount or 0) > 0 then n_now = n_now + 1 end
+            end
+            if n_now == e.slots then
+                return stall("the game did not move the container items (see bpu_trace.log: ourcmd recv must equal uicmd recv)")
+            end
+            return stall("the unit inventory is full, empty it and Build again")
+        end
+        R.t_next = now + POLL_MS
+    end
+
     -- next batch: the longest run of removals from rem_pos whose cumulative refund fits the player inventory
-    -- (RESERVE empty slots kept back). Returns the last index (rem_pos - 1 = none) and the batch refund map.
+    -- (RESERVE + carriers in the batch, up to CARRY_CAP, empty slots kept back). A container with items ends the batch:
+    -- at the head it is returned as the third value (emptied first), later it waits for its turn.
+    -- Returns the last index (rem_pos - 1 = none), the batch refund map, the head container, and a stall text (unreadable head).
     local function pick_batch(ps, us)
         local maxOf = capmap(io, ps, us)
-        local cum, to = {}, R.rem_pos - 1
+        local cum, to, ncar = {}, R.rem_pos - 1, 0
         for k = R.rem_pos, #R.rem_list do
+            local e = R.rem_list[k]
+            local c, total = contents_of(e)
+            if c == false then
+                if k == R.rem_pos then return to, cum, nil, ("container id %s cannot be read, Build again"):format(tostring(e.id)) end
+                break
+            end
+            if total > 0 then
+                if k == R.rem_pos then return to, cum, e end
+                break
+            end
             local trial = {}
             for item, v in pairs(cum) do trial[item] = v end
-            for item, v in pairs(R.rem_list[k].refund) do trial[item] = get(trial, item) + v end
-            if not room_ok(ps, build_rneed(trial, maxOf), RESERVE) then break end
-            cum, to = trial, k
+            for item, v in pairs(e.refund) do trial[item] = get(trial, item) + v end
+            local nc = ncar + (is_carrier(e.bcls) and 1 or 0)
+            if not room_ok(ps, build_rneed(trial, maxOf), RESERVE + math.min(nc, CARRY_CAP)) then break end
+            cum, to, ncar = trial, k, nc
         end
+        trace(("pick: n=%d carriers=%d reserve=%d"):format(to - R.rem_pos + 1, ncar, RESERVE + math.min(ncar, CARRY_CAP)))
         return to, cum
     end
 
@@ -518,8 +618,10 @@ function B.new(io)
         while R.rem_pos <= #R.rem_list do
             local ps, us, err = read_both()
             if not ps then return fail(err) end
-            local to, cum = pick_batch(ps, us)
+            local to, cum, head, bad = pick_batch(ps, us)
+            if bad then return stall(bad) end
             if to < R.rem_pos then
+                if head then return start_empty(now, head) end
                 local m = R.rem_list[R.rem_pos]
                 return stall(("the refund of %s (id %s) does not fit the player inventory, empty your inventory and Build again"):format(m.bcls, tostring(m.id)))
             end
@@ -622,6 +724,7 @@ function B.new(io)
         elseif s == 5 then staging_wait(now)
         elseif s == 6 then charge_wait(now)
         elseif s == 8 then drain_wait(now)
+        elseif s == 10 then empty_wait(now)
         else fail("internal: unknown stage " .. s) end
     end
 

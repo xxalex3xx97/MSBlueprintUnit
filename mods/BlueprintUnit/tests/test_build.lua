@@ -729,5 +729,105 @@ do
     check(st4.state == "done" and ms4 == 500, "timing: removal on the cell, no refund -> 500 ms settle (" .. ms4 .. " ms)")
 end
 
+-- ===== containers: io.read_machine_inv fake (nil = not a container). Contents end a batch; a head container is emptied first =====
+local function with_containers(f, conts)
+    for mid, c in pairs(conts) do f.inv["cont" .. mid] = { id = c.id, slots = c.slots } end
+    f.io.read_machine_inv = function(mid)
+        local c = conts[mid]
+        if not c then return nil end
+        if c.bad then return { ok = false, id = c.id, slots = {} } end
+        local slots = {}
+        for i, s in ipairs(f.inv["cont" .. mid].slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
+        return { ok = true, id = c.id, slots = slots, mult = 1 }
+    end
+end
+local function cont_station()
+    return { { id = 7, bcls = "BP_OLD", x = 0, y = 0 }, { id = 8, bcls = "BP_BOX", x = 1, y = 0 }, { id = 9, bcls = "BP_OLD", x = 2, y = 0 } }
+end
+local function cont_removed()
+    return { { id = 7, bcls = "BP_OLD", x = 0, y = 0, refund = { ITEM_Gear = 2 } },
+             { id = 8, bcls = "BP_BOX", x = 1, y = 0, refund = { ITEM_Gear = 1 } },
+             { id = 9, bcls = "BP_OLD", x = 2, y = 0, refund = { ITEM_Gear = 2 } } }
+end
+local function box_slots() return { S("ITEM_Plate", 5), S("ITEM_Plate", 3), E() } end
+local function first_pick(traces)
+    for _, t in ipairs(traces) do if t:find("^pick:") then return t end end
+end
+
+-- container 8 (middle) holds 8 Plate in 2 slots: batch = belt 7 only, then the container is emptied, then 8 and 9
+do
+    local traces = {}
+    local f = fake({ player = inv({}, 3), unit = inv({}, 10), station = cont_station(),
+        refund_of = { [7] = { ITEM_Gear = 2 }, [8] = { ITEM_Gear = 1 }, [9] = { ITEM_Gear = 2 } } })
+    f.io.trace = function(m) traces[#traces + 1] = m end
+    with_containers(f, { [8] = { id = 303, slots = box_slots() } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = cont_removed() }), {})
+    local st = run(b, f, 4000)
+    local emptied = true
+    for _, s in ipairs(f.inv.cont8.slots) do if s.item ~= "" or s.amount ~= 0 then emptied = false end end
+    local presses, plate = 0, 0
+    for _, mv in ipairs(f.moves) do if mv[1] == 303 and mv[4] == 2 then presses = presses + 1 end end
+    for _, s in ipairs(f.inv.unit.slots) do if s.item == "ITEM_Plate" then plate = plate + s.amount end end
+    local extra = false
+    for _, t in ipairs(traces) do if t:find("batch extra:", 1, true) then extra = true end end
+    check(st.state == "done" and f.calls.rm == 3, "container: 3 removals done (" .. st.text .. ")")
+    check(presses == 2 and emptied and plate == 8, "container: emptied into the unit, one move per filled slot")
+    check(extra, "container: batch extra traced")
+end
+
+-- unreadable container (not the head): the batch stops before it; at the head it stalls
+do
+    local f = fake({ player = inv({}, 3), unit = inv({}, 10), station = cont_station(),
+        refund_of = { [7] = { ITEM_Gear = 2 }, [8] = { ITEM_Gear = 1 }, [9] = { ITEM_Gear = 2 } } })
+    with_containers(f, { [8] = { id = 303, slots = box_slots(), bad = true } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = cont_removed() }), {})
+    local st = run(b, f, 4000)
+    check(st.state == "error" and st.removed == 1 and f.calls.rm == 1 and st.text ==
+          "stopped after 1 removals: container id 8 cannot be read, Build again", "container: unreadable at the head -> stall (" .. st.text .. ")")
+end
+
+-- carriers add a reserve slot each (RESERVE 1 + carriers): 4 empty slots, Gear 50 per belt
+local function carrier_traces(bcls)
+    local traces, stn, removed = {}, {}, {}
+    for i = 1, 4 do
+        stn[i] = { id = i, bcls = bcls, x = i - 1, y = 0 }
+        removed[i] = { id = i, bcls = bcls, x = i - 1, y = 0, refund = { ITEM_Gear = 50 } }
+    end
+    local f = fake({ player = inv({}, 4), unit = inv({}, 10), station = stn,
+        refund_of = { [1] = { ITEM_Gear = 50 }, [2] = { ITEM_Gear = 50 }, [3] = { ITEM_Gear = 50 }, [4] = { ITEM_Gear = 50 } } })
+    f.io.trace = function(m) traces[#traces + 1] = m end
+    B.new(f.io):start(plan_for(f, { removed = removed }), {})
+    return traces
+end
+check(first_pick(carrier_traces("BP_ConveyorBeltObject")) == "pick: n=1 carriers=1 reserve=2", "reserve: 1 carrier -> reserve 2, batch 1")
+check(first_pick(carrier_traces("BP_Plain")) == "pick: n=3 carriers=0 reserve=1", "reserve: no carrier -> reserve 1, batch 3")
+
+-- moves never empty the container: stall after DRAIN_MS, nothing removed
+do
+    local f = fake({ player = inv({}, 3), unit = inv({}, 10), station = cont_station(), noop_moves = true,
+        refund_of = { [8] = { ITEM_Gear = 1 } } })
+    with_containers(f, { [8] = { id = 303, slots = box_slots() } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = { { id = 8, bcls = "BP_BOX", x = 1, y = 0, refund = { ITEM_Gear = 1 } } } }), {})
+    local st = run(b, f, 4000)
+    check(st.state == "error" and f.calls.rm == 0 and st.text ==
+          "the game did not move the container items (see bpu_trace.log: ourcmd recv must equal uicmd recv)",
+          "container: moves never empty it -> stall, nothing removed (" .. st.text .. ")")
+end
+
+-- unit full: the container contents do not fit the unit -> stall before any move, nothing removed
+do
+    local f = fake({ player = inv({}, 3), unit = inv({ S("ITEM_Gear", 50), S("ITEM_Gear", 50) }, 2),
+        station = cont_station(), refund_of = { [8] = { ITEM_Gear = 1 } } })
+    with_containers(f, { [8] = { id = 303, slots = box_slots() } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = { { id = 8, bcls = "BP_BOX", x = 1, y = 0, refund = { ITEM_Gear = 1 } } } }), {})
+    local st = run(b, f, 4000)
+    check(st.state == "error" and f.calls.rm == 0 and #f.moves == 0 and st.text ==
+          "the unit inventory is full, empty it and Build again (container id 8 holds items)", "container: unit full -> stall before moves (" .. st.text .. ")")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)

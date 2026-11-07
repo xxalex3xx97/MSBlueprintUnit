@@ -369,6 +369,20 @@ function L.read_inv(inv)
     return { ok = true, id = id, slots = s, mult = sm / 2, sm = sm }
 end
 
+-- machine ID -> Inventory UObject of every ContainerObject in the world (the unit's own container skipped).
+-- Plain UObject reads, like find_unit. Used to size removal batches by container contents.
+function L.container_invs()
+    local map = {}
+    for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
+        if valid(c) and nm(c):find("^Default__") == nil and clsname(c) ~= "BP_BPUnitStoreObj_01" then
+            local id = unw(rd(c, "ID"))
+            local inv = rd(c, "Inventory")
+            if id ~= nil and inv ~= nil then map[id] = inv end
+        end
+    end
+    return map
+end
+
 function L.creative(player, ctl)
     local v = unw(rd(player, "bCreative"))
     if v == nil then v = unw(rd(ctl, "bCreative")) end
@@ -457,6 +471,17 @@ function L.make_io(ctx)
         TRACE(("inv_move A release(primary=%s, secondary=0, slot0=%d, action=3) -> ok=%s ret=%s"):format(
             tostring(p), slot0, tostring(ok2), tostring(r2)))
         return ok2, r2
+    end
+    -- contents of a machine's inventory: nil = not a container, ok=false = unreadable. Cached map, rebuilt once on a miss.
+    local cmap
+    function io.read_machine_inv(machine_id)
+        local inv = cmap and cmap[machine_id]
+        if inv == nil then
+            cmap = L.container_invs()
+            inv = cmap[machine_id]
+        end
+        if inv == nil then return nil end
+        return L.read_inv(inv)
     end
     function io.send_remove(id)
         if type(id) == "number" and id < 0 then return false, "machine not in the game view yet" end   -- overlay id
