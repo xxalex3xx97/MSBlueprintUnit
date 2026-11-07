@@ -435,7 +435,7 @@ function L.make_io(ctx)
         return out
     end
     function io.send_move(prim, sec, slot0, action)
-        return call(native.inv_move, prim, sec, slot0, action)
+        return require("bpu_invtrace").sending(call, native.inv_move, prim, sec, slot0, action)
     end
     function io.send_remove(id)
         if type(id) == "number" and id < 0 then return false, "machine not in the game view yet" end   -- overlay id
