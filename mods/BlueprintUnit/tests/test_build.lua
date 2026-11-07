@@ -91,7 +91,12 @@ local function fake(spec)
     local function apply_inv(prim, slot0, action)
         local slots
         if prim == 101 then slots = f.inv.player.slots elseif prim == 202 then slots = f.inv.unit.slots
-        elseif f.containers[prim] then slots = f.containers[prim].slots end
+        elseif prim > 5000 and f.containers[prim - 5000] then slots = f.containers[prim - 5000].slots   -- container INVENTORY id = machine id + 5000
+        elseif f.containers[prim] then
+            -- a machine id is not a registered inventory: the game derefs null on PLACE_SINGLE (crash 2026-11-07 23:05)
+            f.violations[#f.violations + 1] = ("action %d on machine id %d, not an inventory id"):format(action, prim)
+            return
+        end
         if action == 3 or action == 4 then f.violations[#f.violations + 1] = ("action %d sent"):format(action) end
         if action == 4 then
             if f.cursor.amount > 0 then put(f.inv.player.slots, f.cursor.item, f.cursor.amount, mx(f.cursor.item)) end
@@ -262,7 +267,7 @@ local function fake(spec)
         end
         local slots = {}
         for i, s in ipairs(c.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
-        return { ok = true, id = id, slots = slots, mult = 1 }
+        return { ok = true, id = id + 5000, slots = slots, mult = 1 }
     end
     function io.container_ids()
         local out = {}

@@ -968,17 +968,28 @@ function B.new(io)
             return
         end
 
+        -- PLACE/TAKE target is the container's INVENTORY id (read from the container), never its machine id: a machine id is not
+        -- a registered inventory, and the game derefs a null inventory on PLACE_SINGLE (crash 2026-11-07 23:05)
+        local cinv_id
+        if rs.step == "place" or rs.step == "singles" then
+            local _, _, ci = contents_of(job)
+            cinv_id = ci and ci.id
+            if cinv_id == nil or cinv_id == job.id then
+                rs_note(("container id %s: inventory id unknown, restore stopped"):format(tostring(job.id)))
+                return restore_end()
+            end
+        end
         if rs.step == "place" then
             step_trace("place", rs, 0, rs.c, "cont", rs.cbefore + rs.c, now)
-            local sent = io.send_inv(job.id, 0, rs.dest - 1, 0)
-            trace(("restore cursor: place whole %d into container id=%s slot0=%d sent=%s"):format(rs.c, tostring(job.id), rs.dest - 1, tostring(sent)))
+            local sent = io.send_inv(cinv_id, 0, rs.dest - 1, 0)
+            trace(("restore cursor: place whole %d into container id=%s inv=%s slot0=%d sent=%s"):format(rs.c, tostring(job.id), tostring(cinv_id), rs.dest - 1, tostring(sent)))
             rs.step, rs.t = "place_wait", now
         elseif rs.step == "singles" then
             local b = math.min(SINGLE_BATCH, rs.singles_left)
             step_trace("singles", rs, 1, b, "cont", rs.cbefore + b, now)
             local placed = 0
-            for _ = 1, b do if io.send_inv(job.id, 0, rs.dest - 1, 1) then placed = placed + 1 end end
-            trace(("restore cursor: k=%d place_single into container id=%s slot0=%d sent=%d"):format(b, tostring(job.id), rs.dest - 1, placed))
+            for _ = 1, b do if io.send_inv(cinv_id, 0, rs.dest - 1, 1) then placed = placed + 1 end end
+            trace(("restore cursor: k=%d place_single into container id=%s inv=%s slot0=%d sent=%d"):format(b, tostring(job.id), tostring(cinv_id), rs.dest - 1, placed))
             rs.last_b = b
             rs.step, rs.t = "singles_wait", now
         elseif rs.step == "back" then
