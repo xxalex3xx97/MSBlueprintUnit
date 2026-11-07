@@ -131,7 +131,14 @@ function M.decode(text)
         if p <= #text then perr("trailing data", p) end
         return val
     end)
-    if not ok then return nil, "bad JSON: " .. tostring(v) end
+    if not ok then
+        local tail = text:gsub("%s+$", "")
+        local last = tail:sub(-1)
+        if last ~= "}" and last ~= "]" then
+            return nil, ("bad JSON: the text is cut off (%d bytes, ends with '%s'); paste it again"):format(#text, tail:sub(-12))
+        end
+        return nil, "bad JSON: " .. tostring(v)
+    end
     if v == NULL then v = nil end
     return v
 end

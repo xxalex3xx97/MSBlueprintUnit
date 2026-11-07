@@ -602,7 +602,7 @@ local function build(text, live, F, opts)
     local placed = {}
     for _, m in ipairs(rest) do placed[m] = true end
     for _, c in ipairs(cells) do if placed[cell_of[c]] then placed[c] = true end end
-    -- floor/parity via F for placed only; overlap pairwise (any layer, as probe), pair skipped when neither side is placed
+    -- floor/parity via F for placed only; overlap pairwise (same layer), pair skipped when neither side is placed
     local floors = F.floor_rects(blocks, F.block_floor)
     local skip = {}
     for _, m in ipairs(all) do
@@ -645,7 +645,7 @@ local function build(text, live, F, opts)
         for j = i + 1, #order do
             local b = order[j]
             if b.x - b.w >= a_right then break end
-            if (placed[a] or placed[b]) and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+            if (placed[a] or placed[b]) and a.h == b.h and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
         end
     end
 
