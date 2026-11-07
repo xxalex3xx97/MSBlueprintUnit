@@ -435,7 +435,7 @@ local function build(text, live, F, opts)
     end
 
     -- underground pairing: pair = ONE machine at the entrance (Length = cells inclusive), exit cells not placed
-    local cells, drop = {}, {}
+    local cells, drop, cell_of = {}, {}, {}   -- cell_of[exit cell] = entrance machine
     for _, t in ipairs(UG_TIERS) do
         for rot = 0, 3 do
             local xaxis = rot % 2 == 0
@@ -471,6 +471,7 @@ local function build(text, live, F, opts)
                             a.cfg = F.encode_ug(len)
                             if a.hasHex or b.hasHex then notes[#notes + 1] = "ConfigHex ignored for paired underground " .. a.cls .. " at " .. pos_a end
                             cells[#cells + 1] = b
+                            cell_of[b] = a
                             drop[v[q]] = true
                             used[k], used[q] = true, true
                             break
@@ -500,29 +501,10 @@ local function build(text, live, F, opts)
     for i, m in ipairs(machines) do if not drop[i] then paired[#paired + 1] = m end end
     machines = paired
 
-    -- new machines (placed + exit cells) vs the live block floors: floor/parity via F, overlap pairwise (any layer, as probe)
+    -- all = machines + exit cells before the keep split (validation/overlap run after it, on placed ones only)
     local all = {}
     for _, m in ipairs(machines) do all[#all + 1] = m end
     for _, m in ipairs(cells) do all[#all + 1] = m end
-    local floors = F.floor_rects(blocks, F.block_floor)
-    for _, m in ipairs(all) do
-        local ok, why = F.validate_place(floors, {}, m)
-        if not ok then bail(why .. " at " .. where(m)) end
-    end
-    -- sweep: sorted by left edge, stop when the next left edge is past this right edge (same pairs as the probe's O(n^2))
-    -- ponytail: sweep is enough for ~3000 machines; spatial buckets if a blueprint ever gets much bigger
-    local order = {}
-    for i, m in ipairs(all) do order[i] = m end
-    table.sort(order, function(p, q) return p.x - p.w < q.x - q.w end)
-    for i = 1, #order do
-        local a = order[i]
-        local a_right = a.x + a.w
-        for j = i + 1, #order do
-            local b = order[j]
-            if b.x - b.w >= a_right then break end
-            if overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
-        end
-    end
 
     -- identity keep (sync): same class+x+y+h+rot as an existing machine; underground also same Length
     local rest, kept, used = {}, {}, {}
@@ -548,6 +530,33 @@ local function build(text, live, F, opts)
         end
     end
     machines = rest
+
+    -- placed = new machines + exit cells of placed pairs. Kept machines (game already has them) are never validated
+    local placed = {}
+    for _, m in ipairs(rest) do placed[m] = true end
+    for _, c in ipairs(cells) do if placed[cell_of[c]] then placed[c] = true end end
+    -- floor/parity via F for placed only; overlap pairwise (any layer, as probe), pair skipped when neither side is placed
+    local floors = F.floor_rects(blocks, F.block_floor)
+    for _, m in ipairs(all) do
+        if placed[m] then
+            local ok, why = F.validate_place(floors, {}, m)
+            if not ok then bail(why .. " at " .. where(m)) end
+        end
+    end
+    -- sweep: sorted by left edge, stop when the next left edge is past this right edge (same pairs as the probe's O(n^2))
+    -- ponytail: sweep is enough for ~3000 machines; spatial buckets if a blueprint ever gets much bigger
+    local order = {}
+    for i, m in ipairs(all) do order[i] = m end
+    table.sort(order, function(p, q) return p.x - p.w < q.x - q.w end)
+    for i = 1, #order do
+        local a = order[i]
+        local a_right = a.x + a.w
+        for j = i + 1, #order do
+            local b = order[j]
+            if b.x - b.w >= a_right then break end
+            if (placed[a] or placed[b]) and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+        end
+    end
 
     -- config changes of kept recipe machines: recipe + port diffs. Port diffs apply only for verified classes at rot 0
     -- (rot ~= 0 only with PT.assume_rot); others logged. chg.ports = { {index=0-based game byte, want=bool}, ... }

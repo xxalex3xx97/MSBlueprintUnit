@@ -157,6 +157,24 @@ check("fingerprint: stable", fa == P.fingerprint({ e1, e2 }))
 check("fingerprint: moved machine changes it", fa ~= P.fingerprint({ e1, e2m }))
 check("fingerprint: removed machine changes it", fa ~= P.fingerprint({ e1 }))
 
+-- floor check only for placed machines: a live container outside every floor, identical in the JSON, is kept (no validation)
+local function one_container(x, y)
+    return '{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"BP_ContainerObject_2","DefaultName":"DAT_Container_2","Transform":{"GridLocation":{"X":' .. x .. ',"Y":' .. y .. '},"Height":0,"GridRotation":0}}]}'
+end
+p, err = P.plan(one_container(200, 200), live({ existing = { ex(60, "BP_ContainerObject_2", "DAT_Container_2", 200, 200) } }), F)
+check("outside keep: plan ok", p ~= nil and err == nil)
+check("outside keep: counted as keep", p and p.counts.keep == 1 and p.counts.place == 0 and p.counts.remove == 0)
+-- same machine as NEW (not live): still refused by the floor check
+p, err = P.plan(one_container(200, 200), live(), F)
+check("outside new: refused", p == nil)
+check("outside new: floor message", err ~= nil and err:find("outside every floor of its layer: DAT_Container_2", 1, true) ~= nil)
+-- placed belt overlapping a kept container: still checked (kept-vs-kept is not)
+local ov = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
+    '{"Class":"BP_ContainerObject_2","DefaultName":"DAT_Container_2","Transform":{"GridLocation":{"X":12,"Y":12},"Height":0,"GridRotation":0}},' ..
+    '{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":13,"Y":13},"Height":0,"GridRotation":0}}]}'
+p, err = P.plan(ov, live({ existing = { ex(61, "BP_ContainerObject_2", "DAT_Container_2", 12, 12) } }), F)
+check("kept vs placed: overlap still refused", p == nil and err ~= nil and err:find("overlap:", 1, true) ~= nil)
+
 -- stress: 3000 belts over four 60x60 floors (BPO_Station_02 at gx,gy 0/8)
 do
     local blocks = {}
