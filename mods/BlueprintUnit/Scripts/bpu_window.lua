@@ -163,7 +163,7 @@ local function impOk()
   if text == "" then txt("Txt_Status", "paste the blueprint JSON first"); return end
   -- GC off while the station structs are read: UE4SS crashes in luaL_traceback (dead table keys) when a collection runs mid-read
   collectgarbage("stop")
-  local okRun, err = pcall(function()
+  local okRun, err = xpcall(function()
     Live.trace("impOk start")
     Live.trace("impOk text bytes=" .. #text)
     Live.trace("impOk before readStationBuild")
@@ -188,7 +188,7 @@ local function impOk()
     Live.trace(("impOk fillCost %.1f ms rows=%d"):format((os.clock() - t0) * 1000, #rows))
     M.impClose()
     Live.trace("impOk done")
-  end)
+  end, function(e) Live.trace("impOk ERROR " .. tostring(e) .. " | " .. (tostring(debug.traceback("", 2)):gsub("\n", " ; "))); return e end)
   collectgarbage("restart")
   if not okRun then L("import failed: " .. tostring(err)); txt("Txt_Status", "error: import failed: " .. tostring(err)) end
 end
