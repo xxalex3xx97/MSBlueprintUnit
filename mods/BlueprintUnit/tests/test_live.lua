@@ -243,13 +243,15 @@ function native.set_recipe(...) calls[#calls + 1] = { "set_recipe", ... }; retur
 function native.port(...) calls[#calls + 1] = { "port", ... }; return true end
 
 local io1 = Live.make_io({ unit = U, player = W.player, ctl = {}, F = F, native = native, plan_mod = P })
-local okm, errm = io1.send_move(7, 8, 0, 2)
-check(okm and calls[1][1] == "inv_move" and calls[1][2] == 7 and calls[1][3] == 8 and calls[1][4] == 0 and calls[1][5] == 2, "send_move: inv_move(prim, sec, slot0, action)")
+local okm, errm = io1.send_move(7, 8, 0)
+check(okm and calls[1][1] == "inv_move" and calls[1][2] == 7 and calls[1][3] == 8 and calls[1][4] == 0 and calls[1][5] == 2, "send_move: press inv_move(prim, sec, slot0, 2)")
+check(calls[2][1] == "inv_move" and calls[2][2] == 7 and calls[2][3] == 0 and calls[2][4] == 0 and calls[2][5] == 3, "send_move: release inv_move(prim, 0, slot0, 3) right after the press")
+for i = #calls, 1, -1 do calls[i] = nil end
 local okr = io1.send_remove(10)
-check(okr and calls[2][1] == "disassemble" and calls[2][2] == 10 and calls[2][3] == 0, "send_remove: disassemble(id, 0)")
+check(okr and calls[1][1] == "disassemble" and calls[1][2] == 10 and calls[1][3] == 0, "send_remove: disassemble(id, 0)")
 local okp = io1.send_place({ bdat = "DAT_ConveyorBelt", x = 5, y = 2, h = 0, rot = 1, cfg = "" })
-check(okp and calls[3][1] == "place" and calls[3][2] == 42 and calls[3][3] == "DAT_ConveyorBelt" and calls[3][4] == 5
-      and calls[3][5] == 2 and calls[3][6] == 0 and calls[3][7] == 1 and calls[3][8] == "", "send_place: place(station, dat, x, y, h, rot, cfg)")
+check(okp and calls[2][1] == "place" and calls[2][2] == 42 and calls[2][3] == "DAT_ConveyorBelt" and calls[2][4] == 5
+      and calls[2][5] == 2 and calls[2][6] == 0 and calls[2][7] == 1 and calls[2][8] == "", "send_place: place(station, dat, x, y, h, rot, cfg)")
 local cl = io1.costs({ { bdat = "DAT_ConveyorBelt" }, { bdat = "DAT_Splitter" } })
 check(cl[1].ITEM_A == 2 and cl[2].ITEM_B == 3, "costs: per machine")
 check(io1.creative() == false and io1.unit_ids().unit_id == 8 and io1.unit_ids().player_id == 7, "creative and unit_ids")
@@ -331,6 +333,7 @@ local function put(slots, item, n)
 end
 local mnative = {}
 function mnative.inv_move(prim, sec, slot0, action)
+    if action == 3 then return true end   -- release: no item effect
     local src, dst = inv_by(prim), inv_by(sec)
     if not src or not dst or action ~= 2 then return false, "bad move" end
     local s = src[slot0 + 1]

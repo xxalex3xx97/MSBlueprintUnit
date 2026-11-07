@@ -434,8 +434,18 @@ function L.make_io(ctx)
         end
         return out
     end
-    function io.send_move(prim, sec, slot0, action)
-        return require("bpu_invtrace").sending(call, native.inv_move, prim, sec, slot0, action)
+    -- one shift-click as the game sends it: press (action 2, sec = destination) then release (action 3, sec = 0).
+    -- Both are sent for every move, each wrapped for the invtrace ourcmd tag and traced with its result.
+    function io.send_move(prim, sec, slot0)
+        local Tr = require("bpu_invtrace")
+        local ok1, r1 = Tr.sending(call, native.inv_move, prim, sec, slot0, 2)
+        TRACE(("inv_move press(primary=%s, secondary=%s, slot0=%d, action=2) -> ok=%s ret=%s"):format(
+            tostring(prim), tostring(sec), slot0, tostring(ok1), tostring(r1)))
+        if not ok1 then return false, r1 end
+        local ok2, r2 = Tr.sending(call, native.inv_move, prim, 0, slot0, 3)
+        TRACE(("inv_move release(primary=%s, secondary=0, slot0=%d, action=3) -> ok=%s ret=%s"):format(
+            tostring(prim), slot0, tostring(ok2), tostring(r2)))
+        return ok2, r2
     end
     function io.send_remove(id)
         if type(id) == "number" and id < 0 then return false, "machine not in the game view yet" end   -- overlay id

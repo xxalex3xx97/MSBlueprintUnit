@@ -127,10 +127,11 @@ local function fake(spec)
         end
         return false
     end
-    function io.send_move(prim, sec, slot, action)
-        f.calls.mv = f.calls.mv + 1
-        f.moves[#f.moves + 1] = { prim, sec, slot, action }
-        if action ~= 2 then return false end
+    -- like bpu_live io.send_move: press (action 2, to sec) then release (action 3, sec 0). Both recorded; only the press moves.
+    function io.send_move(prim, sec, slot)
+        f.calls.mv = f.calls.mv + 2
+        f.moves[#f.moves + 1] = { prim, sec, slot, 2 }
+        f.moves[#f.moves + 1] = { prim, 0, slot, 3 }
         local src, dst = inv_by_id(prim), inv_by_id(sec)
         if not src or not dst then return false end
         local s = src.slots[slot + 1]
@@ -228,22 +229,28 @@ do
     check(ok and msg == "ok build started", "plain: start ok")
     local st = run(b, f)
     check(st.state == "done" and st.placed == 2 and st.moved_in == 1 and st.chunk == "1/1" and st.text == DONE2, "plain: staged from unit, placed 2, final text")
-    check(f.calls.rm == 0 and f.calls.pl == 2 and same(f.moves[1], { 202, 101, 0, 2 }), "plain: no removals, unit->player quick move slot 0 action 2")
+    check(f.calls.rm == 0 and f.calls.pl == 2 and same(f.moves[1], { 202, 101, 0, 2 }) and same(f.moves[2], { 202, 0, 0, 3 }),
+          "plain: no removals, unit->player pair (press 2 then release 3) on slot 0")
 end
 
--- removal, refund stays in the player inventory, no moveout: done at once, text 'sent: ...', no player->unit move
+-- removal, refund arrives in the player inventory -> whole refund stack moved to the unit (press+release, no result poll), text 'refund moved'
 do
     local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Gear = 2 } } })
     local b = B.new(f.io)
     local plan = plan_for(f, { place = { M("BP_NEW", 5, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
                                refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })
+    local t0 = f.clock
     local ok = b:start(plan, {})
-    local st = b:status()
-    check(ok and st.state == "done" and st.removed == 1 and st.placed == 1 and f.calls.mv == 0
-          and st.text == "sent: placed 1, removed 1 (the game updates its blueprint view in about 30 s)",
-          "removal: no overlap -> sent back to back, done at once, no moveout (" .. st.text .. ")")
-    check(f.inv.player.slots[2].item == "ITEM_Gear" and f.inv.player.slots[2].amount == 2, "removal: refund stays in the player inventory")
+    local st = run(b, f)
+    check(ok and st.state == "done" and st.removed == 1 and st.placed == 1 and f.calls.mv == 2
+          and same(f.moves[1], { 101, 202, 1, 2 }) and same(f.moves[2], { 101, 0, 1, 3 }),
+          "moveout: refund stack (player slot 2) sent as press+release to the unit (" .. st.text .. ")")
+    check(st.text == "sent: placed 1, removed 1, refund moved to the unit (the game updates its blueprint view in about 30 s)",
+          "moveout: final text names the refund move")
+    check(f.inv.unit.slots[1].item == "ITEM_Gear" and f.inv.unit.slots[1].amount == 2 and f.inv.player.slots[2].item == "",
+          "moveout: refund now in the unit, player slot empty")
+    check(f.clock - t0 <= 2000, "moveout: success path within 2 s fake time (" .. (f.clock - t0) .. " ms)")
 end
 
 -- refund does not fit the player inventory -> refused at start, nothing removed, no move sent
@@ -450,19 +457,31 @@ do
         return b:status(), pl_at and rm_at and pl_at - rm_at
     end
     local st1, gap1 = rm_gap({ [7] = { ITEM_Gear = 2 } })
-    local st2, gap2 = rm_gap({})   -- the refund never shows up in the fake: the cap (3 s) decides
-    check(st1.state == "done" and gap1 == 250, "removal: refund arrived, placed at the first poll (" .. tostring(gap1) .. " ms)")
-    check(st2.state == "done" and gap2 == 3000, "removal: refund expected but not seen, placing at the 3 s cap (" .. tostring(gap2) .. " ms)")
+    local st2, gap2 = rm_gap({})   -- the refund never shows up in the fake: the cap (1.5 s) decides, no move
+    check(st1.state == "done" and gap1 == 250 and st1.text:find("refund moved to the unit", 1, true), "removal: refund arrived, moved and placed at the first poll (" .. tostring(gap1) .. " ms)")
+    check(st2.state == "done" and gap2 == 1500 and st2.text == "sent: placed 1, removed 1 (the game updates its blueprint view in about 30 s)",
+          "removal: refund not seen, placing at the 1.5 s cap, no move (" .. tostring(gap2) .. " ms)")
 end
 
--- no overlap: removal and placement go back to back inside start (no wait)
+-- no overlap, refund items: the removal is polled for the refund (250 ms), then the move and the placement; nothing sent in start
 do
     local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Gear = 2 } } })
     local b = B.new(f.io)
     local ok = b:start(plan_for(f, { place = { M("BP_NEW", 5, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
                           refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } }), {})
-    check(ok and b:status().state == "done" and f.calls.rm == 1 and f.calls.pl == 1, "no overlap: removal and placement sent in start, done")
+    check(ok and b:status().state == "working" and f.calls.rm == 1 and f.calls.pl == 0 and f.calls.mv == 0, "no overlap: removal sent in start, refund polled first")
+    local st = run(b, f)
+    check(st.state == "done" and f.calls.pl == 1 and f.calls.mv == 2, "no overlap: refund move and placement sent, done")
+end
+
+-- no overlap, no refund items: removal and placement go back to back inside start (no wait)
+do
+    local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3), station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_NEW", 5, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                          removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } }), {})
+    check(ok and b:status().state == "done" and f.calls.rm == 1 and f.calls.pl == 1 and f.calls.mv == 0, "no refund, no overlap: removal and placement sent in start, done")
 end
 
 -- fingerprint call fails: traced, the build goes on. A real mismatch still refuses.
@@ -558,7 +577,7 @@ do
           "refund room: unit full -> error, nothing removed (" .. st.text .. ")")
 end
 
--- overlap + refund never shows up in the view: the wait is the cap (3 s), then the placement is sent; no moveout
+-- overlap + refund never shows up in the view: the wait is the cap (1.5 s), then the placement is sent; no moveout
 do
     local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })   -- no refund_of: the refund never shows
@@ -567,8 +586,8 @@ do
     b:start(plan_for(f, { place = { M("BP_NEW", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
                           refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } }), {})
     local st = run(b, f)
-    check(st.state == "done" and st.removed == 1 and st.placed == 1 and f.calls.mv == 0 and f.clock - t0 == 3000
-          and st.text == "sent: placed 1, removed 1 (the game updates its blueprint view in about 30 s)", "refund never shown: capped at 3 s, done, no moveout (" .. st.text .. ")")
+    check(st.state == "done" and st.removed == 1 and st.placed == 1 and f.calls.mv == 0 and f.clock - t0 == 1500
+          and st.text == "sent: placed 1, removed 1 (the game updates its blueprint view in about 30 s)", "refund never shown: capped at 1.5 s, done, no moveout (" .. st.text .. ")")
 end
 
 -- ===== success path duration (fake clock, 250 ms steps; the window ticks every 300 ms) =====
@@ -592,12 +611,12 @@ do
     local st2, ms2 = timed("small: one staged stack from the unit", f2,
         plan_for(f2, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }))
     check(st2.state == "done" and ms2 <= 500, "timing: small change, staging -> done in <= 500 ms (" .. ms2 .. " ms)")
-    -- removal, refund arrives, no overlap: back to back
+    -- removal, refund arrives, no overlap: first poll sees the refund, move + placement sent
     local f3 = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
                       station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Gear = 2 } } })
     local st3, ms3 = timed("removal, no overlap", f3, plan_for(f3, { place = { M("BP_NEW", 5, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
         refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } }))
-    check(st3.state == "done" and ms3 == 0, "timing: removal without overlap -> done at once (" .. ms3 .. " ms)")
+    check(st3.state == "done" and ms3 == 250 and st3.text:find("refund moved to the unit", 1, true), "timing: removal + refund move -> done at the first poll (" .. ms3 .. " ms)")
     -- removal on the placement cell, no refund items: 500 ms settle
     local f4 = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
                       station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })

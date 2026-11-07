@@ -11,7 +11,7 @@ local B = {}
 local TOTAL_MS = 300000   -- whole run
 local STAGE_MS = 10000    -- staging round stalls after this
 local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
-local REFUND_MAX_MS = 3000   -- removal before a placement: go as soon as the refund shows; this is only the cap
+local REFUND_MAX_MS = 1500   -- after a removal: the refund must show in the player inventory within this, else the move is skipped
 local SETTLE_MS = 500     -- removal before a placement, no refund items: short settle, then go
 local POLL_MS = 250
 
@@ -177,6 +177,24 @@ local function refund_arrived(refund, held, before)
     return any
 end
 
+-- Refund items the build does not need (need 0 or absent): these may leave the player (free room).
+local function moveset(refund, need)
+    local set = {}
+    for k, v in pairs(refund) do
+        if v > 0 and get(need, k) <= 0 then set[k] = true end
+    end
+    return set
+end
+
+-- Slots (slot order) holding one of the items in set (set[item] = true). Whole stacks.
+local function moveout_slots(slots, set)
+    local out = {}
+    for i, s in ipairs(slots) do
+        if s.item ~= "" and s.amount > 0 and set[s.item] then out[#out + 1] = i end
+    end
+    return out
+end
+
 -- a placed machine on the cell of a removed machine: that placement must wait for the removal
 local function overlaps(removed, place)
     local cells = {}
@@ -196,7 +214,7 @@ local function new_run(plan)
         rneed = {}, remove_ids = {}, costs = {},
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
         chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
-        placed = 0, removed = 0, moved_in = 0,
+        placed = 0, removed = 0, moved_in = 0, refund_moved = false,
         placed_list = {}, removed_list = {},   -- machines actually sent (io.note_build: live overlay)
     }
 end
@@ -252,20 +270,21 @@ function B.new(io)
         if not u or not u.ok then return nil, nil, "unit inventory cannot be read" end
         return norm(p), norm(u)
     end
-    -- one quick move (action 2 = quick move; primary = inventory holding the slot, secondary = destination). i is 1-based.
-    -- io.send_move gets the 0-based slot (i - 1). tag (optional): trace the exact args and the send result.
+    -- one quick move = the game's press+release pair (io.send_move sends and traces both). i is 1-based.
+    -- io.send_move gets the 0-based slot (i - 1). tag (optional): trace the send result.
     local function send_move(prim, sec, i, tag)
-        local ok, ret = io.send_move(prim, sec, i - 1, 2)
+        local ok, ret = io.send_move(prim, sec, i - 1)
         ok = ok and true or false
         if tag then
-            trace(("%s: inv_move(primary=%s, secondary=%s, slot0=%d, action=2) -> sent=%s ret=%s"):format(tag,
+            trace(("%s: pair(primary=%s, secondary=%s, slot0=%d) -> sent=%s ret=%s"):format(tag,
                 tostring(prim), tostring(sec), i - 1, tostring(ok), tostring(ret)))
         end
         return ok
     end
 
-    -- DisassembleInput per planned removal. Overlap with a placement: stage 2 waits for the refund (or a settle).
-    -- No overlap: the placements go straight after (back to back).
+    -- DisassembleInput per planned removal. Refund items: stage 2 waits for them in the player inventory (1.5 s cap),
+    -- then the refund moves to the unit. Overlap with a placement: the placement waits for the same stage.
+    -- Neither: the placements go straight after (back to back).
     local function send_removals(now, held)
         local sent = 0
         for _, id in ipairs(R.remove_ids) do
@@ -277,7 +296,7 @@ function B.new(io)
         end
         R.rem_before = held
         set_status("working", ("removing %d machines"):format(sent))
-        if R.overlap then
+        if R.overlap or any_refund(R.plan.refund) then
             R.stage = 2
             R.t_stage = now
             R.t_next = now + POLL_MS
@@ -300,7 +319,11 @@ function B.new(io)
         R.active = false
         R.stage = 0
         R.state = "done"
-        R.text = ("sent: placed %d, removed %d (the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed)
+        if R.refund_moved then
+            R.text = ("sent: placed %d, removed %d, refund moved to the unit (the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed)
+        else
+            R.text = ("sent: placed %d, removed %d (the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed)
+        end
         mark_changed()
     end
 
@@ -414,16 +437,32 @@ function B.new(io)
         R.t_next = now + POLL_MS
     end
 
-    -- stage 2 (only with an overlap): wait until the refund shows, or the settle time passed. The station view is not read.
+    -- stage 2: wait until the refund shows in the player inventory (REFUND_MAX_MS cap; SETTLE_MS without refund items).
+    -- Arrived -> the unneeded refund stacks go to the unit, one pair each, no result poll. Not arrived -> no move.
+    -- Then the placements go on at once (chunk_start). The station view is not read.
     local function removal_wait(now)
         local ps, us, err = read_both()
         if not ps then return fail(err) end
+        local arrived = refund_arrived(R.plan.refund, totals(ps), R.rem_before)
         local limit = any_refund(R.plan.refund) and REFUND_MAX_MS or SETTLE_MS
-        if refund_arrived(R.plan.refund, both_totals(ps, us), R.rem_before) or now - R.t_stage >= limit then
-            set_status("working", "removal done")
-            return chunk_start(now)
+        if not arrived and now - R.t_stage < limit then
+            R.t_next = now + POLL_MS
+            return
         end
-        R.t_next = now + POLL_MS
+        if arrived and not R.creative then
+            local mo = moveout_slots(ps, moveset(R.plan.refund, R.plan.need))
+            if #mo > 0 then R.refund_moved = true end
+            for _, s in ipairs(mo) do
+                trace(("moveout: chosen slot0=%d item=%s amount=%d"):format(s - 1, ps[s].item, ps[s].amount))
+            end
+            for _, s in ipairs(mo) do
+                if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
+            end
+        elseif any_refund(R.plan.refund) then
+            trace(("moveout: refund not in the player inventory within %d ms, no move"):format(limit))
+        end
+        set_status("working", "removal done")
+        return chunk_start(now)
     end
 
     local builder = {}
@@ -480,7 +519,7 @@ function B.new(io)
             R.rneed = build_rneed(P.refund, capmap(io, ps, us))
             local fit = refund_check(R.rneed, ps)
             if fit ~= "" then return start_fail(fit) end   -- refused before any command; nothing moves
-            send_removals(now, both_totals(ps, us))
+            send_removals(now, totals(ps))
         else
             R.stage = 4
             R.t_next = now
