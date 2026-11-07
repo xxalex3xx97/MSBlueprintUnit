@@ -299,6 +299,15 @@ local function fake(spec)
     -- f.refuse_after = n: send n+1 returns false (not recorded as applied). f.stall_after: as above.
     function io.send_inv(prim, sec, slot0, action)
         f.attempts = (f.attempts or 0) + 1
+        if action == 5 then   -- SORT (split route): the unit inventory, sec 0, slot 0. Logged, refused on request, applied unless noop_sort.
+            f.sorts = (f.sorts or 0) + 1
+            if prim ~= 202 or sec ~= 0 or slot0 ~= 0 then f.violations[#f.violations + 1] = "sort sent with wrong args" end
+            f.cmd_log[#f.cmd_log + 1] = { prim, sec, slot0, action, f.clock }
+            f.sort_at = f.sort_at or f.clock
+            if f.refuse_sort then return false, "refused" end
+            if not f.noop_sort then f.sort_apply() end
+            return true
+        end
         if action ~= 2 then f.violations[#f.violations + 1] = ("action %s sent: restore is TRANSFER (2) only"):format(tostring(action)) end
         if (f.fail_next or 0) > 0 then f.fail_next = f.fail_next - 1; return false, "UFunction expected 1 parameters, received 2" end
         f.cmd_log[#f.cmd_log + 1] = { prim, sec, slot0, action, f.clock }
@@ -314,6 +323,37 @@ local function fake(spec)
             apply_inv(prim, sec, slot0, action)
         end
         return true
+    end
+    -- SORT model: non-empty slots to the front, stable by item name, the rest empty
+    function f.sort_apply()
+        local items = {}
+        for i, s in ipairs(f.inv.unit.slots) do if s.item ~= "" and s.amount > 0 then items[#items + 1] = { s = s, i = i } end end
+        table.sort(items, function(a, b) if a.s.item ~= b.s.item then return a.s.item < b.s.item end return a.i < b.i end)
+        local copy = {}
+        for k, e in ipairs(items) do copy[k] = { item = e.s.item, amount = e.s.amount, max = e.s.max } end
+        for i, s in ipairs(f.inv.unit.slots) do
+            if copy[i] then s.item, s.amount, s.max = copy[i].item, copy[i].amount, copy[i].max else s.item, s.amount = "", 0 end
+        end
+    end
+    -- io.split (MSCore 0.7.6 native, split route only): exact split inside the unit inventory, applied at once.
+    -- f.split_fail_n = n: the next n calls are refused (nothing applied). f.split_noop: returns true, applies nothing.
+    -- Violations: non-unit inventory, slot out of range, dst not empty, amount more than the source holds.
+    if spec.split then
+        f.splits = {}
+        function io.split(inv, src0, amount, dst0)
+            f.splits[#f.splits + 1] = { inv, src0, amount, dst0 }
+            if inv ~= 202 then f.violations[#f.violations + 1] = "split on a non-unit inventory"; return false, "inv" end
+            local src, dst = f.inv.unit.slots[src0 + 1], f.inv.unit.slots[dst0 + 1]
+            if not src or not dst then f.violations[#f.violations + 1] = "split slot out of range"; return false, "range" end
+            if (f.split_fail_n or 0) > 0 then f.split_fail_n = f.split_fail_n - 1; return false, "split refused" end
+            if f.split_noop then return true end
+            if dst.amount > 0 then f.violations[#f.violations + 1] = "split into a non-empty slot" end
+            if src.amount < amount then f.violations[#f.violations + 1] = "split more than the slot holds" end
+            dst.item, dst.amount, dst.max = src.item, amount, src.max
+            src.amount = src.amount - amount
+            if src.amount <= 0 then src.item, src.amount = "", 0 end
+            return true
+        end
     end
     f.io = io
     return f
@@ -1589,6 +1629,233 @@ do
         st = final(0)
         check(st.state == "done" and st.text:find("failed", 1, true) == nil, fl[1] .. ": no failed changes, no suffix (" .. st.text .. ")")
     end
+end
+
+-- ===== split route (io.split present): SORT the unit, then exact pieces (split into an empty unit slot + one TRANSFER) =====
+local function spl(o)   -- fake with io.split (spec.split); plate stacks cap 100 unless o says otherwise
+    local t = { redirect = REDIRECT_ON, player = inv({}, 3), station = {}, max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 }, split = true }
+    for k, v in pairs(o) do t[k] = v end
+    return fake(t)
+end
+local function churn(f, dur)   -- the unit's ITEM_Junk slot changes on every unit read for dur ms after the first SORT
+    local base = f.io.read_inv
+    f.io.read_inv = function(which)
+        if which == "unit" and f.sort_at and f.clock < f.sort_at + dur then
+            for _, s in ipairs(f.inv.unit.slots) do if s.item == "ITEM_Junk" then s.amount = s.amount == 1 and 2 or 1 end end
+        end
+        return base(which)
+    end
+end
+
+-- exact N: Plate 100 + 100, need 120 -> SORT once, one split of 20, 2 TRANSFERs, unit keeps 80, no violation
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 4) })
+    local tr = tracer(f)
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 80 and #f.violations == 0,
+          "split exact: container 120 exact, unit keeps 80, no violation (" .. st.text .. ")")
+    check(cmds_of(f, 5) == 1 and #f.splits == 1 and f.splits[1][3] == 20 and cmds_of(f, 2) == 2,
+          "split exact: 1 SORT, 1 split of 20, 2 TRANSFERs")
+    check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil
+          and starts(tr, "restore plan (split): container id=" .. cid .. " item=ITEM_Plate count=120 splits=1 moved=120 short=0"),
+          "split exact: status text and plan trace")
+end
+
+-- need 250 over three 100 stacks (3 empty slots): 100, 100, then a split of 50 -> container 250, unit keeps 50
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 6) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 250 and tot(f.inv.unit.slots, "ITEM_Plate") == 50 and #f.splits == 1 and f.splits[1][3] == 50
+          and cmds_of(f, 2) == 3 and #f.violations == 0, "split 250 of 3 stacks: container 250, unit 50, one split of 50 (" .. st.text .. ")")
+end
+
+-- two containers, each needs 20 of the same 100 stack: two splits, each into a different empty unit slot
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 6) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 20 } }), cont_at(7, { { name = "ITEM_Plate", count = 20 } }) },
+                         need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local ids = f.io.container_ids()
+    check(#ids == 2 and cont_plate(f, ids[1]) == 20 and cont_plate(f, ids[2]) == 20 and #f.splits == 2 and f.splits[1][4] ~= f.splits[2][4]
+          and #f.violations == 0, "split two containers: 20 + 20, two splits into distinct empty slots (" .. st.text .. ")")
+end
+
+-- unit short: Plate 70 for need 120 -> 70 in, a note, no split
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 70, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 70 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.splits == 0 and #f.violations == 0
+          and st.text:find("Plate x120 not restored (unit has 70)", 1, true) ~= nil, "split unit short: 70 in, note, no split (" .. st.text .. ")")
+end
+
+-- container room 50 (one slot, cap 50), unit 40 + 40, need 80 -> 40 direct, 10 split, container 50, unit keeps 30, full note
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 40, 100), S("ITEM_Plate", 40, 100) }, 4), raw = { ITEM_Plate = 50 }, max = { ITEM_Plate = 50 }, cont_slots = 1 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 80 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 30 and #f.splits == 1 and f.splits[1][3] == 10 and #f.violations == 0
+          and st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "split room: container 50, unit keeps 30, full note (" .. st.text .. ")")
+end
+
+-- no free unit slot: Plate 100 + Gear 10 fill the unit, need 30 -> nothing moved, note
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Gear", 10, 50) }, 2) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.splits == 0 and cmds_of(f, 2) == 0
+          and st.text:find("; restore: Plate x30 not restored (no free unit slot)", 1, true) ~= nil, "split no free slot: nothing moved, note (" .. st.text .. ")")
+end
+
+-- split refused every time: 6 tries, skipped; its TRANSFER is not sent; the restore is done, nothing moved, no violation
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_fail_n = 1e9
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.splits == 6
+          and cmds_of(f, 2) == 0 and #f.violations == 0 and st.text:find("1 command(s) skipped (refused)", 1, true) ~= nil
+          and st.text:find("stalled", 1, true) == nil, "split refused 6 times: skipped, TRANSFER not sent, done (" .. st.text .. ")")
+end
+
+-- split refused once: retried on the next tick, 30 delivered, nothing skipped
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_fail_n = 1
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 70 and #f.splits == 2
+          and #f.violations == 0 and st.text:find("skipped", 1, true) == nil and st.text:find("stalled", 1, true) == nil,
+          "split refused once: retried, 30 delivered (" .. st.text .. ")")
+end
+
+-- no io.split: rounded route as before, no SORT sent
+do
+    local f = whole_fake()
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 0 and #f.cmd_log == 3, "no io.split: rounded route, no SORT, 3 TRANSFERs (" .. st.text .. ")")
+end
+
+-- SORT settles: no change for 1500 ms after the SORT (noop_sort = the game never sorts), then the restore runs
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100) }, 3) })
+    f.noop_sort = true
+    local tr = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local gap = f.cmd_log[2] and f.cmd_log[2][5] - f.cmd_log[1][5]
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 1 and gap and gap >= 1500 and gap < 15000
+          and starts(tr, "restore sort: unit settled"), "sort settle: runs 1500+ ms after the SORT, not before (gap " .. tostring(gap) .. ")")
+end
+
+-- SORT keeps changing for 4 s, then settles: the restore waits, then runs
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100), S("ITEM_Junk", 1, 100) }, 4) })
+    churn(f, 4000)
+    local tr = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local gap = f.cmd_log[2] and f.cmd_log[2][5] - f.cmd_log[1][5]
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and gap and gap >= 4500 and starts(tr, "restore sort: unit settled")
+          and not starts(tr, "restore sort: cap"), "sort changing 4 s: waits, then settles and runs (gap " .. tostring(gap) .. ")")
+end
+
+-- SORT never settles (changes until 14 s): the 15 s cap ends the wait and the restore runs
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100), S("ITEM_Junk", 1, 100) }, 4) })
+    churn(f, 14000)
+    local tr = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    local gap = f.cmd_log[2] and f.cmd_log[2][5] - f.cmd_log[1][5]
+    check(cid and st.state == "done" and cont_plate(f, cid) == 120 and gap and gap >= 14500 and starts(tr, "restore sort: cap reached")
+          and not starts(tr, "restore sort: unit settled"), "sort cap: 15 s wait, trace, restore runs (gap " .. tostring(gap) .. ")")
+end
+
+-- SORT refused every time: 6 tries (RETRY_MAX + 1), note, the restore goes on
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100) }, 3) })
+    f.refuse_sort = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 6 and #f.violations == 0
+          and st.text:find("unit not sorted (SORT refused)", 1, true) ~= nil, "SORT refused: 6 tries, note, restore goes on (" .. st.text .. ")")
+end
+
+-- probe with split: 5 of a 100 stack -> one split of 5, one TRANSFER, container 5; two unit traces (before and after)
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Gear", 10, 50) }, 4) })
+    f.mode = "probe"
+    local tr = tracer(f)
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 20 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 600)
+    local cid = new_cont(f)
+    local nprobe = 0
+    for _, t in ipairs(tr) do if t:find("^probe: unit=%[") then nprobe = nprobe + 1 end end
+    check(st.state == "done" and cid and cont_plate(f, cid) == 5 and #f.splits == 1 and f.splits[1][3] == 5 and #f.violations == 0 and nprobe == 2
+          and st.text:find("probe: restored 5 of Plate into container id " .. tostring(cid), 1, true) ~= nil,
+          "probe split: 5 in, one split of 5, unit traces before and after (" .. st.text .. ")")
+end
+
+-- cancel during the SORT wait: the SORT is the last command
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100) }, 3) })
+    f.noop_sort = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local n = 0
+    while b:status().state == "working" and #f.cmd_log == 0 and n < 400 do f.clock = f.clock + 250; b:tick(f.clock); n = n + 1 end
+    local before = #f.cmd_log
+    b:cancel()
+    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
+    local st = b:status()
+    check(before == 1 and st.state == "error" and starts_with(st.text, "cancelled") and #f.cmd_log == before, "cancel during the SORT wait: nothing sent after it (" .. st.text .. ")")
+end
+
+-- cancel during the pipeline: 1100 whole-slot TRANSFERs after the SORT, 1000 go in the first send, cancel -> nothing after
+do
+    local slots = {}
+    for i = 1, 1100 do slots[i] = S("ITEM_Plate", 1, 50) end
+    local places = {}
+    for i = 1, 1100 do places[i] = cont_at(i * 2, { { name = "ITEM_Plate", count = 1 } }) end
+    local f = spl({ unit = inv(slots, 1100), max = { ITEM_Plate = 50 }, raw = { ITEM_Plate = 50 } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local n = 0
+    while b:status().state == "working" and #f.cmd_log < 2 and n < 2000 do f.clock = f.clock + 250; b:tick(f.clock); n = n + 1 end
+    local before = #f.cmd_log
+    b:cancel()
+    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
+    local st = b:status()
+    check(before == 1001 and st.state == "error" and starts_with(st.text, "cancelled") and #f.cmd_log == before,
+          "cancel during the pipeline: SORT + 1000 sent, none after the cancel (" .. st.text .. ")")
+end
+
+-- split no-op (returns true, changes nothing): the model says the unit gave up 30 -> the verify never matches -> STALL
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_noop = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100
+          and st.text:find("restore stalled at pipeline (2 of 2 commands sent)", 1, true) ~= nil, "split no-op: STALL, nothing more sent (" .. st.text .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

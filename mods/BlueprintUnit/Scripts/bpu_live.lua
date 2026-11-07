@@ -583,6 +583,23 @@ function L.make_io(ctx)
             tostring(unw(sec)), slot0, tostring(ok), tostring(r)))
         return ok, r
     end
+    -- split route (MSCore 0.7.6 inv_split native): exact split inside one inventory, src0 -> dst0 (0-based). Local edit, not a
+    -- game command. Only defined when the native exists (absent = the restore keeps the rounded whole-stack path).
+    local function split_fn()
+        local f = (native and native.inv_split) or rawget(_G, "MSCoreNative_inv_split")
+        if type(f) == "function" then return f end
+        return nil
+    end
+    if split_fn() then
+        function io.split(inv, src0, amount, dst0)
+            local fn = split_fn()
+            if not fn then return false, "inv_split gone" end
+            local ok, r = call(fn, unw(inv), src0, amount, dst0)
+            TRACE(("inv_split inv=%s src0=%d amount=%d dst0=%d -> ok=%s ret=%s"):format(tostring(unw(inv)), src0, amount, dst0,
+                tostring(ok), tostring(r)))
+            return ok, r
+        end
+    end
     -- ids of every container in the world (sorted). Used to find the containers a Build just placed.
     function io.container_ids()
         local out = {}

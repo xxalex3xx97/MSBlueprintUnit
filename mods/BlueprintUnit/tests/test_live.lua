@@ -478,6 +478,22 @@ do
     flush()
 end
 
+-- MSCore 0.7.6 inv_split native: io.split only when the native exists; ok / error passed through
+do
+    local ioN = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = {}, plan_mod = P })
+    check(ioN.split == nil, "split: no native -> io.split absent (rounded route)")
+    local sc = {}
+    local ioS = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, plan_mod = P,
+        native = { inv_split = function(...) sc[#sc + 1] = { ... }; return true end } })
+    local oks = ioS.split(202, 0, 5, 3)
+    check(oks == true and sc[1] and sc[1][1] == 202 and sc[1][2] == 0 and sc[1][3] == 5 and sc[1][4] == 3,
+          "split: native inv_split(inv, src0, amount, dst0), true passed through")
+    local ioE = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, plan_mod = P,
+        native = { inv_split = function() error("boom") end } })
+    local oke, msge = ioE.split(202, 0, 5, 3)
+    check(oke == false and tostring(msge):find("boom", 1, true) ~= nil, "split: erroring native -> false, error text")
+end
+
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)
