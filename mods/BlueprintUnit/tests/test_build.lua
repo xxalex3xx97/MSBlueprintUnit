@@ -40,6 +40,7 @@ local function fake(spec)
         max = spec.max or {}, refund_of = spec.refund_of or {}, max_per_move = spec.max_per_move,
         noop_moves = spec.noop_moves, shift_x = spec.shift_x or 0, drop_place = spec.drop_place,
         inv = { player = { id = 101, slots = spec.player }, unit = { id = 202, slots = spec.unit } },
+        live_bcls = spec.live_bcls, vanish_after = spec.vanish_after,
     }
     local function mx(item) return f.max[item] or 50 end
     local function inv_by_id(id)
@@ -87,6 +88,10 @@ local function fake(spec)
     function io.creative() return f.creative end
     function io.scan(station)
         if f.scan_err then return nil, f.scan_err end
+        if f.vanish_after and f.placed_at and not f.vanished and f.clock >= f.placed_at + f.vanish_after then
+            f.vanished = true
+            for i, m in ipairs(f.station) do if m.id > 100 then table.remove(f.station, i) break end end
+        end
         local out = {}
         for i, m in ipairs(f.station) do out[i] = m end
         return out
@@ -144,7 +149,9 @@ local function fake(spec)
         end
         if f.drop_place then return true end   -- accepted, never shows up on the station
         f.next_id = f.next_id + 1
-        f.station[#f.station + 1] = { id = f.next_id, bcls = m.bcls, x = m.x + f.shift_x, y = m.y, h = 0, rot = 0 }
+        f.placed_at = f.placed_at or f.clock
+        local bcls = f.live_bcls or m.bcls
+        f.station[#f.station + 1] = { id = f.next_id, bcls = bcls, x = m.x + f.shift_x, y = m.y, h = 0, rot = 0 }
         return true
     end
     function io.send_changes(chg)
@@ -403,8 +410,41 @@ do
     local st = run(b, f)
     local near = false
     for _, t in ipairs(traces) do if t:find("near BP_A@(0,0): id=3 x=5 y=5", 1, true) then near = true end end
-    check(st.state == "error" and st.text:find("chunk 1: 1 machines not placed (BP_A expected 2, live 1)", 1, true)
+    check(st.state == "error" and st.text:find("chunk 1: 1 machines not placed (total expected 2, live 1)", 1, true)
           and near, "count short: error names expected 2 / live 1, nearest BP_A traced")
+end
+
+-- live class name differs from the plan (BP_A -> BP_A_Live): total met -> done quickly, new machines traced
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), live_bcls = "BP_A_Live",
+                     station = { { id = 3, bcls = "BP_Old", x = 9, y = 9, h = 0, rot = 0 } } })
+    local traces = {}
+    f.io.trace = function(t) traces[#traces + 1] = t end
+    local b = B.new(f.io)
+    local t0 = f.clock
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }), M("BP_A", 2, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 6 } }), {})
+    local st = run(b, f)
+    local newln, planln = false, false
+    for _, t in ipairs(traces) do
+        if t:find("new live: id=101 bcls=BP_A_Live x=0 y=0", 1, true) then newln = true end
+        if t:find("planned: bcls=BP_A bdat=nil x=2 y=0", 1, true) then planln = true end
+    end
+    check(st.state == "done" and st.placed == 2 and st.verify == "2/2" and f.clock - t0 < 20000,
+          "class differs, total met: done quickly, verify 2/2")
+    check(newln and planln, "class differs: new live machines and planned machines traced")
+    local bl = false
+    for _, t in ipairs(traces) do if t:find("new live: id=3 ", 1, true) then bl = true end end
+    check(not bl, "baseline machine (id 3) not traced as new")
+end
+
+-- machine gone between chunk check and verify: error with expected vs live totals
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), vanish_after = 1000 })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }), M("BP_A", 2, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 6 } }), {})
+    local st = run(b, f)
+    check(st.state == "error" and st.text:find("verify missing 1 machines: total expected 2, live 1", 1, true),
+          "verify short: error with total expected 2, live 1")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

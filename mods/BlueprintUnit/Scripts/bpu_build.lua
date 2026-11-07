@@ -188,6 +188,7 @@ local function new_run(plan)
         chunk_need = {}, snap = {}, issued = {},
         placed = 0, removed = 0, moved_out = 0, moved_in = 0, verify_p = -1, verify_n = 0,
         base = {}, rem = {}, want = {},   -- live count per bcls at start, planned removals per bcls, placed per bcls (cumulative)
+        base_total = 0, base_ids = {},    -- live machine count and id set at start (diagnostics: new ids)
     }
 end
 
@@ -203,6 +204,11 @@ local function expected_of(R, bcls)
     return get(R.base, bcls) - get(R.rem, bcls) + get(R.want, bcls)
 end
 
+-- pass rule: live total (all classes) >= start total - planned removals + placed so far. Class and position never fail a build.
+local function expected_total(R)
+    return R.base_total - #R.remove_ids + R.placed
+end
+
 -- classes (set) whose live count is below expected: { {bcls, expected, live}, ... } and the total short count.
 local function short_classes(R, classes, live)
     local lc, out, total = count_by(live), {}, 0
@@ -214,12 +220,6 @@ local function short_classes(R, classes, live)
         end
     end
     return out, total
-end
-
-local function short_text(sc)
-    local parts = {}
-    for _, s in ipairs(sc) do parts[#parts + 1] = ("%s expected %d, live %d"):format(s.bcls, s.expected, s.live) end
-    return table.concat(parts, "; ")
 end
 
 -- first machine of class bcls in list (the wanted cell), or nil
@@ -257,6 +257,19 @@ function B.new(io)
             local m = c[i]
             trace(("near %s@(%d,%d): id=%s x=%s y=%s h=%s rot=%s"):format(bcls, wm.x, wm.y,
                 tostring(m.id), tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
+        end
+    end
+    -- diagnostics (trace only): live machines whose id was not in the start scan, and the planned machines given
+    local function trace_diag(ex, planned)
+        for _, m in ipairs(ex) do
+            if not R.base_ids[m.id] then
+                trace(("new live: id=%s bcls=%s x=%s y=%s h=%s rot=%s"):format(tostring(m.id), tostring(m.bcls),
+                    tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
+            end
+        end
+        for _, m in ipairs(planned) do
+            trace(("planned: bcls=%s bdat=%s x=%s y=%s h=%s rot=%s"):format(tostring(m.bcls), tostring(m.bdat),
+                tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
         end
     end
     -- ends the run with error|msg (counts). Returns false.
@@ -404,20 +417,21 @@ function B.new(io)
         R.t_next = now + 250
     end
 
-    -- stage 6: per class, live count >= expected (all chunks so far) -> next chunk at once. Position only traced.
-    -- PLACE_MS without the count -> fail with expected vs live.
+    -- stage 6: live total (all classes) >= expected total -> next chunk at once. Class/position only traced.
+    -- PLACE_MS without the total -> fail with expected vs live totals.
     local function place_wait(now)
         local P = R.plan
         local ex, err = io.scan(P.station)
         if not ex then return fail(err or "live read fault while placing") end
-        local _, total = short_classes(R, R.want, ex)
-        if total == 0 then
-            local slice = {}
-            for k = R.chunk_from, R.chunk_to - 1 do slice[#slice + 1] = P.place[k] end
+        local want, live = expected_total(R), #ex
+        local slice = {}
+        for k = R.chunk_from, R.chunk_to - 1 do slice[#slice + 1] = P.place[k] end
+        if live >= want then
             local pres, missing = present(slice, ex)
             if pres < #slice then
                 trace(("chunk %d: count met, %d of %d at planned cells (position differs from plan): %s"):format(R.chunks_done + 1, pres, #slice, missing))
             end
+            trace_diag(ex, slice)
             R.chunks_done = R.chunks_done + 1
             R.chunk_from = R.chunk_to
             R.stage_rounds = 0
@@ -426,9 +440,9 @@ function B.new(io)
             return
         end
         if now - R.t_stage > PLACE_MS then
-            local sc, _ = short_classes(R, R.want, ex)
-            for _, s in ipairs(sc) do trace_near(first_of(P.place, s.bcls), s.bcls, ex) end
-            return fail(("chunk %d: %d machines not placed (%s)"):format(R.chunks_done + 1, total, short_text(sc)))
+            trace_diag(ex, slice)
+            for _, s in ipairs(short_classes(R, R.want, ex)) do trace_near(first_of(P.place, s.bcls), s.bcls, ex) end
+            return fail(("chunk %d: %d machines not placed (total expected %d, live %d)"):format(R.chunks_done + 1, want - live, want, live))
         end
         R.t_next = now + 500
     end
@@ -518,15 +532,17 @@ function B.new(io)
             R.text = "verify could not read the station (" .. counts() .. ")"
             return
         end
-        local classes = {}
-        for k in pairs(R.want) do classes[k] = true end
-        for _, m in ipairs(P.kept) do classes[m.bcls] = true end
-        local sc, total = short_classes(R, classes, ex)
-        R.verify_p, R.verify_n = math.max(#chk - total, 0), #chk
-        if total > 0 then
-            for _, s in ipairs(sc) do trace_near(first_of(chk, s.bcls), s.bcls, ex) end
+        local want, live = expected_total(R), #ex
+        local short = math.max(want - live, 0)
+        R.verify_p, R.verify_n = math.max(#chk - short, 0), #chk
+        trace_diag(ex, P.place)
+        if short > 0 then
+            local classes = {}
+            for k in pairs(R.want) do classes[k] = true end
+            for _, m in ipairs(P.kept) do classes[m.bcls] = true end
+            for _, s in ipairs(short_classes(R, classes, ex)) do trace_near(first_of(chk, s.bcls), s.bcls, ex) end
             R.state = "error"
-            R.text = ("verify missing %d machines: %s (%s)"):format(total, short_text(sc), counts())
+            R.text = ("verify missing %d machines: total expected %d, live %d (%s)"):format(short, want, live, counts())
             return
         end
         local pex = present(chk, ex)
@@ -560,6 +576,8 @@ function B.new(io)
         if not ex then return start_fail(err or "live read fault") end
         if io.fingerprint(ex) ~= P.fp then return start_fail("station changed since import, import again") end
         R.base = count_by(ex)
+        R.base_total = #ex
+        for _, m in ipairs(ex) do if m.id ~= nil then R.base_ids[m.id] = true end end
         local ps, us, rerr = read_both()
         if not ps then return start_fail(rerr) end
         local ids = io.unit_ids()
