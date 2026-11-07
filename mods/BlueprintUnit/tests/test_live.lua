@@ -23,21 +23,41 @@ function FindAllOf(c) return world[c] end
 function FindFirstOf(c) local l = world[c]; return l and l[1] or nil end
 
 local function alive() return true end
+-- UObject stand-in: class is behind GetClass():GetFName() (as in the game, P0 cls()); there is no Class property.
 local function named(s, extra)
     local o = { IsValid = alive, GetFName = function() return { ToString = function() return s end } end }
     for k, v in pairs(extra or {}) do o[k] = v end
+    local c = o.Class
+    o.Class = nil
+    o.GetClass = function() return c or named("?") end
     return o
+end
+-- UScriptStruct stand-in: only the listed fields exist. Reading any other field is recorded in BAD
+-- (the real game crashes UE4SS on such a read, so the audit must keep BAD empty).
+local BAD = {}
+local function strukt(t, allowed)
+    return setmetatable({}, { __index = function(_, k)
+        if allowed[k] == nil then BAD[#BAD + 1] = tostring(k); error("struct has no field " .. tostring(k), 2) end
+        return t[k]
+    end })
+end
+local BLK_OK = { Class = true, Transform = true }
+local MACH_OK = { Class = true, MachineID = true, ID = true, Transform = true, SerializedMachineConfig = true }
+local XF_OK = { GridLocation = true, Height = true, GridRotation = true }
+local GL_OK = { X = true, Y = true }
+local function xform(x, y, h, rot)
+    return strukt({ GridLocation = strukt({ X = x, Y = y }, GL_OK), Height = h, GridRotation = rot }, XF_OK)
 end
 local function iname(it) return it:GetFName():ToString() end
 local function slot(name, amount)
     return { Item = name and named(name, { MaxStackSize = 50 }) or nil, Amount = amount or 0 }
 end
 local function blk(cls, x, y)
-    return { Class = named(cls), Transform = { GridLocation = { X = x, Y = y }, Height = 0, GridRotation = 0 } }
+    return strukt({ Class = named(cls), Transform = xform(x, y, 0, 0) }, BLK_OK)
 end
 local function mach(id, cls, x, y, cfg, h, rot)
-    return { Class = named(cls), MachineID = id, SerializedMachineConfig = cfg,
-             Transform = { GridLocation = { X = x, Y = y }, Height = h or 0, GridRotation = rot or 0 } }
+    return strukt({ Class = named(cls), MachineID = id, SerializedMachineConfig = cfg,
+             Transform = xform(x, y, h or 0, rot or 0) }, MACH_OK)
 end
 local function bld(dat, cls, cost)
     return named(dat, { Class = named(cls), ItemCost = cost })
@@ -90,16 +110,19 @@ world.ContainerObject = {}
 local U3, err3 = Live.find_unit(W.block, nil)
 check(U3 == nil and type(err3) == "string", "find_unit: no container -> nil, err")
 world.ContainerObject = saved
--- real game: block ID 261217 is not the station id. Station 163811 holds the block in Blueprint.Blocks,
--- container 77 has ParentID 163811, block has no GetFrame. Old code used the block ID and found nothing.
+-- real game: block ID 261217 is not the station id. Station 163811 holds the block in Blueprint.Blocks (struct, no ID),
+-- container 77 has ParentID 163811. The station id comes from the block's GetFrame (first candidate).
 local keepWorld = world
 local W4 = make_world({}, { slot() }, { slot(), slot() })
 W4.station.ID = 163811
-W4.station.Blueprint.Blocks = { get = function() return { { ID = 261217, Class = named("BPO_Station_01_C"), Transform = { GridLocation = { X = 0, Y = 0 }, Height = 0, GridRotation = 0 } } } end }
+W4.station.Blueprint.Blocks = { get = function() return { blk("BPO_Station_01_C", 0, 0) } end }
 world.ContainerObject[2].ParentID = 163811
-local U4, e4 = Live.find_unit({ ID = 261217, IsValid = alive }, nil)
+local U4, e4 = Live.find_unit({ ID = 261217, IsValid = alive, GetFrame = function() return { ID = 163811, IsValid = alive } end }, nil)
 check(U4 ~= nil and U4.station == 163811 and U4.cont.ID == 77 and U4.station_obj == W4.station,
-    "find_unit: block ID 261217 != station; station 163811 found via Blueprint.Blocks " .. tostring(e4))
+    "find_unit: station 163811 via GetFrame; block ID 261217 is not the station " .. tostring(e4))
+-- no GetFrame, no ParentID: only the block ID is left (no container matches, 2 containers) -> nil, no struct ID scan
+local U5, e5 = Live.find_unit({ ID = 261217, IsValid = alive }, nil)
+check(U5 == nil and type(e5) == "string", "find_unit: no station candidate -> nil, err (Blocks never scanned)")
 world = keepWorld
 Live.reset()
 
@@ -271,5 +294,6 @@ local st = b:status()
 check(st.state == "done" and st.placed == 2 and st.placed == #plan2.place, ("integration: done, placed %d (%s)"):format(st.placed, st.text))
 check(st.verify == "2/2" and #W2.machines == 2, "integration: verify 2/2, 2 machines on the station")
 
+check(#BAD == 0, "struct reads: only proven fields read (bad: " .. table.concat(BAD, ",") .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

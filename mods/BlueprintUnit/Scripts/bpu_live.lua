@@ -40,6 +40,14 @@ local function short(s)
     return (s:gsub("_C$", ""))
 end
 
+-- class short name of a UObject via GetClass():GetFName() (proven in P0 cls()).
+-- Never call on struct values (Blocks / Machines / slot / ItemCost entries): structs have no GetClass.
+local function clsname(o)
+    local ok, s = pcall(function() return o:GetClass():GetFName():ToString() end)
+    if ok and type(s) == "string" then return short(s) end
+    return ""
+end
+
 -- array walker. Lua table: ipairs (a table holding only .get is unwrapped first).
 -- userdata: ForEach when it exists; else a:get() once and retry; last resort GetArrayNum + index loop.
 local function each(a, fn, depth)
@@ -69,10 +77,9 @@ local function each(a, fn, depth)
     end
 end
 
--- Transform (fallback GridTransform) -> gx, gy, h, rot
+-- Transform -> gx, gy, h, rot. Only Transform{GridLocation{X,Y},Height,GridRotation} is read (P0 R1b/R1c).
 local function xf(e)
     local t = rd(e, "Transform")
-    if t == nil then t = rd(e, "GridTransform") end
     local gl = unw(rd(t, "GridLocation"))
     return unw(rd(gl, "X")), unw(rd(gl, "Y")), unw(rd(t, "Height")), unw(rd(t, "GridRotation"))
 end
@@ -99,7 +106,7 @@ local function fallback_station()
         if valid(s) and nm(s):find("^Default__") == nil then
             local n = 0
             each(bp_arr(s, "Blocks"), function() n = n + 1 end)
-            if n > 0 and (pick == nil or (short(nm(rd(s, "Class"))) == "BP_StationObject" and short(nm(rd(pick, "Class"))) ~= "BP_StationObject")) then
+            if n > 0 and (pick == nil or (clsname(s) == "BP_StationObject" and clsname(pick) ~= "BP_StationObject")) then
                 pick = s
             end
         end
@@ -107,7 +114,8 @@ local function fallback_station()
     return pick
 end
 
--- Station id candidates, best first. The block's own ID is NOT the station id, so it is never used as one.
+-- Station id candidates, best first. GetFrame (pcall) first, then block.ParentID, then the block's own ID as a
+-- last-resort key (matches a container only by coincidence). No reads on Blocks entries (structs): no ID scan.
 local function station_ids(block)
     local out, seen = {}, {}
     local function add(v)
@@ -115,19 +123,8 @@ local function station_ids(block)
     end
     local okF, fr = pcall(function() return block:GetFrame() end)
     if okF and fr then add(idOf(fr)) end
-    for _, k in ipairs({ "StationID", "AttachTargetID", "ParentID" }) do add(unw(rd(block, k))) end
-    add(idOf(unw(rd(block, "Frame"))))
-    local bid = idOf(block)
-    if bid ~= nil then
-        for _, s in ipairs(FindAllOf("StationObject") or {}) do
-            if valid(s) and nm(s):find("^Default__") == nil then
-                local hit = false
-                each(bp_arr(s, "Blocks"), function(e) if not hit and idOf(e) == bid then hit = true end end)
-                if hit then add(idOf(s)) end
-            end
-        end
-        add(bid) -- lowest priority: block id as station id (only matters when no other candidate has a container)
-    end
+    add(unw(rd(block, "ParentID")))
+    add(idOf(block))
     return out
 end
 
@@ -137,7 +134,7 @@ function L.find_unit(block, player_hint)
     local cands = station_ids(block)
     local conts = {}
     for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
-        if valid(c) and short(nm(rd(c, "Class"))) == "BP_BPUnitStoreObj_01" then conts[#conts + 1] = c end
+        if valid(c) and clsname(c) == "BP_BPUnitStoreObj_01" then conts[#conts + 1] = c end
     end
     local cont
     for _, sid in ipairs(cands) do
@@ -160,6 +157,7 @@ function L.player()
     return FindFirstOf("DMSPlayerObject")
 end
 
+-- Blocks entries are structs: only Class (object property, P0 R1b path), Transform. No GetClass, no ID.
 function L.read_blocks(st)
     local out = {}
     each(bp_arr(st, "Blocks"), function(e)
@@ -181,6 +179,7 @@ local function cfg_bytes(e)
     return nil
 end
 
+-- Machines entries are structs: MachineID (ID fallback as P0 R1c), Class (object property), Transform, SerializedMachineConfig.
 function L.read_machines(st)
     local out = {}
     each(bp_arr(st, "Machines"), function(e)
@@ -204,7 +203,7 @@ function L.read_buildables(F)
             each(rd(b, "ItemCost"), function(c)
                 cost[nm(rd(c, "Item"))] = unw(rd(c, "Amount"))
             end)
-            BUILDABLES[name] = { bcls = short(nm(rd(b, "Class"))), cost = cost }
+            BUILDABLES[name] = { bcls = clsname(b), cost = cost }
         end
     end
     return BUILDABLES
