@@ -236,18 +236,13 @@ end
 
 -- Machines entries are structs: MachineID (ID fallback as P0 R1c), Class (object property), Transform, SerializedMachineConfig.
 function L.read_machines(st)
-    local out, i, idkey = {}, 0, nil
+    local out, i = {}, 0
     each(bp_arr(st, "Machines"), function(e)
         i = i + 1
         if i == 1 or i % 50 == 0 then TRACE("machine[" .. i .. "] reading") end
-        -- a missing struct field throws inside UE4SS (traceback, can crash): decide the id field once on entry 1, then read only it
-        if idkey == nil then
-            idkey = "ID"
-            if unw(rd(e, "ID")) == nil then idkey = "MachineID" end
-            TRACE("machine id field=" .. idkey)
-        end
-        MT(i, "id")
-        local id = unw(rd(e, idkey))
+        -- MachineID is the id field on Machines entries (in-game trace 2026-11-07: ID is absent). Never probe a missing struct field:
+        -- the throw corrupts UE4SS Lua state ("Ref was not function", bogus index errors, native crashes).
+        local id = unw(rd(e, "MachineID"))
         MT(i, "class")
         local cls = short(nm(rd(e, "Class")))
         MT(i, "class=" .. cls)
