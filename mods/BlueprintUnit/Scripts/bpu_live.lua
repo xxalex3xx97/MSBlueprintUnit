@@ -7,7 +7,8 @@ local L = {}
 L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
 -- Trace trail for native crashes: print + append to <mod dir>pu_trace.log (open/append/flush/close per call).
-local TRACE_PATH = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../bpu_trace.log"
+local MOD_DIR = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../"   -- Mods/BlueprintUnit/, not the process cwd
+local TRACE_PATH = MOD_DIR .. "bpu_trace.log"
 local function TRACE(m)
     m = tostring(m)
     print("[BPUnit] " .. m)
@@ -562,9 +563,9 @@ function L.make_io(ctx)
     -- restore mode: "on" when Mods/BlueprintUnit/restore_on.txt exists, "probe" when restore_probe.txt exists (5 items of
     -- one item only), else "off". The cursor restore crashed the game once: off unless one of the files is there.
     function io.restore_mode()
-        local f = _G.io.open("Mods/BlueprintUnit/restore_on.txt", "rb")
+        local f = _G.io.open(MOD_DIR .. "restore_on.txt", "rb")
         if f then f:close() return "on" end
-        f = _G.io.open("Mods/BlueprintUnit/restore_probe.txt", "rb")
+        f = _G.io.open(MOD_DIR .. "restore_probe.txt", "rb")
         if f then f:close() return "probe" end
         return "off"
     end
