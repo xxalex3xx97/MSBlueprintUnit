@@ -60,8 +60,6 @@ local WF = { "PrimaryInventoryID", "SecondaryInventoryID", "SlotIndex" }
 -- candidate paths; each is tried on its own (a missing one logs FAILED once, then is retried on open)
 local FN = {
     { path = "/Script/MainSequence.DMSPlayerController:AddInputCommand", h = onAdd },
-    { path = "/Script/MainSequence.DMSPlayerController:AddInventoryInteraction", names = { "interaction" }, fields = IX, from = "p1" },
-    { path = "/Game/Blueprints/Player/BP_PlayerController.BP_PlayerController_C:AddInventoryInteraction", names = { "interaction" }, fields = IX, from = "p1" },
     { path = INV .. "WBP_Inventory.WBP_Inventory_C:OnSlotPressed", names = { "event" }, fields = WF },
     { path = INV .. "WBP_Inventory.WBP_Inventory_C:OnSlotReleased", names = { "event" }, fields = WF },
     { path = INV .. "WBP_InventorySlot.WBP_InventorySlot_C:OnSlotPressed", names = { "event" }, fields = WF },

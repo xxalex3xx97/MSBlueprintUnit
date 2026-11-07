@@ -4,6 +4,21 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+- Container contents restore is on by default. An optional `Chk_Restore` checkbox turns it off (unchecked = off). `Mods\BlueprintUnit\restore_off.txt` forces it off; `restore_probe.txt` runs the 5-item probe. `restore_on.txt` is no longer needed.
+- Restore moves whole unit stacks only (one TRANSFER per stack, no cursor, no put-back). Amounts are rounded to whole stacks: a stack is moved when the missing amount is at least half of it (the container can get up to half a stack more than the blueprint count), and a smaller remainder is left out with a note ("left out (under half a unit stack)").
+- A container's stack room is respected: a partial move leaves the rest in the unit, and a full container is noted ("container id N full").
+- A refused send is retried on the next tick (up to 5 times), then skipped and counted in the note ("N command(s) skipped (refused)"). The restore never aborts for it.
+- Restore sends up to 1000 commands per tick. It stops only when nothing changes in the restored items for 8 s after the last send (no fixed wait).
+- Progress line while building and restoring: "restoring [#####-----] 50%  (1,234 of 2,468 commands)" and "sending commands: n of m (x%)".
+- Build button: while a build or restore runs it reads **Abort** and cancels the run. Closing the window also cancels it.
+- Notes panel hides the "skipped (block-built ...)" and "ConfigHex ignored for paired underground ..." lines. They stay in `bpu_trace.log`.
+
+### Fixed
+- A restore whose verify timed out while the game was still applying commands ended with a short container and no retry. Now the verify waits as long as the restored items keep changing.
+- Shortages inside a full container were dropped without a note. Every shortage now has a note.
+- Diagnostics hooks on the inventory command (`AddInventoryInteraction`) are no longer registered in the release path.
+
 ## [0.1.0] - 2026-11-07
 
 Requires **MSCore 0.7.5 or newer** (install or update with MSCoreManager).

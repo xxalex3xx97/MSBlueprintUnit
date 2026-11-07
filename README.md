@@ -45,7 +45,9 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 - Takes the items it needs from the unit's inventory first, then from your inventory.
 - Refunds go into the unit inventory.
 - Leftover items stay with you.
-- Items inside removed containers also refund into the unit. Rebuilt containers come back empty: restoring their contents is experimental and off (see the changelog).
+- Items inside removed containers also refund into the unit.
+- Container contents from the blueprint are restored into the new containers from the unit inventory, in whole stacks (see the changelog). Turn it off with the **Restore** checkbox.
+- While a build or restore runs, the **Build** button reads **Abort** and cancels it. Closing the window cancels it too; items already moved stay where they are.
 
 **Blueprint Unit inventory:** 120 slots, +10,000% stack size.
 

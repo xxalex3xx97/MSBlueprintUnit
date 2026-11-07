@@ -560,14 +560,14 @@ function L.make_io(ctx)
         if inv == nil then return nil end
         return L.read_inv(inv)
     end
-    -- restore mode: "on" when Mods/BlueprintUnit/restore_on.txt exists, "probe" when restore_probe.txt exists (5 items of
-    -- one item only), else "off". The cursor restore crashed the game once: off unless one of the files is there.
+    -- restore mode: "off" when Mods/BlueprintUnit/restore_off.txt exists, "probe" when restore_probe.txt exists (5 items of
+    -- one item only), else "on". The window's Chk_Restore checkbox is applied by the builder (builder:start opts.restore).
     function io.restore_mode()
-        local f = _G.io.open(MOD_DIR .. "restore_on.txt", "rb")
-        if f then f:close() return "on" end
+        local f = _G.io.open(MOD_DIR .. "restore_off.txt", "rb")
+        if f then f:close() return "off" end
         f = _G.io.open(MOD_DIR .. "restore_probe.txt", "rb")
         if f then f:close() return "probe" end
-        return "off"
+        return "on"
     end
 
     function io.send_inv(prim, sec, slot0, action)
