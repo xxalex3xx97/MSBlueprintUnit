@@ -233,6 +233,19 @@ do
     check(not dup, "window: build status not written to Txt_Summary (single result line)")
 end
 
+-- keep the plan after errors (source checks: bpu_window needs the UE4SS globals, no behavioural fake here)
+do
+    local fw = assert(io.open(dir .. "../Scripts/bpu_window.lua", "rb"))
+    local src = fw:read("a")
+    fw:close()
+    check(src:find("okT, errT = pcall(", 1, true) ~= nil and src:find("build tick ERROR", 1, true) ~= nil,
+          "window: tick error is caught, traced, and ends the run")
+    check(src:find("finishBuild replan failed", 1, true) ~= nil and src:find("buildClick replan failed", 1, true) ~= nil,
+          "window: replan failures traced")
+    check(src:find('if not S.plan and not S.text then setStatus("import first")', 1, true) ~= nil,
+          "window: Build says import first only when S.text is nil")
+end
+
 -------------------------------------------------------------------- make_io (recording natives)
 local calls = {}
 local native = {}

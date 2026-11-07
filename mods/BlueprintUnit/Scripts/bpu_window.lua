@@ -233,7 +233,11 @@ local function finishBuild(run)
   KEPT.has = true   -- the result line is the Notes status line (buildLoop); the plan summary stays
   local okR, err = pcall(function()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F), F)
-    if not plan then setStatus("error: " .. tostring(perr)); return end
+    if not plan then
+      Live.trace("finishBuild replan failed: " .. tostring(perr))
+      setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
+      return
+    end
     S.plan = plan
     fillCost(Plan.cost_rows(plan))
   end)
@@ -241,17 +245,24 @@ local function finishBuild(run)
 end
 
 -- polls the builder every 300 ms on the game thread. Stops (returns true) when the run was replaced or closed.
+-- A Lua error in a tick ends the run (finishBuild sets S.run = nil, the next poll returns true); S.plan / S.text stay.
 local function buildLoop(run)
   return function()
     if S.run ~= run then return true end
     pcall(ExecuteInGameThread, function()
-      pcall(function()
+      local okT, errT = pcall(function()
         if S.run ~= run then return end
         S.builder:tick(S.io.now())
         local st = S.builder:status()
         setStatus(st.text)
         if st.state == "done" or st.state == "error" then finishBuild(run) end
       end)
+      if not okT then
+        Live.trace("build tick ERROR " .. tostring(errT))
+        NOTE.status = "error: " .. tostring(errT)
+        renderNotes()
+        finishBuild(run)
+      end
     end)
     return false
   end
@@ -260,12 +271,16 @@ end
 -- Btn_Build: re-plan from the saved text (station may have changed), start the builder, poll it.
 local function buildClick()
   if S.run then return end
-  if not S.plan then setStatus("import first"); return end
+  if not S.plan and not S.text then setStatus("import first"); return end
   readStationBuild()
   local okRun, err = pcall(function()
     local live = Live.snapshot(S.U, F)
     local plan, perr = Plan.plan(S.text, live, F)
-    if not plan then setStatus("error: " .. tostring(perr)); return end
+    if not plan then
+      Live.trace("buildClick replan failed: " .. tostring(perr))
+      setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
+      return
+    end
     S.plan = plan
     if not S.builder then   -- one builder per window open
       S.io = Live.make_io({ unit = S.U, player = S.player, ctl = S.ctl, F = F, native = native, plan_mod = Plan, buildables = live.buildables })
