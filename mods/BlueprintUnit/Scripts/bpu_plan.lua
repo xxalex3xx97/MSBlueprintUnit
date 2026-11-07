@@ -735,10 +735,16 @@ local function build(text, live, F, opts)
         for item, n in pairs(cost) do into[item] = (into[item] or 0) + n end
     end
     for _, m in ipairs(machines) do add(need, buildables[m.dat].cost or {}) end
-    for _, e in ipairs(removed) do
+    for i, e in ipairs(removed) do
         local dat = (e.dat and buildables[e.dat] and e.dat) or dat_for_cls(e.bcls or "")
         if not dat then bail("refund cost unknown for " .. tostring(e.bcls)) end
-        add(refund, buildables[dat].cost or {})
+        local cost = buildables[dat].cost or {}
+        add(refund, cost)
+        -- copy of the live entry with its own refund (bpu_build sizes removal batches by it)
+        local c = {}
+        for k, v in pairs(e) do c[k] = v end
+        c.refund = cost
+        removed[i] = c
     end
 
     local removes = {}

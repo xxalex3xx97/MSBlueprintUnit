@@ -2,7 +2,9 @@
 -- No game globals. Every game call goes through the injected `io` table (see B.new).
 -- Lua side: slots and machines are 1-based. io.send_move gets the 0-based game slot index.
 -- Items are matched by item name (ITEM_HullPlate), same keys as plan.need / plan.refund.
--- Transaction: every check runs in start() before the first command is sent. After the last command the run is done.
+-- Checks run in start() before the first command. Removals go in batches sized by the free player room (a refund lands in
+-- the player inventory): a batch waits for its refund, moves the unneeded refund to the unit, the next batch waits for that
+-- room to come back. A stall ends the run with a note. After the last command the run is done.
 -- Waits only where a later command needs an earlier one applied: staged items before the BuildInputs that charge them,
 -- a removal before a placement on the same cell, the charge before the next chunk (frees player space).
 
@@ -11,9 +13,11 @@ local B = {}
 local TOTAL_MS = 300000   -- whole run
 local STAGE_MS = 10000    -- staging round stalls after this
 local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
-local REFUND_MAX_MS = 1500   -- after a removal: the refund must show in the player inventory within this, else the move is skipped
-local SETTLE_MS = 500     -- removal before a placement, no refund items: short settle, then go
+local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the player inventory within this, else STALL
+local DRAIN_MS = 3000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
+local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
 local POLL_MS = 250
+local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 
 local function get(m, k) return m[k] or 0 end
 
@@ -126,14 +130,10 @@ local function build_rneed(refund, maxOf)
     return out
 end
 
--- "" when the refund fits the player inventory; else the refusal text.
-local function refund_check(rneed, slots)
-    if #rneed == 0 then return "" end
-    local f = refund_fit(slots, rneed)
-    if f.missing == 0 then return "" end
-    local parts = {}
-    for _, n in ipairs(rneed) do parts[#parts + 1] = (n.item .. " x%d"):format(n.amount) end
-    return ("not enough inventory space for refunds: need %d more slots (items: %s)"):format(math.max(f.missing, 1), table.concat(parts, ", "))
+-- true when the needs fit the slots with `reserve` empty slots kept back. No new slot needed = always fits.
+local function room_ok(slots, needs, reserve)
+    local f = refund_fit(slots, needs)
+    return f.need == 0 or f.need <= f.empty - reserve
 end
 
 -- Longest run of machines from index `from` whose cumulative cost fits the player's free space.
@@ -211,7 +211,8 @@ local function new_run(plan)
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false,
-        rneed = {}, remove_ids = {}, costs = {},
+        rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
+        drain = {}, costs = {},   -- rem_list = { {id, bcls, refund = cost map} } in removal order; batch = rem_pos..last sent
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
         chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
         placed = 0, removed = 0, moved_in = 0, refund_moved = false,
@@ -282,28 +283,14 @@ function B.new(io)
         return ok
     end
 
-    -- DisassembleInput per planned removal. Refund items: stage 2 waits for them in the player inventory (1.5 s cap),
-    -- then the refund moves to the unit. Overlap with a placement: the placement waits for the same stage.
-    -- Neither: the placements go straight after (back to back).
-    local function send_removals(now, held)
-        local sent = 0
-        for _, id in ipairs(R.remove_ids) do
-            if io.send_remove(id) then sent = sent + 1; R.removed_list[#R.removed_list + 1] = id end
-        end
-        R.removed = sent
-        if sent ~= #R.remove_ids then
-            return fail(("removal refused for %d machines"):format(#R.remove_ids - sent))
-        end
-        R.rem_before = held
-        set_status("working", ("removing %d machines"):format(sent))
-        if R.overlap or any_refund(R.plan.refund) then
-            R.stage = 2
-            R.t_stage = now
-            R.t_next = now + POLL_MS
-        else
-            R.stage = 4
-            R.t_next = now
-        end
+    -- run ends with a short note (no more removals, no placements). Removed machines stay in the live overlay.
+    local function stall(detail)
+        R.state = "error"
+        R.text = (R.removed > 0 and ("stopped after %d removals: "):format(R.removed) or "") .. detail
+        R.active = false
+        R.stage = 0
+        mark_changed()
+        return false
     end
 
     local function send_changes_once()
@@ -437,37 +424,130 @@ function B.new(io)
         R.t_next = now + POLL_MS
     end
 
-    -- stage 2: wait until the refund shows in the player inventory (REFUND_MAX_MS cap; SETTLE_MS without refund items).
-    -- Arrived -> the unneeded refund stacks go to the unit, one pair each, no result poll. Not arrived -> no move.
-    -- Then the placements go on at once (chunk_start). The station view is not read.
-    local function removal_wait(now)
+    -- all removals sent. A placement on a removed cell waits for the removal: a refund already seen confirms it,
+    -- else SETTLE_MS from the last send. Then the placements (chunk_start).
+    local function after_removals(now)
+        if R.overlap and not R.removal_confirmed and now < R.t_removed + SETTLE_MS then
+            R.stage = 9
+            R.t_next = R.t_removed + SETTLE_MS
+            return
+        end
+        return chunk_start(now)
+    end
+
+    local send_batches   -- forward (batch -> move -> drain -> next batch)
+
+    -- stage 2: the batch refund must show in the player inventory (REFUND_MAX_MS, else STALL).
+    -- The refund items the build does not need leave the player (move_out). Nothing moves in creative.
+    local function move_out(now, ps, us)
+        local mo = R.creative and {} or moveout_slots(ps, R.batch_set)
+        if #mo == 0 then return send_batches(now) end
+        local moved = {}
+        for _, s in ipairs(mo) do moved[ps[s].item] = get(moved, ps[s].item) + ps[s].amount end
+        if not room_ok(us, build_rneed(moved, capmap(io, us, ps)), 0) then
+            return stall("the unit inventory is full, empty it and Build again")
+        end
+        for _, s in ipairs(mo) do
+            trace(("moveout: chosen slot0=%d item=%s amount=%d"):format(s - 1, ps[s].item, ps[s].amount))
+        end
+        for _, s in ipairs(mo) do
+            if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
+        end
+        R.refund_moved = true
+        -- a later batch needs the room back: wait for it (stage 8). The last batch goes on at once, as before.
+        if R.rem_pos > #R.rem_list then return after_removals(now) end
+        R.drain = moved
+        R.stage = 8
+        R.t_stage = now
+        R.t_next = now + POLL_MS
+    end
+
+    local function arrival_wait(now)
         local ps, us, err = read_both()
         if not ps then return fail(err) end
-        local arrived = refund_arrived(R.plan.refund, totals(ps), R.rem_before)
-        local limit = any_refund(R.plan.refund) and REFUND_MAX_MS or SETTLE_MS
-        if not arrived and now - R.t_stage < limit then
+        if not refund_arrived(R.batch_refund, totals(ps), R.rem_before) then
+            if now - R.t_stage >= REFUND_MAX_MS then
+                return stall("the refund did not show in the player inventory within 2 s, check the game, then Build again")
+            end
             R.t_next = now + POLL_MS
             return
         end
-        if arrived and not R.creative then
-            local mo = moveout_slots(ps, moveset(R.plan.refund, R.plan.need))
-            if #mo > 0 then R.refund_moved = true end
-            for _, s in ipairs(mo) do
-                trace(("moveout: chosen slot0=%d item=%s amount=%d"):format(s - 1, ps[s].item, ps[s].amount))
+        R.removal_confirmed = true
+        return move_out(now, ps, us)
+    end
+
+    -- stage 8: the moved refund must leave the player (DRAIN_MS, else STALL). Then the next batch.
+    local function drain_wait(now)
+        local ps, _, err = read_both()
+        if not ps then return fail(err) end
+        local held = totals(ps)
+        for item in pairs(R.drain) do
+            if get(held, item) > 0 then
+                if now - R.t_stage >= DRAIN_MS then
+                    return stall("the game did not move the refund into the unit, empty your inventory and Build again")
+                end
+                R.t_next = now + POLL_MS
+                return
             end
-            for _, s in ipairs(mo) do
-                if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
-            end
-        elseif any_refund(R.plan.refund) then
-            trace(("moveout: refund not in the player inventory within %d ms, no move"):format(limit))
         end
-        set_status("working", "removal done")
-        return chunk_start(now)
+        return send_batches(now)
+    end
+
+    -- next batch: the longest run of removals from rem_pos whose cumulative refund fits the player inventory
+    -- (RESERVE empty slots kept back). Returns the last index (rem_pos - 1 = none) and the batch refund map.
+    local function pick_batch(ps, us)
+        local maxOf = capmap(io, ps, us)
+        local cum, to = {}, R.rem_pos - 1
+        for k = R.rem_pos, #R.rem_list do
+            local trial = {}
+            for item, v in pairs(cum) do trial[item] = v end
+            for item, v in pairs(R.rem_list[k].refund) do trial[item] = get(trial, item) + v end
+            if not room_ok(ps, build_rneed(trial, maxOf), RESERVE) then break end
+            cum, to = trial, k
+        end
+        return to, cum
+    end
+
+    -- sends removal batches. A batch with refund waits for it (stage 2). A batch without refund: the next one at once.
+    -- Stops at a wait, a stall, or after the last removal (after_removals).
+    send_batches = function(now)
+        while R.rem_pos <= #R.rem_list do
+            local ps, us, err = read_both()
+            if not ps then return fail(err) end
+            local to, cum = pick_batch(ps, us)
+            if to < R.rem_pos then
+                local m = R.rem_list[R.rem_pos]
+                return stall(("the refund of %s (id %s) does not fit the player inventory, empty your inventory and Build again"):format(m.bcls, tostring(m.id)))
+            end
+            local refused = 0
+            for k = R.rem_pos, to do
+                if io.send_remove(R.rem_list[k].id) then
+                    R.removed = R.removed + 1
+                    R.removed_list[#R.removed_list + 1] = R.rem_list[k].id
+                else
+                    refused = refused + 1
+                end
+            end
+            R.rem_pos = to + 1
+            if refused > 0 then return fail(("removal refused for %d machines"):format(refused)) end
+            R.t_removed = now
+            R.removal_confirmed = false
+            R.batch_refund, R.batch_set = cum, moveset(cum, R.plan.need)
+            R.rem_before = totals(ps)
+            set_status("working", ("removing %d of %d machines"):format(R.removed, #R.rem_list))
+            if any_refund(cum) then
+                R.stage = 2
+                R.t_stage = now
+                R.t_next = now + POLL_MS
+                return
+            end
+        end
+        return after_removals(now)
     end
 
     local builder = {}
 
-    -- start(plan, opts): checks everything first (station, totals, creative, refund room); nothing is sent on a refusal.
+    -- start(plan, opts): checks station, totals, creative; sends the first removal batch. Nothing is sent on a refusal.
     -- opts is accepted for the contract, not used.
     function builder:start(plan, _opts)
         if R.active then return false, "error: busy: another build is running" end
@@ -506,8 +586,12 @@ function B.new(io)
             local terr = total_check(P.need, P.refund, totals(ps), totals(us))
             if terr ~= "" then return start_fail(terr) end
         end
-        for _, m in ipairs(P.removed) do R.remove_ids[#R.remove_ids + 1] = m.id end
-        if #P.place == 0 and #R.remove_ids == 0 and #P.chg == 0 then
+        for _, m in ipairs(P.removed) do
+            -- per-machine refund is what the batches are sized by: without it a batch could overflow the player
+            if type(m.refund) ~= "table" then return start_fail("refund unknown for " .. tostring(m.bcls) .. ", import again") end
+            R.rem_list[#R.rem_list + 1] = { id = m.id, bcls = m.bcls, refund = m.refund }
+        end
+        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 then
             R.state = "done"
             R.text = "nothing to build"
             return true, "ok nothing to build"
@@ -515,16 +599,11 @@ function B.new(io)
 
         R.active = true
         R.overlap = overlaps(P.removed, P.place)
-        if #R.remove_ids > 0 then
-            R.rneed = build_rneed(P.refund, capmap(io, ps, us))
-            local fit = refund_check(R.rneed, ps)
-            if fit ~= "" then return start_fail(fit) end   -- refused before any command; nothing moves
-            send_removals(now, totals(ps))
+        if #R.rem_list > 0 then
+            send_batches(now)   -- first batch sent here (a refusal before any command: start returns false)
         else
-            R.stage = 4
-            R.t_next = now
+            chunk_start(now)    -- no removal: the placements go back to back
         end
-        if R.stage == 4 then chunk_start(now) end   -- no removal to wait for: the placements go back to back
         if R.state == "error" then return false, "error: " .. R.text end
         return true, "ok build started"
     end
@@ -534,10 +613,11 @@ function B.new(io)
         if not R.active or now < R.t_next then return end
         if now - R.t_start > TOTAL_MS then return fail("timeout after 300 s") end
         local s = R.stage
-        if s == 2 then removal_wait(now)
-        elseif s == 4 then chunk_start(now)
+        if s == 2 then arrival_wait(now)
+        elseif s == 4 or s == 9 then chunk_start(now)
         elseif s == 5 then staging_wait(now)
         elseif s == 6 then charge_wait(now)
+        elseif s == 8 then drain_wait(now)
         else fail("internal: unknown stage " .. s) end
     end
 
@@ -565,7 +645,7 @@ end
 -- pure helpers, exposed for the tests
 B.pure = {
     totals = totals, maxes = maxes, list = list, shortfall = shortfall, total_check = total_check,
-    stage_moves = stage_moves, refund_fit = refund_fit, refund_check = refund_check, chunk_len = chunk_len,
+    stage_moves = stage_moves, refund_fit = refund_fit, room_ok = room_ok, chunk_len = chunk_len,
     overlaps = overlaps,
 }
 

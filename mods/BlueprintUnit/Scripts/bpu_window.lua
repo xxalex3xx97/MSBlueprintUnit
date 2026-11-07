@@ -32,10 +32,12 @@ local CONTRACT = { "Panel", "Txt_Title", "Btn_Close", "Txt_Close", "Txt_Status",
 -- S.imp = import modal shown. S.U = unit (Live.find_unit). S.plan / S.text = last import. S.run = token of the running build.
 local S = { h = nil, w = nil, p = nil, U = nil, player = nil, ctl = nil, tc = nil, imp = false,
   plan = nil, text = nil, builder = nil, io = nil, run = nil, stationBuild = false, t0 = 0 }
--- KEPT (module level, survives close/reopen): last text of the result boxes and the cost rows, re-rendered by openWindow.
+-- KEPT (module level, survives close/reopen): the cost rows, and NOTE = the text of the Notes panel (re-rendered by openWindow).
 -- has = an import or build ran in this session. S.plan / S.text are kept too (Build re-plans from S.text).
-local KEPT = { has = false, txt = {}, rows = {} }
-local KEPT_NAMES = { Txt_Status = true, Txt_Summary = true, Txt_Notes = true, Txt_Removes = true }
+-- Notes panel (Txt_Notes) = status line, plan summary, removes line, folded notes. Txt_Status, Txt_Summary and Txt_Removes
+-- are collapsed (empty): no text above the buttons.
+local KEPT = { has = false, rows = {} }
+local NOTE = { status = "", summary = "", removes = "", list = "" }
 
 -- ESlateVisibility: 0 Visible, 1 Collapsed
 local function setVis(o, shown) if ok(o) then try("vis", function() o:SetVisibility(shown and 0 or 1) end) end end
@@ -52,7 +54,6 @@ end
 
 -- SetText(FText) on the TextBlock; unchanged writes skipped (S.tc). Never read an edit box right after this.
 local function txt(name, s)
-  if KEPT_NAMES[name] then KEPT.txt[name] = s end
   S.tc = S.tc or {}
   if S.tc[name] == s then return end
   local tb = w(name); if not ok(tb) then return end
@@ -61,6 +62,20 @@ end
 
 -- text block + its visibility (hidden when empty)
 local function showText(name, s) txt(name, s); setVis(w(name), s ~= "") end
+
+-- Notes panel text from NOTE (empty parts skipped)
+local function renderNotes()
+  local parts = {}
+  for _, p in ipairs({ NOTE.status, NOTE.summary, NOTE.removes, NOTE.list }) do
+    if p ~= "" then parts[#parts + 1] = p end
+  end
+  showText("Txt_Notes", table.concat(parts, "\n"))
+end
+-- the status line (import result, build progress, error): first line of the Notes panel
+local function setStatus(s)
+  NOTE.status = s or ""
+  renderNotes()
+end
 
 local function setEnabled(name, b) local o = w(name); if ok(o) then pcall(function() o:SetIsEnabled(b) end) end end
 local function setBuildBtns(on) setEnabled("Btn_Build", on); setEnabled("Btn_Import", on) end
@@ -131,11 +146,10 @@ function M.isOpen() return S.h ~= nil and ok(S.w) end
 -- import modal state (Lua flag + window valid)
 function M.impOpen() return S.imp == true and ok(S.w) end
 
--- results area: summary, removes, cost rows back to empty
+-- results area: notes, cost rows back to empty
 local function resetResults()
-  showText("Txt_Summary", "")
-  showText("Txt_Notes", "")
-  showText("Txt_Removes", "")
+  NOTE.status, NOTE.summary, NOTE.removes, NOTE.list = "", "", "", ""
+  renderNotes()
   fillCost({})
 end
 
@@ -167,8 +181,8 @@ local function impOk()
   if not M.impOpen() then return end
   local box = w("Edt_ImportJson")
   local sr, text = pcall(function() return box:GetText():ToString() end)
-  if not ok(box) or not sr or type(text) ~= "string" then txt("Txt_Status", "error: could not read text"); return end
-  if text == "" then txt("Txt_Status", "paste the blueprint JSON first"); return end
+  if not ok(box) or not sr or type(text) ~= "string" then setStatus("error: could not read text"); return end
+  if text == "" then setStatus("paste the blueprint JSON first"); return end
   -- GC off while the station structs are read: UE4SS crashes in luaL_traceback (dead table keys) when a collection runs mid-read
   collectgarbage("stop")
   local okRun, err = xpcall(function()
@@ -183,12 +197,12 @@ local function impOk()
     t0 = os.clock()
     local plan, perr = Plan.plan(text, live, F, { trace = Live.trace })
     Live.trace(("impOk plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
-    if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
+    if not plan then setStatus("error: " .. tostring(perr)); return end
     S.plan, S.text = plan, text
     KEPT.has = true
-    txt("Txt_Status", "Blueprint: " .. (plan.name or "Ready"))
-    showText("Txt_Summary", Plan.summary(plan))
-    -- notes panel (right, scrollable): same text folded into "xN", no cap
+    NOTE.summary = Plan.summary(plan)
+    NOTE.removes = Plan.removes_text(plan)
+    -- notes (scrollable): same text folded into "xN", no cap
     local order, count = {}, {}
     for _, n in ipairs(plan.notes or {}) do
       if not count[n] then count[n] = 0; order[#order + 1] = n end
@@ -198,8 +212,8 @@ local function impOk()
     for _, n in ipairs(order) do
       lines[#lines + 1] = count[n] > 1 and (n .. " x" .. count[n]) or n
     end
-    showText("Txt_Notes", table.concat(lines, "\n"))
-    showText("Txt_Removes", Plan.removes_text(plan))
+    NOTE.list = table.concat(lines, "\n")
+    setStatus("Blueprint: " .. (plan.name or "Ready"))
     t0 = os.clock()
     local rows = Plan.cost_rows(plan)
     fillCost(rows)
@@ -208,7 +222,7 @@ local function impOk()
     Live.trace("impOk done")
   end, function(e) Live.trace("impOk ERROR " .. tostring(e) .. " | " .. (tostring(debug.traceback("", 2)):gsub("\n", " ; "))); return e end)
   collectgarbage("restart")
-  if not okRun then L("import failed: " .. tostring(err)); txt("Txt_Status", "error: import failed: " .. tostring(err)) end
+  if not okRun then L("import failed: " .. tostring(err)); setStatus("error: import failed: " .. tostring(err)) end
 end
 
 -- end of a build run: buttons back, result line, cost list re-planned from the saved text (what is still missing)
@@ -216,10 +230,10 @@ local function finishBuild(run)
   if S.run ~= run then return end
   S.run = nil
   setBuildBtns(true)
-  KEPT.has = true   -- the result line is Txt_Status (buildLoop); Txt_Summary stays the plan summary
+  KEPT.has = true   -- the result line is the Notes status line (buildLoop); the plan summary stays
   local okR, err = pcall(function()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F), F)
-    if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
+    if not plan then setStatus("error: " .. tostring(perr)); return end
     S.plan = plan
     fillCost(Plan.cost_rows(plan))
   end)
@@ -235,7 +249,7 @@ local function buildLoop(run)
         if S.run ~= run then return end
         S.builder:tick(S.io.now())
         local st = S.builder:status()
-        txt("Txt_Status", st.text)
+        setStatus(st.text)
         if st.state == "done" or st.state == "error" then finishBuild(run) end
       end)
     end)
@@ -246,30 +260,30 @@ end
 -- Btn_Build: re-plan from the saved text (station may have changed), start the builder, poll it.
 local function buildClick()
   if S.run then return end
-  if not S.plan then txt("Txt_Status", "import first"); return end
+  if not S.plan then setStatus("import first"); return end
   readStationBuild()
   local okRun, err = pcall(function()
     local live = Live.snapshot(S.U, F)
     local plan, perr = Plan.plan(S.text, live, F)
-    if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
+    if not plan then setStatus("error: " .. tostring(perr)); return end
     S.plan = plan
     if not S.builder then   -- one builder per window open
       S.io = Live.make_io({ unit = S.U, player = S.player, ctl = S.ctl, F = F, native = native, plan_mod = Plan, buildables = live.buildables })
       S.builder = Build.new(S.io)
     end
     local started, msg = S.builder:start(plan)
-    if not started then txt("Txt_Status", msg); return end
+    if not started then setStatus(msg); return end
     local run = {}
     S.run = run
     setBuildBtns(false)
-    txt("Txt_Status", S.builder:status().text)
+    setStatus(S.builder:status().text)
     LoopAsync(300, buildLoop(run))
   end)
   if not okRun then
     L("build failed: " .. tostring(err))
     S.run = nil
     setBuildBtns(true)
-    txt("Txt_Status", "error: build failed: " .. tostring(err))
+    setStatus("error: build failed: " .. tostring(err))
   end
 end
 
@@ -344,7 +358,7 @@ function M.close()
   if not h then return end
   if S.run and S.builder then
     pcall(function() S.builder:cancel() end)
-    KEPT.txt.Txt_Status = S.builder:status().text   -- the line shown on reopen: the cancelled result
+    NOTE.status = S.builder:status().text   -- the line shown on reopen: the cancelled result
   end
   S.h, S.w, S.p, S.U, S.player, S.ctl = nil, nil, nil, nil, nil, nil
   S.builder, S.io, S.run, S.tc, S.imp = nil, nil, nil, nil, false   -- S.plan / S.text stay (Build re-plans from S.text)
@@ -391,8 +405,11 @@ local function openWindow(block, player, ctl)
   bind("Btn_ImportOk", impOk)
 
   setVis(w("Pnl_ImportModal"), false)
-  if KEPT.has then   -- reopen in the same session: the last results again
-    for _, n in ipairs({ "Txt_Status", "Txt_Summary", "Txt_Notes", "Txt_Removes" }) do showText(n, KEPT.txt[n] or "") end
+  showText("Txt_Status", "")    -- collapsed: the text lives in the Notes panel
+  showText("Txt_Summary", "")
+  showText("Txt_Removes", "")
+  if KEPT.has then   -- reopen in the same session: the last results again (Notes from NOTE)
+    renderNotes()
     fillCost(KEPT.rows)
   else
     resetResults()

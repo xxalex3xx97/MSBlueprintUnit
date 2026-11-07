@@ -109,7 +109,8 @@ local function fake(spec)
         for i, s in ipairs(v.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
         return { slots = slots, id = v.id, ok = true, mult = f.mult[which] }
     end
-    if spec.raw then io.item_max = function(k) return spec.raw[k] or 1 end end   -- raw MaxStackSize (live: Item UObject)
+    -- raw MaxStackSize (live: Item UObject); 50 = the fake's stack size for items not listed in spec.raw
+    io.item_max = function(k) local r = spec.raw; return r and r[k] or 50 end
     function io.unit_ids() return { unit_id = 202, player_id = 101 } end
     function io.costs(place)
         local out = {}
@@ -167,9 +168,16 @@ local function fake(spec)
 end
 
 local function plan_for(f, o)
+    local removed = {}
+    for i, m in ipairs(o.removed or {}) do   -- per-machine refund (plan.removed entries); a single removal gets the plan refund
+        local c = {}
+        for k, v in pairs(m) do c[k] = v end
+        c.refund = m.refund or o.refund or {}
+        removed[i] = c
+    end
     return {
         valid = true, station = 1, fp = f.io.fingerprint(f.station), name = "T",
-        place = o.place or {}, kept = {}, chg = {}, removed = o.removed or {},
+        place = o.place or {}, kept = {}, chg = {}, removed = removed,
         need = o.need or {}, refund = o.refund or {}, recChanged = 0,
     }
 end
@@ -263,8 +271,8 @@ do
                                refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })
     local ok, msg = b:start(plan, {})
     local st = b:status()
-    check(not ok and st.state == "error" and starts_with(st.text, "not enough inventory space for refunds")
-          and f.calls.rm == 0 and f.calls.mv == 0 and f.calls.pl == 0, "refund room: does not fit -> refused at start, nothing sent (" .. msg .. ")")
+    check(not ok and st.state == "error" and st.text:find("does not fit the player inventory", 1, true)
+          and f.calls.rm == 0 and f.calls.mv == 0 and f.calls.pl == 0, "refund room: single refund does not fit -> stall at start, nothing sent (" .. msg .. ")")
 end
 
 -- full player inventory, nothing to chunk
@@ -459,8 +467,8 @@ do
     local st1, gap1 = rm_gap({ [7] = { ITEM_Gear = 2 } })
     local st2, gap2 = rm_gap({})   -- the refund never shows up in the fake: the cap (1.5 s) decides, no move
     check(st1.state == "done" and gap1 == 250 and st1.text:find("refund moved to the unit", 1, true), "removal: refund arrived, moved and placed at the first poll (" .. tostring(gap1) .. " ms)")
-    check(st2.state == "done" and gap2 == 1500 and st2.text == "sent: placed 1, removed 1 (the game updates its blueprint view in about 30 s)",
-          "removal: refund not seen, placing at the 1.5 s cap, no move (" .. tostring(gap2) .. " ms)")
+    check(st2.state == "error" and gap2 == nil and st2.text:find("stopped after 1 removals: the refund did not show", 1, true),
+          "removal: refund not seen in 2 s -> stall, placement not sent (" .. st2.text .. ")")
 end
 
 -- no overlap, refund items: the removal is polled for the refund (250 ms), then the move and the placement; nothing sent in start
@@ -525,7 +533,8 @@ do
     run(b, f)
     check(noted and #noted.p == 1 and noted.p[1].bcls == "BP_A" and #noted.r == 0, "note_build: placed machine reported after the run")
 
-    local f2 = fake({ station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3) })
+    local f2 = fake({ station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
+                      refund_of = { [7] = { ITEM_Gear = 2 } } })
     local noted2
     f2.io.note_build = function(p, r) noted2 = { p = p, r = r } end
     local b2 = B.new(f2.io)
@@ -546,38 +555,38 @@ end
 local EFF = { raw = { ITEM_Frame = 200, ITEM_Coil = 10 }, max = { ITEM_Frame = 800, ITEM_Coil = 40 }, mult = { player = 4, unit = 101 } }
 -- refund 2 frames (merge room in the 190 stack) + 2 coils (1 new slot): fits with 1 free slot. Old max 1 -> refused.
 do
-    local f = fake(setmetatable({ player = { E(), S("ITEM_Frame", 190, 1) }, unit = inv({}, 3),
+    local f = fake(setmetatable({ player = { E(), E(), S("ITEM_Frame", 190, 1) }, unit = inv({}, 3),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Frame = 2, ITEM_Coil = 2 } } }, { __index = EFF }))
     local b = B.new(f.io)
     b:start(plan_for(f, { removed = { { id = 7, bcls = "BP_OLD" } }, refund = { ITEM_Frame = 2, ITEM_Coil = 2 } }), {})
     local st = run(b, f)
-    check(st.state == "done" and st.removed == 1 and not starts_with(st.text, "not enough"),
-          "refund eff max: 2 frames (merge) + 2 coils (1 slot) with 1 free slot -> done (" .. st.text .. ")")
+    check(st.state == "done" and st.removed == 1 and not starts_with(st.text, "stopped"),
+          "refund eff max: 2 frames (merge) + 2 coils (1 slot) with 2 free slots (1 kept back) -> done (" .. st.text .. ")")
 end
 
--- refund does not fit, unit has room: still refused at start (no player->unit moves any more)
+-- refund does not fit, unit has room: stall at start (the room is the player's, the unit does not take it)
 do
     local f = fake(setmetatable({ player = { S("ITEM_Junk", 50, 50), S("ITEM_Other", 50, 50) }, unit = inv({}, 6),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Frame = 5, ITEM_Coil = 10 } } }, { __index = EFF }))
     local b = B.new(f.io)
     b:start(plan_for(f, { removed = { { id = 7, bcls = "BP_OLD" } }, refund = { ITEM_Frame = 5, ITEM_Coil = 10 } }), {})
     local st = run(b, f)
-    check(st.state == "error" and starts_with(st.text, "not enough inventory space for refunds") and f.calls.rm == 0 and f.calls.mv == 0,
-          "refund room: unit has room, player full -> refused, no moves, nothing removed (" .. st.text .. ")")
+    check(st.state == "error" and st.text:find("does not fit the player inventory", 1, true) and f.calls.rm == 0 and f.calls.mv == 0,
+          "refund room: player full, nothing removed, no moves (" .. st.text .. ")")
 end
 
--- refund does not fit at all: refused at start, nothing removed
+-- refund does not fit at all: stall at start, nothing removed
 do
     local f = fake(setmetatable({ player = { S("ITEM_Junk", 50, 50), S("ITEM_Other", 50, 50) }, unit = inv({ S("ITEM_Plate", 50, 50) }, 1),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Frame = 5, ITEM_Coil = 10 } } }, { __index = EFF }))
     local b = B.new(f.io)
     b:start(plan_for(f, { removed = { { id = 7, bcls = "BP_OLD" } }, refund = { ITEM_Frame = 5, ITEM_Coil = 10 } }), {})
     local st = run(b, f)
-    check(st.state == "error" and starts_with(st.text, "not enough inventory space for refunds") and f.calls.rm == 0,
-          "refund room: unit full -> error, nothing removed (" .. st.text .. ")")
+    check(st.state == "error" and st.text:find("does not fit the player inventory", 1, true) and f.calls.rm == 0,
+          "refund room: unit full too -> error, nothing removed (" .. st.text .. ")")
 end
 
--- overlap + refund never shows up in the view: the wait is the cap (1.5 s), then the placement is sent; no moveout
+-- overlap + refund never shows up in the view: the arrival cap (2 s) stalls the run, the placement is not sent, no moveout
 do
     local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
                      station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })   -- no refund_of: the refund never shows
@@ -586,8 +595,103 @@ do
     b:start(plan_for(f, { place = { M("BP_NEW", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
                           refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } }), {})
     local st = run(b, f)
-    check(st.state == "done" and st.removed == 1 and st.placed == 1 and f.calls.mv == 0 and f.clock - t0 == 1500
-          and st.text == "sent: placed 1, removed 1 (the game updates its blueprint view in about 30 s)", "refund never shown: capped at 1.5 s, done, no moveout (" .. st.text .. ")")
+    check(st.state == "error" and st.removed == 1 and st.placed == 0 and f.calls.mv == 0 and f.calls.pl == 0 and f.clock - t0 == 2000
+          and st.text == "stopped after 1 removals: the refund did not show in the player inventory within 2 s, check the game, then Build again",
+          "refund never shown: stall at 2 s, nothing placed, no moveout (" .. st.text .. ")")
+end
+
+-- ===== batched removal: n removals, each refunds `each` Gear; player free slots decide the batch =====
+-- Gear max 50 per slot (raw 50, mult 1). Player 4 empty slots, 1 kept back -> 3 slots = 150 Gear = 15 machines per batch.
+local function many(n, each)
+    local st, ref, rem, tot = {}, {}, {}, {}
+    for i = 1, n do
+        st[i] = { id = i, bcls = "BP_OLD", x = i, y = 0 }
+        ref[i] = each > 0 and { ITEM_Gear = each } or {}
+        rem[i] = { id = i, bcls = "BP_OLD", x = i, y = 0, refund = ref[i] }
+        if each > 0 then tot.ITEM_Gear = (tot.ITEM_Gear or 0) + each end
+    end
+    local refund_of = {}
+    for i = 1, n do refund_of[i] = ref[i] end
+    return { station = st, refund_of = refund_of, removed = rem, total = tot }
+end
+local function gear_in(slots)
+    local n = 0
+    for _, s in ipairs(slots) do if s.item == "ITEM_Gear" then n = n + s.amount end end
+    return n
+end
+local function presses(f)
+    local n = 0
+    for _, mv in ipairs(f.moves) do if mv[4] == 2 then n = n + 1 end end
+    return n
+end
+do
+    local m = many(40, 10)
+    local f = fake({ player = inv({}, 4), unit = inv({}, 10), raw = { ITEM_Gear = 50 }, station = m.station, refund_of = m.refund_of })
+    local noted
+    f.io.note_build = function(p, r) noted = { p = p, r = r } end
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
+    local st = run(b, f, 4000)
+    check(ok and st.state == "done" and st.removed == 40 and f.calls.rm == 40, "batches: 40 removals in batches, all sent (" .. st.text .. ")")
+    check(gear_in(f.inv.unit.slots) == 400 and gear_in(f.inv.player.slots) == 0, "batches: all 400 Gear moved to the unit, none lost")
+    check(presses(f) == 8, "batches: 15+15+10 removals, stacks moved 3+3+2 (presses " .. presses(f) .. ")")
+    check(noted and #noted.r == 40, "batches: note_build reports the 40 removed ids")
+end
+
+-- moves never drain: the first batch is removed, the moved refund stays in the player -> STALL after 3 s, no further removal
+do
+    local m = many(40, 10)
+    local f = fake({ player = inv({}, 4), unit = inv({}, 10), raw = { ITEM_Gear = 50 }, station = m.station, refund_of = m.refund_of, noop_moves = true })
+    local noted
+    f.io.note_build = function(p, r) noted = { p = p, r = r } end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
+    local st = run(b, f, 4000)
+    check(st.state == "error" and st.removed == 15 and f.calls.rm == 15 and st.text ==
+          "stopped after 15 removals: the game did not move the refund into the unit, empty your inventory and Build again",
+          "stall: moves never drain -> stop after the first batch, no more removals (" .. st.text .. ")")
+    check(noted and #noted.r == 15, "stall: note_build reports only the 15 sent removals")
+end
+
+-- unit inventory full: the refund cannot be moved out -> STALL before the moves, after the first batch
+do
+    local m = many(40, 10)
+    local f = fake({ player = inv({}, 4), unit = inv({ S("ITEM_Plate", 50, 50) }, 1), raw = { ITEM_Gear = 50 }, station = m.station, refund_of = m.refund_of })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
+    local st = run(b, f, 4000)
+    check(st.state == "error" and st.removed == 15 and f.calls.rm == 15 and f.calls.mv == 0 and st.text ==
+          "stopped after 15 removals: the unit inventory is full, empty it and Build again",
+          "stall: unit full -> stop after the first batch, no move sent (" .. st.text .. ")")
+end
+
+-- a single machine whose refund does not fit the player (200 Gear = 4 slots, 3 usable): stall at start, nothing sent
+do
+    local m = many(1, 200)
+    local f = fake({ player = inv({}, 4), unit = inv({}, 10), raw = { ITEM_Gear = 50 }, station = m.station, refund_of = m.refund_of })
+    local b = B.new(f.io)
+    local ok, msg = b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
+    local st = b:status()
+    check(not ok and st.state == "error" and st.text:find("does not fit the player inventory", 1, true) and f.calls.rm == 0 and f.calls.mv == 0,
+          "single refund too big: stall at start, nothing removed (" .. msg .. ")")
+end
+
+-- no refund items: all removals go in one batch inside start, done at once
+do
+    local m = many(40, 0)
+    local f = fake({ player = inv({}, 4), unit = inv({}, 4), station = m.station })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { removed = m.removed }), {})
+    check(ok and b:status().state == "done" and f.calls.rm == 40 and f.calls.mv == 0, "no refund: 40 removals in one batch, done inside start")
+end
+
+-- per-machine refund missing from the plan: refused before any command
+do
+    local f = fake({ player = inv({}, 4), unit = inv({}, 4), station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } } })
+    local plan = plan_for(f, {})
+    plan.removed = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }
+    local ok, msg = B.new(f.io):start(plan, {})
+    check(not ok and msg:find("refund unknown", 1, true) and f.calls.rm == 0, "refund per machine missing: refused before any command")
 end
 
 -- ===== success path duration (fake clock, 250 ms steps; the window ticks every 300 ms) =====
