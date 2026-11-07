@@ -14,4 +14,4 @@ First release: see 0.1.0 below.
 - Modification Cost list, shown before you build.
 - Build: places the factory on your station, keeps identical machines, changes only recipes, and refunds into the unit inventory.
 - Blueprint Unit inventory: 120 slots, +10,000% stack size.
-- Install through MSCoreManager (requires MSCore 0.7.0 or newer).
+- Install through MSCoreManager (requires MSCore 0.7.1 or newer).
