@@ -358,5 +358,23 @@ do
           "partial moves: 2 rounds of 20, unit keeps 10, placed 1")
 end
 
+-- room_wait path: refund does not fit at start, removal goes out on the tick that finds room (now is the tick's time)
+do
+    local f = fake({ player = inv({ S("ITEM_Gear", 50, 50), S("ITEM_Junk", 50, 50) }, 2),
+                     unit = inv({ E(), S("ITEM_Plate", 1), E() }, 3),
+                     station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Gear = 2 } } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_NEW", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                          refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD" } } }), {})
+    local rm_at
+    for t = 1250, 30000, 250 do
+        b:tick(t)
+        if rm_at == nil and f.calls.rm == 1 then rm_at = t end
+    end
+    local st = b:status()
+    check(rm_at ~= nil and rm_at >= 1500 and f.calls.rm == 1 and st.state == "done" and st.removed == 1,
+          "room_wait: removal sent once on a tick at or after 1500 (now passed in), done")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)
