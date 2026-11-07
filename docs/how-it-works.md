@@ -44,5 +44,5 @@ The unit has a hidden container machine with 120 slots and a +10,000% stack size
 
 ## Registration and window
 
-- The block is registered with `MSCore.blocks.register` in `main.lua`.
+- The block and its research are shipped in the pak (`pakchunk100-BlueprintUnit_P`: registry + research). `main.lua` does not call `MSCore.blocks.register`.
 - The window is a UMG widget from the window pak (`pakchunk102-BPUnitUI_P`). It is shown through the Widget Subsystem, like the other MSCore UI.

@@ -12,7 +12,7 @@ The block's meshes, UI and registry data ship as IoStore paks. Build steps are i
 
 A pak is three files with one base name: `.pak`, `.utoc`, `.ucas`. All three go together. A higher chunk number wins when two paks hold the same path. Do not reuse a chunk number that another mod ships.
 
-Blocks register at runtime with `MSCore.blocks.register`. The old one-registry rule (a single `DAT_BuildingBlockRegistry` that every mod must merge into) no longer applies to this mod.
+Blocks are not registered at runtime here: pakchunk100 ships the block registry and research entries (`DAT_BuildingBlockRegistry` merged with the other block mods, `RSC_ComputationScience` unlock). `main.lua` does not call `MSCore.blocks.register`.
 
 ## Steps
 
