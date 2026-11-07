@@ -63,6 +63,9 @@ local function valid(o)
 end
 
 local function nm(o)
+    -- IsValid before GetFName: a native call on a freed UObject crashes the game (access violation), pcall cannot catch it
+    local okV, v = pcall(function() return o:IsValid() end)
+    if not okV or v ~= true then return "" end
     local ok, s = pcall(function() return o:GetFName():ToString() end)
     if ok and type(s) == "string" then return s end
     return ""
@@ -259,9 +262,11 @@ function L.read_buildables(F)
     if BUILDABLES then return BUILDABLES end
     BUILDABLES = {}
     for _, b in ipairs(FindAllOf("Buildable") or {}) do
-        local name = nm(b)
-        if valid(b) and name ~= "" and name:find("^Default__") == nil then
+        -- IsValid first: GetFName on a freed UObject is a native null deref (crash at address 0x18)
+        local name = valid(b) and nm(b) or ""
+        if name ~= "" and name:find("^Default__") == nil then
             local cost = {}
+            TRACE("buildable " .. name)
             each(rd(b, "ItemCost"), function(c)
                 cost[nm(rd(c, "Item"))] = unw(rd(c, "Amount"))
             end)
