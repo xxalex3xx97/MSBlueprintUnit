@@ -1155,7 +1155,7 @@ do
           "restore stalled: no items moved -> note, done (" .. st.text .. ")")
 end
 
--- new container ids never show: 20 s, then a note; the Build itself stays done
+-- new container ids never show: 60 s, then a note; the Build itself stays done
 do
     local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {}, drop_place = true })
     local b = B.new(f.io)

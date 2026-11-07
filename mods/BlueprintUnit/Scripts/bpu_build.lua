@@ -28,7 +28,7 @@ local POLL_MS = 250
 local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
-local CONT_MS = 20000        -- restore: new container ids must show within this after the last placement
+local CONT_MS = 60000        -- restore: new container ids must show within this after the last placement
 local CYCLE_MS = 2000        -- restore: one exact-N cycle must show its items in the container within this
 local RESTORE_MS = 300000    -- restore: whole restore phase cap
 
