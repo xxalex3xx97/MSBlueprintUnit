@@ -226,5 +226,55 @@ end
 local okn, pn = pcall(P.plan, read("belts2.json"), live({ existing = { ex(10, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 1, 1), 5, ex(11, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 3, 1) } }), F)
 check("non-table live entry: no error, both belts kept", okn and pn and pn.valid and pn.counts.keep == 2 and pn.counts.place == 0)
 
+-- ===== container contents: Contents parse, restore source (JSON / memory), refund contents, cost rows =====
+local ITEMS = { "ITEM_IronOre", "ITEM_Plate" }
+local function cont_doc(contents_json, x, y, cls, dat)
+    local c = contents_json and (',"Contents":' .. contents_json) or ""
+    return '{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"' .. (cls or "BP_ContainerObject_2") .. '","DefaultName":"' .. (dat or "DAT_Container_2")
+        .. '","Transform":{"GridLocation":{"X":' .. x .. ',"Y":' .. y .. '},"Height":0,"GridRotation":0}' .. c .. '}]}'
+end
+local function row_of(rows, name)
+    for _, r in ipairs(rows or {}) do if r.name == name then return r end end
+end
+
+-- container cells on the station floor (+-14); off the floor the placement is skipped with a note
+local pc, perr = P.plan(cont_doc('[{"Item":"ironore","Count":120}]', 2, 2), live({ items = ITEMS }), F)
+check("contents: plan ok", pc ~= nil and perr == nil)
+check("contents: restore IronOre 120 on the placed container", pc and pc.restore.ITEM_IronOre == 120 and pc.place[1].restore[1].name == "ITEM_IronOre" and pc.place[1].restore[1].count == 120)
+check("contents: need stays machine cost only", pc and next(pc.need) == nil)
+local rr = pc and row_of(P.cost_rows(pc), "ITEM_IronOre")
+check("contents: cost row need 120 refund 0 net 120", rr and rr.need == 120 and rr.refund == 0 and rr.net == 120)
+
+local pn, nerr = P.plan(cont_doc('[{"Item":"unobtainium","Count":5}]', 2, 2), live({ items = ITEMS }), F)
+check("contents: unknown item refused (" .. tostring(nerr) .. ")", pn == nil and tostring(nerr):find("unknown item in Contents", 1, true) ~= nil)
+
+local pci = P.plan(cont_doc('[{"Item":"Iron Ore","Count":3},{"Item":"ITEM_ironore","Count":4}]', 2, 2), live({ items = ITEMS }), F)
+check("contents: case/space/ITEM_ insensitive, duplicates summed", pci and pci.restore.ITEM_IronOre == 7)
+
+local pb = P.plan(cont_doc('[{"Item":"ironore","Count":5}]', 1, 1, "BP_ConveyorBeltObject", "DAT_ConveyorBelt"), live({ items = ITEMS }), F)
+check("contents: on a non-container = note, nothing restored", pb and next(pb.restore) == nil and tostring(table.concat(pb.notes, ";")):find("Contents ignored", 1, true) ~= nil)
+
+local pj = P.plan(cont_doc('[{"Item":"ironore","Count":120}]', 2, 2), live({ items = ITEMS, memory = { ["BP_ContainerObject_2|2|2|0|0"] = { { name = "ITEM_Plate", count = 7 } } } }), F)
+check("contents: JSON wins over memory", pj and pj.restore.ITEM_IronOre == 120 and pj.restore.ITEM_Plate == nil)
+local pm = P.plan(cont_doc(nil, 2, 2), live({ items = ITEMS, memory = { ["BP_ContainerObject_2|2|2|0|0"] = { { name = "ITEM_Plate", count = 7 } } } }), F)
+check("contents: no JSON -> memory of the same cell", pm and pm.restore.ITEM_Plate == 7 and pm.place[1].restore[1].name == "ITEM_Plate")
+
+-- removed container with live contents: refund list (merged), refund_cost stays machine only
+local old = ex(60, "BP_ContainerObject_2", "DAT_Container_2", 300, 300)
+old.contents = { { name = "ITEM_Plate", count = 7 } }
+local pr = P.plan(read("empty.json"), live({ items = ITEMS, existing = { old } }), F)
+check("refund contents: removed container listed", pr and pr.counts.remove == 1 and pr.refund.ITEM_Plate == 7)
+check("refund contents: refund_cost has no contents", pr and pr.refund_cost.ITEM_Plate == nil)
+check("refund contents: refund row 7", pr and row_of(P.cost_rows(pr), "ITEM_Plate") and row_of(P.cost_rows(pr), "ITEM_Plate").refund == 7)
+
+-- cost rows: restore (need) and removed contents (refund) together
+local old2 = ex(61, "BP_ContainerObject_2", "DAT_Container_2", 300, 300)
+old2.contents = { { name = "ITEM_Plate", count = 7 } }
+local pmix = P.plan(cont_doc('[{"Item":"ironore","Count":120}]', 2, 2), live({ items = ITEMS, existing = { old2 } }), F)
+local rows = pmix and P.cost_rows(pmix) or {}
+local ri, rp = row_of(rows, "ITEM_IronOre"), row_of(rows, "ITEM_Plate")
+check("cost rows: IronOre need 120 net 120", ri and ri.need == 120 and ri.net == 120)
+check("cost rows: Plate refund 7 net -7", rp and rp.refund == 7 and rp.net == -7)
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

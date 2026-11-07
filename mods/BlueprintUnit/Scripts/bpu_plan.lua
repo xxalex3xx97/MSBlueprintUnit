@@ -174,6 +174,31 @@ local function where(m)
     return tostring(m.dat) .. "@(" .. m.x .. "," .. m.y .. ",h" .. m.h .. ")"
 end
 
+-- cell key of container memory: bcls|x|y|h|rot (same format as bpu_build records it)
+local function ckey(e)
+    return tostring(e.bcls) .. "|" .. tostring(e.x) .. "|" .. tostring(e.y) .. "|" .. tostring(e.h) .. "|" .. tostring(e.rot)
+end
+
+local function is_container(bcls)
+    return tostring(bcls or ""):find("Container", 1, true) ~= nil
+end
+
+-- item name match for Contents: case, spaces, _ and - and the ITEM_ prefix ignored ("ironore" = "ITEM_IronOre")
+local function canon(s)
+    return (s:lower():gsub("^item_", ""):gsub("[%s_%-]", ""))
+end
+
+-- canon name -> list of live item names (ITEM_X), built once per plan
+local function item_index(names)
+    local idx = {}
+    for _, n in ipairs(names or {}) do
+        local c = canon(n)
+        idx[c] = idx[c] or {}
+        table.insert(idx[c], n)
+    end
+    return idx
+end
+
 -- positive-area intersection of two footprints (centre x,y, half extents w,h); touching edges do not count
 local function overlap(ax, ay, aw, ah, bx, by, bw, bh)
     return ax - aw < bx + bw and bx - bw < ax + aw and ay - ah < by + bh and by - bh < ay + ah
@@ -289,6 +314,18 @@ local function parse_doc(text)
             if not bytes then bail("ConfigHex refused for " .. m.cls .. ": " .. why) end
             m.hasHex = true
             m.hexcfg = bytes
+        end
+        if e.Contents ~= nil then
+            if type(e.Contents) ~= "table" or not is_array(e.Contents) then bail("bad JSON: Contents not an array: " .. m.cls) end
+            m.contents_raw = {}
+            for _, ce in ipairs(e.Contents) do
+                if type(ce) ~= "table" or type(ce.Item) ~= "string" or ce.Item == "" then
+                    bail("bad JSON: Contents entry needs Item and Count: " .. m.cls)
+                end
+                local n = int_field(ce.Count, "Contents.Count")
+                if n < 1 then bail("bad JSON: Contents.Count below 1: " .. ce.Item) end
+                m.contents_raw[#m.contents_raw + 1] = { name = ce.Item, count = n }
+            end
         end
         doc.machines[#doc.machines + 1] = m
     end
@@ -416,6 +453,31 @@ local function build(text, live, F, opts)
         end
     end
     machines = resolved
+
+    -- container Contents: item names -> live item names; unknown or ambiguous = plan error. Non-container = note
+    local item_idx
+    for _, m in ipairs(machines) do
+        if m.contents_raw then
+            if not is_container(m.bcls) then
+                notes[#notes + 1] = "Contents ignored (not a container): " .. m.cls .. "@(" .. m.x .. "," .. m.y .. ")"
+            else
+                item_idx = item_idx or item_index(live.items)
+                local order, sum = {}, {}
+                for _, c in ipairs(m.contents_raw) do
+                    local hits = item_idx[canon(c.name)] or {}
+                    if #hits ~= 1 then
+                        bail((#hits == 0 and "unknown" or "ambiguous") .. " item in Contents at (" .. m.x .. "," .. m.y .. "): " .. c.name)
+                    end
+                    local name = hits[1]
+                    if not sum[name] then sum[name] = 0; order[#order + 1] = name end
+                    sum[name] = sum[name] + c.count
+                end
+                m.contents = {}
+                for _, name in ipairs(order) do m.contents[#m.contents + 1] = { name = name, count = sum[name] } end
+            end
+            m.contents_raw = nil
+        end
+    end
 
     -- recipes (site id -> REC -> live name); ConfigHex machines skip the lookup
     for _, m in ipairs(machines) do
@@ -768,6 +830,32 @@ local function build(text, live, F, opts)
     local removes = {}
     for _, e in ipairs(removed) do removes[e.bcls] = (removes[e.bcls] or 0) + 1 end
 
+    -- container contents. Removed containers: their live contents land in the unit (refund) and are shown in the refund list.
+    -- Restore for placed containers: JSON Contents wins, else session memory of the same cell (a removed container at that
+    -- cell overwrites memory, as bpu_build records it before the first send). need/total check stay machine cost only.
+    local mem = {}
+    for k, v in pairs(live.memory or {}) do mem[k] = v end
+    local refund_cont = {}
+    for _, e in ipairs(removed) do
+        if e.contents then
+            mem[ckey(e)] = e.contents
+            for _, c in ipairs(e.contents) do refund_cont[c.name] = (refund_cont[c.name] or 0) + c.count end
+        end
+    end
+    local restore = {}
+    for _, m in ipairs(machines) do
+        if is_container(m.bcls) then
+            local list = m.contents or mem[ckey(m)]
+            if list and #list > 0 then
+                m.restore = list
+                for _, c in ipairs(list) do restore[c.name] = (restore[c.name] or 0) + c.count end
+            end
+        end
+    end
+    local refund_all = {}
+    for k, v in pairs(refund) do refund_all[k] = v end
+    for k, v in pairs(refund_cont) do refund_all[k] = (refund_all[k] or 0) + v end
+
     return {
         station = live.station,
         name = doc.name,
@@ -778,7 +866,10 @@ local function build(text, live, F, opts)
         removed = removed,
         stale_ids = stale_ids,
         need = need,
-        refund = refund,
+        restore = restore,
+        refund_cost = refund,
+        refund_cont = refund_cont,
+        refund = refund_all,
         skipped_ug = skipped_ug,
         notes = notes,
         counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN },
@@ -858,12 +949,16 @@ function P.removes_text(plan)
     return "removes: " .. table.concat(parts, ", ")
 end
 
+-- one row per item: need = machine cost + container contents to restore, refund = removed machines + their contents, net = need - refund
 function P.cost_rows(plan)
+    local need = {}
+    for name, n in pairs(plan.need or {}) do need[name] = n end
+    for name, n in pairs(plan.restore or {}) do need[name] = (need[name] or 0) + n end
     local seen, rows = {}, {}
-    for name in pairs(plan.need) do seen[name] = true end
-    for name in pairs(plan.refund) do seen[name] = true end
+    for name in pairs(need) do seen[name] = true end
+    for name in pairs(plan.refund or {}) do seen[name] = true end
     for _, name in ipairs(sorted_keys(seen)) do
-        local nd, rf = plan.need[name] or 0, plan.refund[name] or 0
+        local nd, rf = need[name] or 0, (plan.refund or {})[name] or 0
         if nd > 0 or rf > 0 then
             rows[#rows + 1] = { name = name, need = nd, refund = rf, net = nd - rf }
         end

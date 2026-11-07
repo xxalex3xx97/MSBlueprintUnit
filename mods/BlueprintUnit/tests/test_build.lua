@@ -89,6 +89,13 @@ local function fake(spec)
     local redirect = type(spec.redirect) == "string" and spec.redirect:sub(1, 2) == "on"
     if spec.redirect ~= nil then io.redirect_status = function() return spec.redirect end end
     f.order = {}   -- sent commands in order: "rm:<id>" / "pl:<x>"
+    -- containers (restore): id -> { slots }. A placed container gets id next_id + 500 (never a player/unit id)
+    f.containers = spec.containers or {}
+    f.cont_slots = spec.cont_slots or 4
+    f.noop_inv = spec.noop_inv
+    f.cursor = { item = "", amount = 0 }   -- one player cursor (AddInventoryInteraction model)
+    f.cmds = {}                            -- inventory commands {primary, secondary, slot0, action}
+    f.remembered = {}
     function io.now() return f.clock end
     function io.creative() return f.creative end
     function io.scan(station)
@@ -177,10 +184,76 @@ local function fake(spec)
         f.placed_at = f.placed_at or f.clock
         local bcls = f.live_bcls or m.bcls
         f.station[#f.station + 1] = { id = f.next_id, bcls = bcls, x = m.x + f.shift_x, y = m.y, h = 0, rot = 0 }
+        if bcls:find("Container", 1, true) then
+            local slots = {}
+            for i = 1, f.cont_slots do slots[i] = { item = "", amount = 0, max = 50 } end
+            f.containers[f.next_id + 500] = { slots = slots }
+        end
         return true
     end
     function io.send_changes(chg)
         f.calls.ch = f.calls.ch + 1
+        return true
+    end
+    -- containers: default read (nil = not a container), ids, memory, and the exact-N cursor model of AddInventoryInteraction
+    function io.read_machine_inv(id)
+        local c = f.containers[id]
+        if not c then return nil end
+        local slots = {}
+        for i, s in ipairs(c.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
+        return { ok = true, id = id, slots = slots, mult = 1 }
+    end
+    function io.container_ids()
+        local out = {}
+        for id in pairs(f.containers) do out[#out + 1] = id end
+        table.sort(out)
+        return out
+    end
+    function io.remember(key, list)
+        f.remembered[key] = list
+        f.remember_at = f.calls.rm + f.calls.pl + f.calls.mv
+    end
+    -- action 4 DROP_CURSOR (cursor -> player), 0 TAKE (empty cursor: min(slot, max); holding: whole cursor into the slot),
+    -- 1 PLACE_SINGLE (holding: one item into the slot). Only the press is modelled; nothing else is sent.
+    function io.send_inv(prim, sec, slot0, action)
+        f.cmds[#f.cmds + 1] = { prim, sec, slot0, action }
+        if f.noop_inv then return true end
+        local slots
+        if prim == 101 then slots = f.inv.player.slots elseif prim == 202 then slots = f.inv.unit.slots
+        elseif f.containers[prim] then slots = f.containers[prim].slots end
+        if action == 4 then
+            if f.cursor.amount > 0 then put(f.inv.player.slots, f.cursor.item, f.cursor.amount, mx(f.cursor.item)) end
+            f.cursor = { item = "", amount = 0 }
+            return true
+        end
+        local s = slots and slots[slot0 + 1]
+        if not s then return false end
+        if action == 0 then
+            if f.cursor.amount == 0 then
+                if s.amount > 0 then
+                    local c = math.min(s.amount, mx(s.item))
+                    f.cursor = { item = s.item, amount = c }
+                    s.amount = s.amount - c
+                    if s.amount == 0 then s.item = "" end
+                end
+            elseif s.amount <= 0 then
+                s.item, s.amount = f.cursor.item, f.cursor.amount
+                f.cursor = { item = "", amount = 0 }
+            elseif s.item == f.cursor.item and s.amount + f.cursor.amount <= mx(s.item) then
+                s.amount = s.amount + f.cursor.amount
+                f.cursor = { item = "", amount = 0 }
+            end
+        elseif action == 1 and f.cursor.amount > 0 then
+            if s.amount <= 0 then
+                s.item, s.amount = f.cursor.item, 1
+            elseif s.item == f.cursor.item and s.amount < mx(s.item) then
+                s.amount = s.amount + 1
+            else
+                return true
+            end
+            f.cursor.amount = f.cursor.amount - 1
+            if f.cursor.amount == 0 then f.cursor.item = "" end
+        end
         return true
     end
     f.io = io
@@ -198,7 +271,7 @@ local function plan_for(f, o)
     return {
         valid = true, station = 1, fp = f.io.fingerprint(f.station), name = "T",
         place = o.place or {}, kept = {}, chg = {}, removed = removed,
-        need = o.need or {}, refund = o.refund or {}, recChanged = 0,
+        need = o.need or {}, refund = o.refund or {}, refund_cost = o.refund_cost, recChanged = 0,
     }
 end
 
@@ -990,6 +1063,140 @@ do
     b:start(plan_for(f, { place = { M("BP_NEW", 1, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
         removed = { { id = 1, bcls = "BP_OLD", x = 101, y = 0, refund = {} }, { id = 2, bcls = "BP_OLD", x = 102, y = 0, refund = {} } } }), {})
     check(got and got[1] == 1 and got[2] == 2, "redirect: note_build gets the sent placements and removals")
+end
+
+-- ===== container contents restore (after the placements): exact-N cursor recipe on the fake cursor model =====
+local function tot(slots, item)
+    local n = 0
+    for _, s in ipairs(slots) do if s.item == item then n = n + s.amount end end
+    return n
+end
+local function new_cont(f)   -- id of the container the Build placed (ids > 500 in the fake)
+    for id in pairs(f.containers) do if id > 500 then return id end end
+end
+local function has_trace(traces, text)
+    for _, t in ipairs(traces) do if t == text then return true end end
+    return false
+end
+local function cont_place(restore)
+    local p = M("BP_ContainerObject_2", 5, 0, {})
+    p.restore = restore
+    return p
+end
+local REDIRECT_ON = "on: redirect=on probe_log=off groups=yes"
+
+-- redirect: unit 50+50+20 Plate, restore 120 -> cycles of 50, 50, 20 (take, k x place single, surplus back when any)
+do
+    local traces = {}
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
+    f.io.trace = function(t) traces[#traces + 1] = t end
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local cmds3 = 0
+    for _, c in ipairs(f.cmds) do if c[4] == 3 then cmds3 = cmds3 + 1 end end
+    check(ok and st.state == "done" and cid and tot(f.containers[cid].slots, "ITEM_Plate") == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
+          "restore: 120 Plate back into the new container, unit empty (" .. st.text .. ")")
+    check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil, "restore: status text")
+    check(cmds3 == 0, "restore: no release (action 3) sent")
+    check(has_trace(traces, "restore cursor: take unit slot0=0 item=ITEM_Plate expect=50 sent=true")
+          and has_trace(traces, "restore cursor: k=50 place_single into container id=" .. tostring(cid) .. " slot0=0 sent=50")
+          and has_trace(traces, "restore cursor: k=20 place_single into container id=" .. tostring(cid) .. " slot0=2 sent=20")
+          and has_trace(traces, "restore cursor: drop cursor (action 4) sent=true"), "restore: cursor steps traced (take, k, drop)")
+end
+
+-- surplus: unit holds 50 Plate, restore 30 -> take 50, 30 placed, 20 put back to the same slot
+do
+    local traces = {}
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {} })
+    f.io.trace = function(t) traces[#traces + 1] = t end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 30 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 20,
+          "restore surplus: 30 placed, 20 back in the unit (" .. st.text .. ")")
+    check(has_trace(traces, "restore cursor: surplus=20 put back to unit slot0=0 sent=true"), "restore surplus: traced")
+end
+
+-- unit short of an item: skipped with a note, Build still done, nothing sent to the container
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50) }, 3), station = {} })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100,
+          "restore short: contents shortage does not block the Build (" .. st.text .. ")")
+    check(st.text:find("; restore: Plate x120 not restored (unit has 100)", 1, true) ~= nil, "restore short: note text")
+end
+
+-- container full: one slot of 50, 120 to restore -> 50 in, then "full"
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6),
+                     station = {}, cont_slots = 1 })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 50 and st.text:find("restored 50 items into 1 container(s)", 1, true)
+          and st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
+end
+
+-- commands accepted but nothing moves: stalled after CYCLE_MS, the run still ends done
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {}, noop_inv = true })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 50 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 0 and st.text:find("restore stalled: container id " .. cid .. " took no items", 1, true) ~= nil,
+          "restore stalled: no items moved -> note, done (" .. st.text .. ")")
+end
+
+-- new container ids never show: 20 s, then a note; the Build itself stays done
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {}, drop_place = true })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 50 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 800)
+    check(st.state == "done" and st.text:find("; restore: restore stalled: container ids not found (new 0, placed 1)", 1, true) ~= nil,
+          "restore: container ids never show -> stalled note (" .. st.text .. ")")
+end
+
+-- legacy flow (no redirect): the last placement restores too
+do
+    local f = fake({ player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and tot(f.containers[cid].slots, "ITEM_Plate") == 120, "restore legacy: 120 back after the last placement (" .. st.text .. ")")
+end
+
+-- removed container: contents remembered before the first send (session memory, cell key)
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({}, 3),
+                     station = { { id = 8, bcls = "BP_ContainerObject_2", x = 1, y = 0, h = 0, rot = 0 } },
+                     containers = { [8] = { slots = { S("ITEM_Plate", 8), E(), E() } } } })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { removed = { { id = 8, bcls = "BP_ContainerObject_2", x = 1, y = 0, h = 0, rot = 0, refund = {} } } }), {})
+    local list = f.remembered["BP_ContainerObject_2|1|0|0|0"]
+    check(ok and list and #list == 1 and list[1].name == "ITEM_Plate" and list[1].count == 8 and f.remember_at == 0,
+          "memory: removed container contents remembered before the first send")
+    run(b, f)
+end
+
+-- total check: machine cost only; refund contents do not count as supply (refund_cost = machine refund)
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({}, 3), station = { { id = 1, bcls = "BP_OLD", x = 101, y = 0 } } })
+    local ok2, msg2 = B.new(f.io):start(plan_for(f, { place = { M("BP_NEW", 1, 0, {}) }, need = { ITEM_Plate = 5 }, refund = { ITEM_Plate = 8 }, refund_cost = {},
+        removed = { { id = 1, bcls = "BP_OLD", x = 101, y = 0, refund = {} } } }), {})
+    check(not ok2 and msg2 == "error: not enough items: Plate x5" and f.calls.rm == 0, "total check: removed contents are not supply (" .. tostring(msg2) .. ")")
+    local f3 = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({}, 3), station = {} })
+    local ok3 = B.new(f3.io):start(plan_for(f3, { place = { cont_place({ { name = "ITEM_Plate", count = 500 } }) }, need = {}, refund = {} }), {})
+    check(ok3, "total check: contents shortage never blocks the Build")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

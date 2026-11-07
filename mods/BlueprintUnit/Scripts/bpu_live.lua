@@ -304,6 +304,29 @@ function L.overlay(fresh)
     return out
 end
 
+-- container contents memory: cell key bcls|x|y|h|rot -> list {name, count}. Session only (not saved), survives L.reset.
+local MEM = {}
+function L.remember(key, list) MEM[key] = list end
+function L.memory()
+    local out = {}
+    for k, v in pairs(MEM) do out[k] = v end
+    return out
+end
+
+-- inventory map (item -> amount) as a list {name, count}, item order
+local function contents_list(inv)
+    local map = {}
+    for _, s in ipairs(inv.slots or {}) do
+        if s.item ~= "" and s.amount > 0 then map[s.item] = (map[s.item] or 0) + s.amount end
+    end
+    local names = {}
+    for k in pairs(map) do names[#names + 1] = k end
+    table.sort(names)
+    local out = {}
+    for _, k in ipairs(names) do out[#out + 1] = { name = k, count = map[k] } end
+    return out
+end
+
 function L.snapshot(U, F)
     cache = nil
     local st = U.station_obj
@@ -317,11 +340,24 @@ function L.snapshot(U, F)
     TRACE_MANY(bl)
     local existing = L.overlay(L.read_machines(st))
     TRACE("snapshot machines=" .. #existing)
+    -- containers: live contents (refund list, restore memory); a failed read leaves e.contents nil
+    local cmap
+    for _, e in ipairs(existing) do
+        if tostring(e.bcls or ""):find("Container", 1, true) and e.id then
+            cmap = cmap or L.container_invs()
+            local inv = cmap[e.id]
+            if inv then
+                local r = L.read_inv(inv)
+                if r.ok then e.contents = contents_list(r) end
+            end
+        end
+    end
     local recipes = L.read_recipes()
     TRACE("snapshot recipes=" .. count(recipes))
     local buildables = L.read_buildables(F)
     TRACE("snapshot buildables=" .. count(buildables))
-    return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables }
+    return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables,
+             items = L.item_names(), memory = L.memory() }
 end
 
 -- raw MaxStackSize of an Item UObject (cached per name; false when unreadable). nil = unknown.
@@ -401,6 +437,15 @@ function L.item_by_name(name)
         end
     end
     return ITEMS[name]
+end
+
+-- live item names (ITEM_X) from the Item objects; plan matches Contents names against them
+function L.item_names()
+    L.item_by_name("")   -- builds the name cache
+    local out = {}
+    for n in pairs(ITEMS or {}) do out[#out + 1] = n end
+    table.sort(out)
+    return out
 end
 
 function L.reset()
@@ -492,6 +537,28 @@ function L.make_io(ctx)
         if inv == nil then return nil end
         return L.read_inv(inv)
     end
+    -- one raw InventoryInteraction (exact-N restore recipe): action 0 TAKE, 1 PLACE_SINGLE, 4 DROP_CURSOR. No release after it.
+    function io.send_inv(prim, sec, slot0, action)
+        local Tr = require("bpu_invtrace")
+        local c = ctx.ctl
+        if not valid(c) then c = FindFirstOf("DMSPlayerController") end
+        if not valid(c) then return false, "no controller" end
+        local ok, r = Tr.sending(call, function()
+            c:AddInventoryInteraction({ PrimaryInventoryID = unw(prim), SecondaryInventoryID = unw(sec), SlotIndex = slot0, Action = action })
+            return true
+        end)
+        TRACE(("inv_cmd action=%d primary=%s secondary=%s slot0=%d -> ok=%s ret=%s"):format(action, tostring(unw(prim)),
+            tostring(unw(sec)), slot0, tostring(ok), tostring(r)))
+        return ok, r
+    end
+    -- ids of every container in the world (sorted). Used to find the containers a Build just placed.
+    function io.container_ids()
+        local out = {}
+        for id in pairs(L.container_invs()) do out[#out + 1] = id end
+        table.sort(out)
+        return out
+    end
+    function io.remember(key, list) L.remember(key, list) end
     function io.send_remove(id)
         if type(id) == "number" and id < 0 then return false, "machine not in the game view yet" end   -- overlay id
         return call(native.disassemble, id, 0)
