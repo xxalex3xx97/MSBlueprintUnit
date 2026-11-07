@@ -400,7 +400,8 @@ local function build(text, live, F, opts)
 
     -- resolve DAT (by class when absent), footprint, bcls; machines with no Buildable are skipped (block-built)
     local resolved = {}
-    for _, m in ipairs(machines) do
+    for i, m in ipairs(machines) do
+        if type(m) ~= "table" then error(("plan: machine %d is a %s (%s)"):format(i, type(m), tostring(m))) end
         if not m.dat then m.dat = dat_for_cls(m.cls) end
         if not m.dat then
             notes[#notes + 1] = "skipped (block-built, no Buildable): " .. m.cls
