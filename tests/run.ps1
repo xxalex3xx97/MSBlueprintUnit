@@ -7,7 +7,7 @@ $fail = 0
 
 function Find-Cmd([string[]]$names) {
     foreach ($n in $names) {
-        $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue
+        $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($c) { return $c.Source }
     }
     return $null
