@@ -218,12 +218,17 @@ end
 
 -- Machines entries are structs: MachineID (ID fallback as P0 R1c), Class (object property), Transform, SerializedMachineConfig.
 function L.read_machines(st)
-    local out, i = {}, 0
+    local out, i, idkey = {}, 0, nil
     each(bp_arr(st, "Machines"), function(e)
         i = i + 1
         if i == 1 or i % 50 == 0 then TRACE("machine[" .. i .. "] reading") end
-        local id = unw(rd(e, "MachineID"))
-        if id == nil then id = unw(rd(e, "ID")) end
+        -- a missing struct field throws inside UE4SS (traceback, can crash): decide the id field once on entry 1, then read only it
+        if idkey == nil then
+            idkey = "ID"
+            if unw(rd(e, "ID")) == nil then idkey = "MachineID" end
+            TRACE("machine id field=" .. idkey)
+        end
+        local id = unw(rd(e, idkey))
         local cls = short(nm(rd(e, "Class")))
         local x, y, h, rot = xf(e)
         out[#out + 1] = { id = id, cls = cls, bcls = cls, x = x, y = y, h = h, rot = rot, cfg = cfg_bytes(e) }
