@@ -162,8 +162,17 @@ local function impOk()
   if not ok(box) or not sr or type(text) ~= "string" then txt("Txt_Status", "error: could not read text"); return end
   if text == "" then txt("Txt_Status", "paste the blueprint JSON first"); return end
   local okRun, err = pcall(function()
+    Live.trace("impOk start")
+    Live.trace("impOk text bytes=" .. #text)
+    Live.trace("impOk before readStationBuild")
     readStationBuild()
-    local plan, perr = Plan.plan(text, Live.snapshot(S.U, F), F)
+    Live.trace("impOk after readStationBuild")
+    local t0 = os.clock()
+    local live = Live.snapshot(S.U, F)
+    Live.trace(("impOk snapshot %.1f ms blocks=%d machines=%d"):format((os.clock() - t0) * 1000, #live.blocks, #live.existing))
+    t0 = os.clock()
+    local plan, perr = Plan.plan(text, live, F)
+    Live.trace(("impOk plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
     S.plan, S.text = plan, text
     txt("Txt_Status", "Blueprint: " .. (plan.name or "Ready"))
@@ -171,8 +180,12 @@ local function impOk()
     for _, n in ipairs(plan.notes or {}) do lines[#lines + 1] = n end
     showText("Txt_Summary", table.concat(lines, "\n"))
     showText("Txt_Removes", Plan.removes_text(plan))
-    fillCost(Plan.cost_rows(plan))
+    t0 = os.clock()
+    local rows = Plan.cost_rows(plan)
+    fillCost(rows)
+    Live.trace(("impOk fillCost %.1f ms rows=%d"):format((os.clock() - t0) * 1000, #rows))
     M.impClose()
+    Live.trace("impOk done")
   end)
   if not okRun then L("import failed: " .. tostring(err)); txt("Txt_Status", "error: import failed") end
 end

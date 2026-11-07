@@ -5,6 +5,22 @@
 
 local L = {}
 
+-- Trace trail for native crashes: print + append to <mod dir>pu_trace.log (open/append/flush/close per call).
+local TRACE_PATH = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../bpu_trace.log"
+local function TRACE(m)
+    m = tostring(m)
+    print("[BPUnit] " .. m)
+    pcall(function()
+        local f = io.open(TRACE_PATH, "a")
+        if f then
+            f:write(os.date("%H:%M:%S ") .. m .. "\n")
+            f:flush()
+            f:close()
+        end
+    end)
+end
+L.trace = TRACE
+
 local function rd(o, k)
     if o == nil then return nil end
     local ok, v = pcall(function() return o[k] end)
@@ -63,7 +79,10 @@ local function each(a, fn, depth)
     if type(a) ~= "userdata" then return end
     local okF, fe = pcall(function() return a.ForEach end)
     if okF and type(fe) == "function" then
-        a:ForEach(function(_, e) fn(unw(e)) end)
+        -- collect inside the native callback (no field reads there), process after it returns
+        local items, n = {}, 0
+        a:ForEach(function(_, e) n = n + 1; items[n] = unw(e) end)
+        for i = 1, n do fn(items[i]) end
         return
     end
     local okG, g = pcall(function() return a:get() end)
@@ -78,6 +97,10 @@ local function each(a, fn, depth)
 end
 
 -- Transform -> gx, gy, h, rot. Only Transform{GridLocation{X,Y},Height,GridRotation} is read (P0 R1b/R1c).
+-- Struct field reads per entry type (all in P0 order, all after the native ForEach returns):
+--   Blocks:    Class, Transform.{GridLocation.X, GridLocation.Y, Height, GridRotation}
+--   Machines:  MachineID (else ID), Class, Transform.{...same...}, SerializedMachineConfig (bytes)
+--   ItemCost:  Item, Amount (P0 R2)
 local function xf(e)
     local t = rd(e, "Transform")
     local gl = unw(rd(t, "GridLocation"))
@@ -181,14 +204,17 @@ end
 
 -- Machines entries are structs: MachineID (ID fallback as P0 R1c), Class (object property), Transform, SerializedMachineConfig.
 function L.read_machines(st)
-    local out = {}
+    local out, i = {}, 0
     each(bp_arr(st, "Machines"), function(e)
+        i = i + 1
+        if i == 1 or i % 50 == 0 then TRACE("machine[" .. i .. "] reading") end
         local id = unw(rd(e, "MachineID"))
         if id == nil then id = unw(rd(e, "ID")) end
         local cls = short(nm(rd(e, "Class")))
         local x, y, h, rot = xf(e)
         out[#out + 1] = { id = id, cls = cls, bcls = cls, x = x, y = y, h = h, rot = rot, cfg = cfg_bytes(e) }
     end)
+    TRACE("read_machines done n=" .. #out)
     return out
 end
 
@@ -226,15 +252,24 @@ function L.read_recipes()
     return out
 end
 
+local function count(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
 function L.snapshot(U, F)
     local st = U.station_obj
-    return {
-        station = U.station,
-        blocks = L.read_blocks(st),
-        existing = L.read_machines(st),
-        recipes = L.read_recipes(),
-        buildables = L.read_buildables(F),
-    }
+    TRACE("snapshot start station=" .. tostring(U.station))
+    local blocks = L.read_blocks(st)
+    TRACE("snapshot blocks=" .. #blocks)
+    local existing = L.read_machines(st)
+    TRACE("snapshot machines=" .. #existing)
+    local recipes = L.read_recipes()
+    TRACE("snapshot recipes=" .. count(recipes))
+    local buildables = L.read_buildables(F)
+    TRACE("snapshot buildables=" .. count(buildables))
+    return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables }
 end
 
 -- slots: GetItemSlots() first, else ItemSlots property. ok=false when the inventory is invalid or unreadable.

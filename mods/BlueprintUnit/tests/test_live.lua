@@ -132,6 +132,14 @@ check(ms[1].bcls == "BP_ConveyorBeltObject" and ms[1].cls == "BP_ConveyorBeltObj
 check(ms[1].x == 1 and ms[1].y == 1 and ms[1].h == 0 and ms[1].rot == 0, "read_machines: x,y,h,rot")
 check(ms[1].cfg == "\1\2\255" and ms[2].cfg == "" and ms[3].cfg == nil, "read_machines: cfg bytes, empty, unreadable=nil")
 
+-- trace trail: read_machines writes "machine[1] reading" to <mod dir>pu_trace.log
+do
+    local tf = io.open(dir .. "../bpu_trace.log", "r")
+    local tt = tf and tf:read("a") or ""
+    if tf then tf:close() end
+    check(tt:find("machine%[1%] reading") ~= nil and tt:find("read_machines done n=3") ~= nil, "trace: bpu_trace.log written by read_machines")
+end
+
 local bl = Live.read_blocks(W.station)
 check(#bl == 1 and bl[1].class == "BPO_Station_01" and bl[1].gx == 0 and bl[1].gy == 0 and bl[1].h == 0 and bl[1].rot == 0,
       "read_blocks: stand-in unwrapped, class, gx, gy")
