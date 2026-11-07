@@ -553,7 +553,9 @@ local function build(text, live, F, opts)
         local found
         for k, e in ipairs(existing) do
             if not used[k] and e.bcls == m.bcls and e.x == m.x and e.y == m.y and e.h == m.h and e.rot == m.rot then
-                if not (is_ug(m) and e.cfg ~= nil and cfg_len(e.cfg) ~= cfg_len(m.cfg or "")) then
+                -- live cfg = the station Blueprint snapshot; for undergrounds it is EMPTY in game (trace 2026-11-07), so the Length is unknown:
+                -- same class + cell + rotation counts as identical. Compared only when the live cfg really holds a 6-byte Length.
+                if not (is_ug(m) and type(e.cfg) == "string" and #e.cfg == 6 and cfg_len(e.cfg) ~= cfg_len(m.cfg or "")) then
                     found = k
                     break
                 end
