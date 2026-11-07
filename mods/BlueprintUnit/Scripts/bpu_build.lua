@@ -391,6 +391,11 @@ function B.new(io)
             end
         end
         if want == 0 then return end_run(base) end
+        if io.restore_enabled and not io.restore_enabled() then
+            R.restore_on = true
+            R.rnotes[#R.rnotes + 1] = "container contents stay in the unit (restore is off: create Mods/BlueprintUnit/restore_on.txt to test it)"
+            return end_run(base)
+        end
         R.restore_on = true
         R.stage = 12
         R.t_stage = now
