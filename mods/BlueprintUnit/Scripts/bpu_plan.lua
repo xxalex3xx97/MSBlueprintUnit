@@ -17,6 +17,7 @@
 --   buildables= { [dat] = {cost={ITEM_X=n}, bcls=<class short name, optional>, cls=<optional>} }
 
 local JSON = require("bpu_json")
+local PT = require("bpu_ports")
 
 local P = {}
 
@@ -375,14 +376,26 @@ local function build(text, live, F)
     end
 
     -- config bytes: ConfigHex verbatim (non-underground); recipe machines get the recipe layout; undergrounds paired below
+    local port_noted = {}
     for _, m in ipairs(machines) do
         if m.hasHex and not is_ug(m) then
             m.cfg = m.hexcfg
         else
             local rt = RECIPE_MACH[m.dat]
             if rt and m.recipe then
-                local ports = {}
-                for i = 1, rt.ports do ports[i] = true end
+                local ports
+                if PT.verified(m.dat) then
+                    local perr
+                    ports, perr = PT.site_to_game(m.dat, m.rot, m.ports)
+                    if not ports then bail(perr .. " at " .. where(m)) end
+                else
+                    ports = {}
+                    for i = 1, rt.ports do ports[i] = true end
+                    if m.ports and not port_noted[m.dat] then
+                        port_noted[m.dat] = true
+                        notes[#notes + 1] = "ports not verified for " .. m.dat .. ": config written with all ports on"
+                    end
+                end
                 m.cfg = F.encode_cfg({ recipe = m.recipe, ports = ports })
             end
         end
@@ -504,8 +517,9 @@ local function build(text, live, F)
     end
     machines = rest
 
-    -- config changes of kept recipe machines (recipe only; ports logged, not applied: mapping unverified, as probe)
-    local chg, recN = {}, 0
+    -- config changes of kept recipe machines: recipe + port diffs. Port diffs apply only for verified classes at rot 0
+    -- (rot ~= 0 only with PT.assume_rot); others logged. chg.ports = { {index=0-based game byte, want=bool}, ... }
+    local chg, recN, portN = {}, 0, 0
     for _, m in ipairs(kept) do
         if m.cfg and m.cfg ~= "" and RECIPE_MACH[m.dat] then
             local target, terr = F.decode_cfg(m.cfg)
@@ -518,12 +532,27 @@ local function build(text, live, F)
             elseif #lv.ports ~= #target.ports then
                 notes[#notes + 1] = "CFG " .. m.id .. " " .. m.bcls .. " live unknown (port count differs), kept as is"
             else
-                local pdiff = 0
-                for i = 1, #target.ports do if target.ports[i] ~= lv.ports[i] then pdiff = pdiff + 1 end end
-                if pdiff > 0 then notes[#notes + 1] = pdiff .. " port difference(s) on id " .. m.id .. " not applied (port mapping unverified)" end
-                if target.recipe ~= lv.recipe then
-                    chg[#chg + 1] = { m = m, recipe = true, oldRec = lv.recipe, newRec = target.recipe, ports = {} }
-                    recN = recN + 1
+                local pdiffs = {}
+                for i = 1, #target.ports do
+                    if target.ports[i] ~= lv.ports[i] then pdiffs[#pdiffs + 1] = { index = i - 1, want = target.ports[i] } end
+                end
+                local applied = {}
+                if #pdiffs > 0 then
+                    local why
+                    if not PT.verified(m.dat) then why = "port mapping unverified for " .. m.dat
+                    elseif (m.rot or 0) % 4 ~= 0 and not PT.assume_rot then why = "rot ~= 0 not verified"
+                    end
+                    if why then
+                        notes[#notes + 1] = #pdiffs .. " port difference(s) on id " .. m.id .. " not applied (" .. why .. ")"
+                    else
+                        applied = pdiffs
+                        portN = portN + #pdiffs
+                    end
+                end
+                local recChanged = target.recipe ~= lv.recipe
+                if recChanged or #applied > 0 then
+                    chg[#chg + 1] = { m = m, recipe = recChanged, oldRec = lv.recipe, newRec = target.recipe, ports = applied }
+                    if recChanged then recN = recN + 1 end
                 end
             end
         end
@@ -614,7 +643,7 @@ local function build(text, live, F)
         refund = refund,
         skipped_ug = skipped_ug,
         notes = notes,
-        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = 0 },
+        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN },
         removes = removes,
         fp = P.fingerprint(existing),
         valid = true,

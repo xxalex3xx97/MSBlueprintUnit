@@ -22,7 +22,7 @@ if ($vm.Groups[1].Value -ne $Version) { throw "version mismatch: -Version $Versi
 if (-not (Test-Path -LiteralPath $releaseMod -PathType Leaf)) { throw "missing shared script: $releaseMod" }
 
 # <local>=<zip path> pairs
-$luaNames = 'main.lua', 'bpu_version.lua', 'bpu_window.lua', 'bpu_json.lua', 'bpu_plan.lua', 'bpu_live.lua', 'bpu_build.lua'
+$luaNames = 'main.lua', 'bpu_version.lua', 'bpu_window.lua', 'bpu_json.lua', 'bpu_plan.lua', 'bpu_live.lua', 'bpu_build.lua', 'bpu_ports.lua', 'bpu_port_data.lua'
 $pakNames = foreach ($n in 'pakchunk97-BPUnitMesh_P', 'pakchunk100-BlueprintUnit_P', 'pakchunk102-BPUnitUI_P') {
     foreach ($e in 'pak', 'ucas', 'utoc') { "$n.$e" }
 }
