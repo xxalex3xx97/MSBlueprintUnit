@@ -467,13 +467,17 @@ local function build(text, live, F, opts)
                 item_idx = item_idx or item_index(live.items)
                 local order, sum = {}, {}
                 for _, c in ipairs(m.contents_raw) do
-                    local hits = item_idx[canon(c.name)] or {}
+                    local cn = canon(c.name)
+                    -- site ids are sometimes singular ("reinforcedplate" = ITEM_ReinforcedPlates): try the other plural form
+                    local hits = item_idx[cn] or item_idx[cn:gsub("s$", "")] or item_idx[cn .. "s"] or {}
                     if #hits ~= 1 then
-                        bail((#hits == 0 and "unknown" or "ambiguous") .. " item in Contents at (" .. m.x .. "," .. m.y .. "): " .. c.name)
+                        -- an item the game does not know must not block the whole import: leave it out, say so
+                        notes[#notes + 1] = ("Contents item skipped (%s): %s x%d at (%d,%d)"):format(#hits == 0 and "unknown" or "ambiguous", c.name, c.count, m.x, m.y)
+                    else
+                        local name = hits[1]
+                        if not sum[name] then sum[name] = 0; order[#order + 1] = name end
+                        sum[name] = sum[name] + c.count
                     end
-                    local name = hits[1]
-                    if not sum[name] then sum[name] = 0; order[#order + 1] = name end
-                    sum[name] = sum[name] + c.count
                 end
                 m.contents = {}
                 for _, name in ipairs(order) do m.contents[#m.contents + 1] = { name = name, count = sum[name] } end

@@ -252,7 +252,11 @@ local rr = pc and row_of(P.cost_rows(pc), "ITEM_IronOre")
 check("contents: cost row need 120 refund 0 net 120", rr and rr.need == 120 and rr.refund == 0 and rr.net == 120)
 
 local pn, nerr = P.plan(cont_doc('[{"Item":"unobtainium","Count":5}]', 2, 2), live({ items = ITEMS }), F)
-check("contents: unknown item refused (" .. tostring(nerr) .. ")", pn == nil and tostring(nerr):find("unknown item in Contents", 1, true) ~= nil)
+check("contents: unknown item skipped with a note, plan ok", pn ~= nil and nerr == nil and tostring(table.concat(pn.notes, ";")):find("Contents item skipped (unknown): unobtainium", 1, true) ~= nil)
+-- singular site id resolves to the plural live item
+local ps1 = P.plan(cont_doc('[{"Item":"reinforcedplate","Count":7}]', 2, 2), live({ items = { "ITEM_ReinforcedPlates", "ITEM_IronOre" } }), F)
+local rp = ps1 and ps1.restore and ps1.restore["ITEM_ReinforcedPlates"]
+check("contents: singular id reinforcedplate = ITEM_ReinforcedPlates", ps1 ~= nil and rp == 7)
 
 local pci = P.plan(cont_doc('[{"Item":"Iron Ore","Count":3},{"Item":"ITEM_ironore","Count":4}]', 2, 2), live({ items = ITEMS }), F)
 check("contents: case/space/ITEM_ insensitive, duplicates summed", pci and pci.restore.ITEM_IronOre == 7)
