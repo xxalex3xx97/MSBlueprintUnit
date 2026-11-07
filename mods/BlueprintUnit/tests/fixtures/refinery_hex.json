@@ -1,0 +1,2 @@
+{"Version":2,"DisplayName":"RefHex","Blocks":[{"Class":"/Game/Blueprints/BuildingBlocks/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}],"DefaultMachines":[
+{"Class":"BP_RefineryObject","DefaultName":"DAT_Refinery","ConfigHex":"0100ff","Transform":{"GridLocation":{"X":1,"Y":1},"Height":0,"GridRotation":0}}]}

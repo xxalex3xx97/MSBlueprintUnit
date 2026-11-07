@@ -1,0 +1,719 @@
+-- bpu_plan.lua: Blueprint Unit planner. Pure Lua 5.4, no game globals. Port of the dev probe planner (mb_bpprobe.hpp):
+-- pp_parse_doc, pp_resolve, pp_site_rec / pp_resolve_recipes, pp_encode_cfg + pp_pair_underground, pp_check_new,
+-- pp_split_kept (sync), pp_kept_changes (cfg_diff), pp_stale / pp_plan_removals, pp_fingerprint, pp_import_* text.
+--
+-- API:  P.plan(text, live, F) -> plan | nil, err
+--       P.summary(plan) -> "place N, keep K, remove R (refund Name xN, ..., +M more), recipe changes C"
+--       P.removes_text(plan) -> "removes: 3 belts, 1 splitter" ("" when none)
+--       P.cost_rows(plan) -> sorted { {name=ITEM_raw, need=, refund=, net=}, ... } (need>0 or refund>0)
+--       P.fingerprint(existing) -> FNV-1a 32-bit over id,bcls,x,y,h,rot (plan staleness check)
+-- F = MSCore factory module (mscore_factory.lua), injected: F.tables, F.block_floor, F.floor_rects, F.validate_place,
+--     F.footprint, F.encode_cfg, F.decode_cfg, F.encode_ug. Tests pass a snapshot copy (tests/fixtures).
+-- live (injected by bpu_live, this file never touches the game):
+--   station   = station id
+--   blocks    = { {class=, gx=, gy=, h=, rot=}, ... }          live Blueprint.Blocks
+--   existing  = { {id=, cls=, bcls=, dat=, x=, y=, h=, rot=, recipe=, cfg=<bytes|nil>}, ... }  live machines (cfg = live config)
+--   recipes   = { [REC object name, e.g. "REC_TitaniumPlates"] = <game Recipe.Name> }
+--   buildables= { [dat] = {cost={ITEM_X=n}, bcls=<class short name, optional>, cls=<optional>} }
+
+local JSON = require("bpu_json")
+
+local P = {}
+
+-- machines that take a recipe: DAT -> crafter name (recipe site table) and port count (config layout). probe kPasteRecipe.
+local RECIPE_MACH = {
+    DAT_Assembler = { crafter = "Assembler", ports = 8 },
+    DAT_Refinery = { crafter = "Refinery", ports = 4 },
+    DAT_EnrichmentChamber = { crafter = "Enrichment", ports = 12 },
+    DAT_AdvancedAssembler = { crafter = "AdvancedAssembler", ports = 12 },
+    DAT_GrowthChamber = { crafter = "GrowthChamber", ports = 8 },
+    DAT_Supercomputer = { crafter = "Supercomputer", ports = 8 },
+    DAT_RelicSynthesizer = { crafter = "RelicSynthesizer", ports = 12 },
+}
+
+-- underground tiers: DAT, MaxLength (Mk1 8, Mk2 10, Mk3 12)
+local UG_TIERS = {
+    { dat = "DAT_UndergroundBelt", max = 8 },
+    { dat = "DAT_UndergroundBelt_2", max = 10 },
+    { dat = "DAT_UndergroundBelt_3", max = 12 },
+}
+
+-- classes never removed by sync (substring match on the class short name)
+local NEVER_REMOVED = { "Dock", "SolarPanel", "Console", "ItemCrate", "Elevator", "Teleporter" }
+
+-- site recipe rows {crafter, out, ins, rec}: generated from the probe table kPasteRecRows (63 recipes, same order).
+local REC_ROWS = {
+    {"AdvancedAssembler", "advancedcircuits", "basiccircuit+coolant+detectorarray+superalloy", "REC_AdvancedCircuits"},
+    {"AdvancedAssembler", "advancedplates", "chitincomposite+chromaticalloy+multisensor+reinforcedplates", "REC_AdvancedPlates"},
+    {"GrowthChamber", "alphaprotein", "biomass+enzyme+nutrients+xenoeukarya", "REC_AlphaProtein"},
+    {"Armoury", "backpackmk1", "hullplates+lightweightframe", "REC_BackpackMk1"},
+    {"Armoury", "backpackmk2", "graphene+reinforcedplates", "REC_BackpackMk2"},
+    {"Armoury", "backpackmk3", "biolattice+superalloyframe", "REC_BackpackMk3"},
+    {"Assembler", "basiccircuit", "magneticcoils+siliconwafers", "REC_BasicCircuit"},
+    {"Assembler", "basicmotor", "titaniumplates", "REC_BasicMotor"},
+    {"GrowthChamber", "betaprotein", "biomass+enzyme+nutrients+xenoarchaea", "REC_BetaProtein"},
+    {"GrowthChamber", "biolattice", "alphaprotein+betaprotein+nutrients", "REC_Biolattice"},
+    {"Assembler", "capacitor", "nickelplates+titaniumplates", "REC_Capacitor"},
+    {"AdvancedAssembler", "chitincomposite", "biolattice+enzyme+graphene+reinforcedglass", "REC_ChitinComposite"},
+    {"Enrichment", "chromaticalloy", "iridiumplates+superalloy", "REC_ChromaticAlloy"},
+    {"Refinery", "cobaltplates", "cobaltore", "REC_CobaltPlates"},
+    {"Assembler", "containmentcoil", "basiccircuit+capacitor+magneticcoils", "REC_ContainmentCoil"},
+    {"Enrichment", "coolant", "nitrogengas", "REC_Coolant"},
+    {"Assembler", "detectorarray", "basiccircuit+cobaltplates+graphene", "REC_DetectorArray"},
+    {"AdvancedAssembler", "emptysimulationmatrix", "advancedcircuits+lonsdaleite", "REC_EmptySimulationMatrix"},
+    {"Supercomputer", "encodedsimulationmatrix", "emptysimulationmatrix+stellarsurveydata", "REC_EncodedSimulationMatrix"},
+    {"Enrichment", "enrichedcobaltore", "cobaltore", "REC_EnrichedCobaltOre"},
+    {"Refinery", "cobaltplates", "enrichedcobaltore", "REC_EnrichedCobaltPlates"},
+    {"Enrichment", "enrichedfuel", "hydrogenfuel", "REC_EnrichedFuel"},
+    {"Enrichment", "enrichednickelore", "nickelore", "REC_EnrichedNickelOre"},
+    {"Refinery", "nickelplates", "enrichednickelore", "REC_EnrichedNickelPlates"},
+    {"Enrichment", "enrichedtitaniumore", "titaniumore", "REC_EnrichedTitaniumOre"},
+    {"Refinery", "titaniumplates", "enrichedtitaniumore", "REC_EnrichedTitaniumPlates"},
+    {"GrowthChamber", "enzyme", "biomass+nutrients+xenobacteria", "REC_Enzyme"},
+    {"Armoury", "exoskeletonmk1", "capacitor+servomotor", "REC_ExoskeletonMk1"},
+    {"Armoury", "exoskeletonmk2", "coolant+maglevcoupling", "REC_ExoskeletonMk2"},
+    {"Armoury", "exoskeletonmk3", "chitincomposite+chromaticalloy", "REC_ExoskeletonMk3"},
+    {"Armoury", "exosuit", "advancedplates+backpackmk3+exoskeletonmk3", "REC_Exosuit"},
+    {"Refinery", "graphene", "graphite", "REC_Graphene"},
+    {"Assembler", "hullplates", "titaniumplates", "REC_HullPlates"},
+    {"Refinery", "hydrogenfuel", "waterice", "REC_HydrogenFuel"},
+    {"Refinery", "iridiumplates", "iridiumore+titaniumore", "REC_IridiumPlates"},
+    {"Assembler", "lightweightframe", "titaniumplates", "REC_LightweightFrame"},
+    {"Assembler", "magneticcoils", "nickelplates", "REC_MageticCoils"},
+    {"Assembler", "maglevcoupling", "servomotor+superalloy", "REC_MaglevCoupling"},
+    {"Assembler", "missile", "containmentcoil+coolant+hullplates", "REC_Missile"},
+    {"AdvancedAssembler", "multisensor", "chromaticalloy+encodedsimulationmatrix+lonsdaleite+superconductorcoil", "REC_Multisensor"},
+    {"Refinery", "nickelplates", "nickelore", "REC_NickelPlates"},
+    {"Enrichment", "nickelore", "protomatter", "REC_NickelSynthesis"},
+    {"GrowthChamber", "nutrients", "graphite+silica+waterice", "REC_Nutrients"},
+    {"RelicSynthesizer", "protomatter", "", "REC_Protomatter"},
+    {"Refinery", "reinforcedglass", "silica", "REC_ReinforcedGlass"},
+    {"Assembler", "reinforcedplates", "hullplates+superalloy", "REC_ReinforcedPlates"},
+    {"Assembler", "reliccapacitor", "capacitor+relicshard", "REC_RelicCapacitor"},
+    {"RelicSynthesizer", "relicshard", "superalloy", "REC_RelicShardSynthesis"},
+    {"Assembler", "repairkit", "lightweightframe+nickelplates", "REC_RepairKit"},
+    {"Assembler", "repairkitelectric", "capacitor+magneticcoils", "REC_RepairKitElectric"},
+    {"Assembler", "repairkithull", "hullplates+lightweightframe", "REC_RepairKitHull"},
+    {"AdvancedAssembler", "servoplates", "maglevcoupling+reinforcedplates", "REC_ServoPlates"},
+    {"Assembler", "servomotor", "basicmotor+capacitor+lightweightframe", "REC_Servomotor"},
+    {"Refinery", "siliconwafers", "silica", "REC_SiliconWafers"},
+    {"Enrichment", "superalloy", "enrichedcobaltore+enrichednickelore+enrichedtitaniumore", "REC_Superalloy"},
+    {"AdvancedAssembler", "superalloyframe", "superalloy", "REC_SuperalloyFrame"},
+    {"Assembler", "superconductorcoil", "containmentcoil+coolant+maglevcoupling", "REC_SuperconductorCoil"},
+    {"Refinery", "titaniumplates", "titaniumore", "REC_TitaniumPlates"},
+    {"Enrichment", "titaniumore", "protomatter", "REC_TitaniumSynthesis"},
+    {"Enrichment", "warpfuel", "containmentcoil+enrichedfuel", "REC_WarpFuel"},
+    {"GrowthChamber", "xenoeukarya", "biomass+xenoeukarya", "REC_XenoEukaryaRecycling"},
+    {"GrowthChamber", "xenoarchaea", "biomass+xenoarchaea", "REC_XenoarchaeaRecycling"},
+    {"GrowthChamber", "xenobacteria", "biomass+xenobacteria", "REC_XenobacteriaRecycling"},
+}
+
+---------------------------------------------------------------- helpers
+local function bail(msg) error({ bpu = msg }, 0) end
+
+local function is_array(t) return next(t) == nil or t[1] ~= nil end
+
+local function sorted_keys(t)
+    local ks = {}
+    for k in pairs(t) do ks[#ks + 1] = k end
+    table.sort(ks)
+    return ks
+end
+
+local function copy(t)
+    local c = {}
+    for k, v in pairs(t) do c[k] = v end
+    return c
+end
+
+-- "/Game/x/BPO_A.BPO_A_C" -> "BPO_A" (path, '.' suffix and "_C" removed)
+local function short(s)
+    s = s:match("([^/\\]*)$") or s
+    s = s:match("^([^%.]*)") or s
+    if #s > 2 and s:sub(-2) == "_C" then s = s:sub(1, -3) end
+    return s
+end
+
+local function int_field(v, what)
+    if type(v) ~= "number" or v ~= math.floor(v) or v < -2147483648 or v > 2147483647 then
+        bail("bad or missing number " .. what)
+    end
+    return math.tointeger(v)
+end
+
+local function grid(o, what)
+    local gl = o.GridLocation
+    if type(gl) ~= "table" then bail("missing GridLocation in " .. what) end
+    local x = int_field(gl.X, "GridLocation.X")
+    local y = int_field(gl.Y, "GridLocation.Y")
+    local h = int_field(o.Height, "Height")
+    local rot = int_field(o.GridRotation, "GridRotation")
+    return x, y, h, rot
+end
+
+-- ConfigHex text -> bytes. nil + why when not even-length hex or over 4096 bytes.
+local function hex_cfg(hex)
+    if #hex % 2 ~= 0 or hex:find("[^%x]") then return nil, "not even-length hex (0-9 a-f)" end
+    if #hex / 2 > 4096 then return nil, "more than 4096 bytes" end
+    return (hex:gsub("%x%x", function(p) return string.char(tonumber(p, 16)) end))
+end
+
+-- underground config layout: 01 00 + i32 Length -> Length, -1 when not that size
+local function cfg_len(b)
+    if not b or #b ~= 6 then return -1 end
+    return (string.unpack("<i4", b, 3))
+end
+
+local function is_ug(m)
+    return m.dat ~= nil and m.dat:sub(1, #"DAT_UndergroundBelt") == "DAT_UndergroundBelt"
+end
+
+local function where(m)
+    return tostring(m.dat) .. "@(" .. m.x .. "," .. m.y .. ",h" .. m.h .. ")"
+end
+
+-- positive-area intersection of two footprints (centre x,y, half extents w,h); touching edges do not count
+local function overlap(ax, ay, aw, ah, bx, by, bw, bh)
+    return ax - aw < bx + bw and bx - bw < ax + aw and ay - ah < by + bh and by - bh < ay + ah
+end
+
+local function footprint_of(F, e)
+    local w, h = F.footprint(e.dat or "", e.rot or 0)
+    if not w then return 1, 1 end   -- probe: unknown existing footprint = 1x1
+    return w, h
+end
+
+---------------------------------------------------------------- recipes (site id -> REC -> live Recipe.Name)
+local function pp_norm(s)
+    s = s:lower()
+    if s:sub(1, 5) == "item_" then s = s:sub(6) end
+    return (s:gsub("[ _%-\t]", ""))
+end
+
+-- "item_a + item_b" -> canonical input set "a+b" (names normalized, sorted, empty parts dropped)
+local function item_set(s)
+    local v = {}
+    for part in (s .. "+"):gmatch("(.-)%+") do
+        local t = part:match("^[ \t]*(.-)[ \t]*$")
+        if t ~= "" then v[#v + 1] = pp_norm(t) end
+    end
+    table.sort(v)
+    return table.concat(v, "+")
+end
+
+-- site "inputs>output" + crafter -> REC id. nil + why when no or several candidates (no guessing).
+local function site_rec(site, crafter)
+    local gt = site:find(">", 1, true)
+    if not gt then return nil, "no '>' in site id" end
+    local out = item_set(site:sub(gt + 1))
+    local ins = item_set(site:sub(1, gt - 1))
+    local c = {}
+    for _, r in ipairs(REC_ROWS) do
+        if r[1] == crafter and r[2] == out then c[#c + 1] = r end
+    end
+    if #c > 1 then
+        local same = {}
+        for _, r in ipairs(c) do if r[3] == ins then same[#same + 1] = r end end
+        c = same
+    end
+    if #c ~= 1 then return nil, #c .. " offline candidates for " .. crafter .. " output " .. out end
+    return c[1][4]
+end
+
+-- recipe text of a machine -> game Recipe.Name, through live.recipes. Plain text (no '>') = a game name already.
+local function resolve_recipe(site, crafter, live_recipes)
+    local matches = {}
+    if not site:find(">", 1, true) then
+        local want = site:lower()
+        for _, name in pairs(live_recipes) do
+            if name:lower() == want then matches[#matches + 1] = name end
+        end
+    else
+        local rec = site_rec(site, crafter)
+        if not rec then return nil end
+        local want = rec:lower()
+        local bare = want:sub(1, 4) == "rec_" and want:sub(5) or want
+        for key, name in pairs(live_recipes) do
+            local lk = key:lower()
+            if lk == want or lk == bare then matches[#matches + 1] = name end
+        end
+    end
+    if #matches ~= 1 then return nil end   -- none, or ambiguous
+    return matches[1]
+end
+
+---------------------------------------------------------------- JSON -> records
+local function parse_doc(text)
+    local root, err = JSON.decode(text)
+    if err then bail(err) end
+    if type(root) ~= "table" or root[1] ~= nil then bail("bad JSON: top level is not an object") end
+    local doc = { name = "", blocks = {}, machines = {} }
+    if type(root.DisplayName) == "string" then doc.name = root.DisplayName end
+    local bl = root.Blocks
+    if type(bl) ~= "table" or not is_array(bl) then bail("bad JSON: Blocks missing or not an array") end
+    for _, e in ipairs(bl) do
+        local c = type(e) == "table" and e.Class or nil
+        if type(c) ~= "string" then bail("bad JSON: block without Class") end
+        local x, y, h, rot = grid(e, "block")
+        doc.blocks[#doc.blocks + 1] = { class = short(c), gx = x, gy = y, h = h, rot = rot }
+    end
+    local dm = root.DefaultMachines
+    if dm ~= nil and (type(dm) ~= "table" or not is_array(dm)) then bail("bad JSON: DefaultMachines not an array") end
+    for _, e in ipairs(dm or {}) do
+        local c = type(e) == "table" and e.Class or nil
+        if type(c) ~= "string" then bail("bad JSON: machine without Class") end
+        local m = { cls = short(c), x = 0, y = 0, h = 0, rot = 0 }
+        if type(e.DefaultName) == "string" and e.DefaultName:sub(1, 4) == "DAT_" then m.dat = e.DefaultName end
+        local tr = e.Transform
+        if type(tr) ~= "table" then bail("bad JSON: machine without Transform: " .. m.cls) end
+        m.x, m.y, m.h, m.rot = grid(tr, "machine Transform")
+        if m.h % 8 ~= 0 then bail("machine Height not a multiple of 8: " .. m.cls) end
+        if m.rot < 0 or m.rot > 3 then bail("machine GridRotation not 0-3: " .. m.cls) end
+        if type(e.Recipe) == "string" and e.Recipe ~= "" then m.recipe = e.Recipe end
+        if e.Ports ~= nil then
+            if type(e.Ports) ~= "table" or not is_array(e.Ports) then bail("bad JSON: Ports not an array: " .. m.cls) end
+            m.hasPorts = true
+            m.ports = {}
+            for _, pe in ipairs(e.Ports) do
+                if type(pe) ~= "table" or type(pe.Face) ~= "string" or type(pe.Enabled) ~= "boolean" then
+                    bail("bad JSON: Ports entry needs Face and Enabled: " .. m.cls)
+                end
+                m.ports[#m.ports + 1] = { face = pe.Face, index = int_field(pe.Index, "Ports.Index"), enabled = pe.Enabled }
+            end
+        end
+        if e.ConfigHex ~= nil then
+            if type(e.ConfigHex) ~= "string" then bail("bad JSON: ConfigHex not a string: " .. m.cls) end
+            local bytes, why = hex_cfg(e.ConfigHex)
+            if not bytes then bail("ConfigHex refused for " .. m.cls .. ": " .. why) end
+            m.hasHex = true
+            m.hexcfg = bytes
+        end
+        doc.machines[#doc.machines + 1] = m
+    end
+    return doc
+end
+
+---------------------------------------------------------------- the plan
+local function build(text, live, F)
+    if type(text) ~= "string" then bail("plan: no blueprint text") end
+    if type(live) ~= "table" or type(F) ~= "table" or type(F.tables) ~= "table" then bail("plan: live or factory module missing") end
+    local buildables = live.buildables or {}
+    local existing = live.existing or {}
+    local recipes = live.recipes or {}
+    local blocks = live.blocks or {}
+    local notes, skipped_ug = {}, {}
+
+    local bkeys = sorted_keys(buildables)
+    local function dat_for_cls(cls)   -- Buildable of a class: first with a footprint row, else first of that class
+        local any
+        for _, dat in ipairs(bkeys) do
+            local b = buildables[dat]
+            if b.bcls == cls or b.cls == cls then
+                if F.tables[dat] then return dat end
+                any = any or dat
+            end
+        end
+        return any
+    end
+    local function has_buildable(e)
+        return (e.dat ~= nil and buildables[e.dat] ~= nil) or (e.bcls ~= nil and dat_for_cls(e.bcls) ~= nil)
+    end
+
+    local doc = parse_doc(text)
+
+    -- hidden Teleporter never places (brief); skipped with a note
+    local machines = {}
+    for _, m in ipairs(doc.machines) do
+        if m.cls:find("Teleporter", 1, true) or (m.dat and m.dat:find("Teleporter", 1, true)) then
+            notes[#notes + 1] = "skipped (Teleporter is never placed): " .. m.cls .. "@(" .. m.x .. "," .. m.y .. ")"
+        else
+            machines[#machines + 1] = m
+        end
+    end
+
+    -- Blocks must be on the live station Blueprint
+    local blockset = {}
+    for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = true end
+    local missing = {}
+    for _, jb in ipairs(doc.blocks) do
+        if not blockset[jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h] then
+            missing[#missing + 1] = jb.class .. "@(" .. jb.gx .. "," .. jb.gy .. ",h" .. jb.h .. ")"
+        end
+    end
+    if #missing > 0 then
+        local msg = "Blocks are not on the grid:"
+        for i = 1, math.min(#missing, 5) do msg = msg .. " " .. missing[i] .. ";" end
+        bail(msg)
+    end
+
+    -- resolve DAT (by class when absent), footprint, bcls; machines with no Buildable are skipped (block-built)
+    local resolved = {}
+    for _, m in ipairs(machines) do
+        if not m.dat then m.dat = dat_for_cls(m.cls) end
+        if not m.dat then
+            notes[#notes + 1] = "skipped (block-built, no Buildable): " .. m.cls
+        else
+            resolved[#resolved + 1] = m
+            if not F.tables[m.dat] then bail("unknown buildable (no footprint row): " .. m.dat) end
+            local b = buildables[m.dat]
+            if not b then bail("buildable not in this game: " .. m.dat) end
+            m.bdat = m.dat
+            m.bcls = b.bcls or b.cls or m.cls
+            m.w, m.hh = F.footprint(m.dat, m.rot)
+        end
+    end
+    machines = resolved
+
+    -- recipes (site id -> REC -> live name); ConfigHex machines skip the lookup
+    for _, m in ipairs(machines) do
+        local rt = RECIPE_MACH[m.dat]
+        if rt and m.recipe and not m.hasHex then
+            local name = resolve_recipe(m.recipe, rt.crafter, recipes)
+            if not name then bail("recipe not found: " .. m.recipe) end
+            m.recipe = name
+        end
+    end
+
+    -- config bytes: ConfigHex verbatim (non-underground); recipe machines get the recipe layout; undergrounds paired below
+    for _, m in ipairs(machines) do
+        if m.hasHex and not is_ug(m) then
+            m.cfg = m.hexcfg
+        else
+            local rt = RECIPE_MACH[m.dat]
+            if rt and m.recipe then
+                local ports = {}
+                for i = 1, rt.ports do ports[i] = true end
+                m.cfg = F.encode_cfg({ recipe = m.recipe, ports = ports })
+            end
+        end
+        if m.cfg == "" then m.cfg = nil end   -- empty ConfigHex = no config (probe: cfg.empty())
+    end
+
+    -- underground pairing: pair = ONE machine at the entrance (Length = cells inclusive), exit cells not placed
+    local cells, drop = {}, {}
+    for _, t in ipairs(UG_TIERS) do
+        for rot = 0, 3 do
+            local xaxis = rot % 2 == 0
+            local v = {}
+            for i, m in ipairs(machines) do
+                if m.rot == rot and m.dat == t.dat then v[#v + 1] = i end
+            end
+            local function line(i) local m = machines[i]; return xaxis and m.y or m.x end
+            local function flow(i)
+                local m = machines[i]
+                local f = xaxis and m.x or m.y
+                return rot >= 2 and -f or f
+            end
+            table.sort(v, function(a, b)   -- stable: index breaks ties
+                if line(a) ~= line(b) then return line(a) < line(b) end
+                if flow(a) ~= flow(b) then return flow(a) < flow(b) end
+                return a < b
+            end)
+            local used = {}
+            for k = 1, #v do
+                if not used[k] then
+                    for q = k + 1, #v do
+                        if line(v[q]) ~= line(v[k]) then break end
+                        if not used[q] then
+                            local d = flow(v[q]) - flow(v[k])
+                            if d < 2 or d % 2 ~= 0 then break end   -- off-grid or same cell: no pair
+                            local len = d // 2 + 1
+                            local a, b = machines[v[k]], machines[v[q]]
+                            local pos_a = "(" .. a.x .. "," .. a.y .. ")"
+                            if len > t.max then
+                                bail("underground too long: " .. pos_a .. " to (" .. b.x .. "," .. b.y .. ") Length " .. len .. " > " .. t.max .. " (" .. t.dat .. ")")
+                            end
+                            a.cfg = F.encode_ug(len)
+                            if a.hasHex or b.hasHex then notes[#notes + 1] = "ConfigHex ignored for paired underground " .. a.cls .. " at " .. pos_a end
+                            cells[#cells + 1] = b
+                            drop[v[q]] = true
+                            used[k], used[q] = true, true
+                            break
+                        end
+                    end
+                    if not used[k] then
+                        local u = machines[v[k]]
+                        local pos_u = "(" .. u.x .. "," .. u.y .. ")"
+                        if not u.hasHex then   -- Length unknown: skip and say so
+                            drop[v[k]] = true
+                            skipped_ug[#skipped_ug + 1] = pos_u
+                            notes[#notes + 1] = "skipped underground without partner/Length at " .. pos_u
+                        else
+                            -- stand-alone tunnel: ConfigHex must be 01 00 + i32 Length (1..max)
+                            local hl = cfg_len(u.hexcfg)
+                            if #u.hexcfg ~= 6 or u.hexcfg:byte(1) ~= 1 or u.hexcfg:byte(2) ~= 0 or hl < 1 or hl > t.max then
+                                bail("underground without partner at " .. pos_u .. " (ConfigHex must be 01 00 + i32 Length, Length 1-" .. t.max .. ")")
+                            end
+                            u.cfg = u.hexcfg
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local paired = {}
+    for i, m in ipairs(machines) do if not drop[i] then paired[#paired + 1] = m end end
+    machines = paired
+
+    -- new machines (placed + exit cells) vs the live block floors: floor/parity via F, overlap pairwise (any layer, as probe)
+    local all = {}
+    for _, m in ipairs(machines) do all[#all + 1] = m end
+    for _, m in ipairs(cells) do all[#all + 1] = m end
+    local floors = F.floor_rects(blocks, F.block_floor)
+    for _, m in ipairs(all) do
+        local ok, why = F.validate_place(floors, {}, m)
+        if not ok then bail(why .. " at " .. where(m)) end
+    end
+    -- sweep: sorted by left edge, stop when the next left edge is past this right edge (same pairs as the probe's O(n^2))
+    -- ponytail: sweep is enough for ~3000 machines; spatial buckets if a blueprint ever gets much bigger
+    local order = {}
+    for i, m in ipairs(all) do order[i] = m end
+    table.sort(order, function(p, q) return p.x - p.w < q.x - q.w end)
+    for i = 1, #order do
+        local a = order[i]
+        local a_right = a.x + a.w
+        for j = i + 1, #order do
+            local b = order[j]
+            if b.x - b.w >= a_right then break end
+            if overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+        end
+    end
+
+    -- identity keep (sync): same class+x+y+h+rot as an existing machine; underground also same Length
+    local rest, kept, used = {}, {}, {}
+    for _, m in ipairs(machines) do
+        local found
+        for k, e in ipairs(existing) do
+            if not used[k] and e.bcls == m.bcls and e.x == m.x and e.y == m.y and e.h == m.h and e.rot == m.rot then
+                if not (is_ug(m) and e.cfg ~= nil and cfg_len(e.cfg) ~= cfg_len(m.cfg or "")) then
+                    found = k
+                    break
+                end
+            end
+        end
+        if found then
+            used[found] = true
+            local k2 = copy(m)
+            k2.id = existing[found].id
+            k2.hasLive = existing[found].cfg ~= nil
+            k2.live = existing[found].cfg
+            kept[#kept + 1] = k2
+        else
+            rest[#rest + 1] = m
+        end
+    end
+    machines = rest
+
+    -- config changes of kept recipe machines (recipe only; ports logged, not applied: mapping unverified, as probe)
+    local chg, recN = {}, 0
+    for _, m in ipairs(kept) do
+        if m.cfg and m.cfg ~= "" and RECIPE_MACH[m.dat] then
+            local target, terr = F.decode_cfg(m.cfg)
+            local live_c = m.live
+            local lv = live_c and live_c ~= "" and F.decode_cfg(live_c) or nil
+            if not target then
+                notes[#notes + 1] = "CFG " .. m.id .. " " .. m.bcls .. " target not recipe layout (" .. tostring(terr) .. ")"
+            elseif not lv then
+                notes[#notes + 1] = "CFG " .. m.id .. " " .. m.bcls .. " live unknown, kept as is"
+            elseif #lv.ports ~= #target.ports then
+                notes[#notes + 1] = "CFG " .. m.id .. " " .. m.bcls .. " live unknown (port count differs), kept as is"
+            else
+                local pdiff = 0
+                for i = 1, #target.ports do if target.ports[i] ~= lv.ports[i] then pdiff = pdiff + 1 end end
+                if pdiff > 0 then notes[#notes + 1] = pdiff .. " port difference(s) on id " .. m.id .. " not applied (port mapping unverified)" end
+                if target.recipe ~= lv.recipe then
+                    chg[#chg + 1] = { m = m, recipe = true, oldRec = lv.recipe, newRec = target.recipe, ports = {} }
+                    recN = recN + 1
+                end
+            end
+        end
+    end
+
+    -- removals: conflicts (same layer overlap with new machines, kept ones excluded) + stale (existing the blueprint no longer has)
+    local newall = {}
+    for _, m in ipairs(machines) do newall[#newall + 1] = m end
+    for _, m in ipairs(cells) do newall[#newall + 1] = m end
+    local hits = {}
+    for k, e in ipairs(existing) do
+        local ew, eh = footprint_of(F, e)
+        for _, m in ipairs(newall) do
+            if m.h == e.h and overlap(m.x, m.y, m.w, m.hh, e.x, e.y, ew, eh) then
+                hits[#hits + 1] = k
+                break
+            end
+        end
+    end
+    local keptset = used
+    local stale_set, stale = {}, {}
+    for k, e in ipairs(existing) do
+        if not keptset[k] and has_buildable(e) then
+            local never = false
+            for _, w in ipairs(NEVER_REMOVED) do
+                if (e.bcls or ""):find(w, 1, true) then never = true end
+            end
+            if not never then
+                stale_set[k] = true
+                stale[#stale + 1] = k
+            end
+        end
+    end
+    local rmv, in_rmv = {}, {}   -- rmv = conflicts first, then stale (probe pp_plan_removals order)
+    for _, k in ipairs(hits) do rmv[#rmv + 1] = k; in_rmv[k] = true end
+    for _, k in ipairs(stale) do if not in_rmv[k] then rmv[#rmv + 1] = k; in_rmv[k] = true end end
+    if #rmv > 0 then
+        local lst = {}
+        for i = 1, math.min(#hits, 10) do
+            local e = existing[hits[i]]
+            lst[#lst + 1] = e.bcls .. "#" .. tostring(e.id) .. "@(" .. e.x .. "," .. e.y .. ")"
+        end
+        local list = table.concat(lst, ", ")
+        for _, k in ipairs(hits) do
+            local e = existing[k]
+            for _, w in ipairs({ "Dock", "SolarPanel", "Console" }) do
+                if e.bcls:find(w, 1, true) then
+                    bail("replace refused, would remove " .. e.bcls .. "#" .. tostring(e.id) .. " (Dock/SolarPanel/Console are never removed): " .. list)
+                end
+            end
+        end
+        for _, k in ipairs(hits) do
+            if not stale_set[k] then
+                local e = existing[k]
+                bail("sync refused, would remove " .. e.bcls .. "#" .. tostring(e.id) .. " (no player Buildable, never removed): " .. list)
+            end
+        end
+    end
+    local removed, stale_ids = {}, {}
+    for _, k in ipairs(rmv) do removed[#removed + 1] = existing[k] end
+    for _, k in ipairs(stale) do stale_ids[#stale_ids + 1] = existing[k].id end
+
+    -- costs: need = ItemCost of placed machines; refund = ItemCost of removed machines (refund unknown = refused)
+    local need, refund = {}, {}
+    local function add(into, cost)
+        for item, n in pairs(cost) do into[item] = (into[item] or 0) + n end
+    end
+    for _, m in ipairs(machines) do add(need, buildables[m.dat].cost or {}) end
+    for _, e in ipairs(removed) do
+        local dat = (e.dat and buildables[e.dat] and e.dat) or dat_for_cls(e.bcls or "")
+        if not dat then bail("refund cost unknown for " .. tostring(e.bcls)) end
+        add(refund, buildables[dat].cost or {})
+    end
+
+    local removes = {}
+    for _, e in ipairs(removed) do removes[e.bcls] = (removes[e.bcls] or 0) + 1 end
+
+    return {
+        station = live.station,
+        name = doc.name,
+        place = machines,
+        cells = cells,
+        kept = kept,
+        chg = chg,
+        removed = removed,
+        stale_ids = stale_ids,
+        need = need,
+        refund = refund,
+        skipped_ug = skipped_ug,
+        notes = notes,
+        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = 0 },
+        removes = removes,
+        fp = P.fingerprint(existing),
+        valid = true,
+    }
+end
+
+function P.plan(text, live, F)
+    if type(F) ~= "table" or type(F.footprint) ~= "function" then return nil, "plan: factory module missing" end
+    local ok, res = pcall(build, text, live, F)
+    if ok then return res end
+    if type(res) == "table" and res.bpu then return nil, res.bpu end
+    error(res, 0)
+end
+
+---------------------------------------------------------------- texts and rows
+local function strip_item(name)
+    if name:sub(1, 5) == "ITEM_" then return name:sub(6) end
+    return name
+end
+
+function P.summary(plan)
+    local c = plan.counts
+    local s = "place " .. c.place .. ", keep " .. c.keep .. ", remove " .. c.remove
+    if c.remove > 0 then
+        local items, shown, more = {}, 0, 0
+        for _, name in ipairs(sorted_keys(plan.refund)) do
+            if plan.refund[name] > 0 then
+                if shown == 5 then
+                    more = more + 1
+                else
+                    shown = shown + 1
+                    items[#items + 1] = strip_item(name) .. " x" .. tostring(plan.refund[name])
+                end
+            end
+        end
+        local r = table.concat(items, ", ")
+        if more > 0 then r = r .. ", +" .. more .. " more" end
+        s = s .. " (refund " .. (r == "" and "none" or r) .. ")"
+    end
+    return s .. ", recipe changes " .. c.recipe
+end
+
+-- display name of a removed class: BP_ prefix, _C and Object removed; ConveyorBelt -> belt, Container_2 -> large container
+local DISPLAY = {
+    ConveyorBelt = "belt", Splitter = "splitter", Container = "container",
+    ["ContainerObject_2"] = "large container", ["Container_2"] = "large container",
+}
+local function display_name(bcls)
+    local b = (bcls:gsub("^BP_", ""))
+    b = (b:gsub("_C$", ""))
+    if DISPLAY[b] then return DISPLAY[b] end
+    local o = (b:gsub("Object$", ""))
+    if DISPLAY[o] then return DISPLAY[o] end
+    return o:lower()
+end
+
+function P.removes_text(plan)
+    local grouped, names = {}, {}
+    for bcls, n in pairs(plan.removes or {}) do
+        local d = display_name(bcls)
+        if not grouped[d] then grouped[d] = 0; names[#names + 1] = d end
+        grouped[d] = grouped[d] + n
+    end
+    if #names == 0 then return "" end
+    table.sort(names, function(a, b)
+        if grouped[a] ~= grouped[b] then return grouped[a] > grouped[b] end
+        return a < b
+    end)
+    local parts = {}
+    for _, d in ipairs(names) do
+        local n = grouped[d]
+        parts[#parts + 1] = n .. " " .. d .. (n == 1 and "" or "s")
+    end
+    return "removes: " .. table.concat(parts, ", ")
+end
+
+function P.cost_rows(plan)
+    local seen, rows = {}, {}
+    for name in pairs(plan.need) do seen[name] = true end
+    for name in pairs(plan.refund) do seen[name] = true end
+    for _, name in ipairs(sorted_keys(seen)) do
+        local nd, rf = plan.need[name] or 0, plan.refund[name] or 0
+        if nd > 0 or rf > 0 then
+            rows[#rows + 1] = { name = name, need = nd, refund = rf, net = nd - rf }
+        end
+    end
+    return rows
+end
+
+-- FNV-1a 32-bit over id,bcls,x,y,h,rot of each existing machine, in order
+function P.fingerprint(existing)
+    local hv = 2166136261
+    for _, e in ipairs(existing or {}) do
+        local s = string.format("%s|%s|%s|%s|%s|%s;", tostring(e.id), tostring(e.bcls), tostring(e.x), tostring(e.y), tostring(e.h), tostring(e.rot))
+        for i = 1, #s do
+            hv = ((hv ~ s:byte(i)) * 16777619) & 0xffffffff
+        end
+    end
+    return hv
+end
+
+return P
