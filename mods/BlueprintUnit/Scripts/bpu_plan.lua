@@ -7,7 +7,7 @@
 --       P.removes_text(plan) -> "removes: 3 belts, 1 splitter" ("" when none)
 --       P.cost_rows(plan) -> sorted { {name=ITEM_raw, need=, refund=, net=}, ... } (need>0 or refund>0)
 --       P.fingerprint(existing) -> FNV-1a 32-bit over id,bcls,x,y,h,rot (plan staleness check)
---       opts (optional) = { trace = fn(text) }: called once with diagnostics when blocks are missing (no effect otherwise)
+--       opts (optional) = { trace = fn(text) }: called with diagnostics (missing blocks, keep split, placed-validation failure); never changes the plan
 -- F = MSCore factory module (mscore_factory.lua), injected: F.tables, F.block_floor, F.floor_rects, F.validate_place,
 --     F.footprint, F.encode_cfg, F.decode_cfg, F.encode_ug. Tests pass a snapshot copy (tests/fixtures).
 -- live (injected by bpu_live, this file never touches the game):
@@ -320,6 +320,23 @@ local function diag_missing(lines, jb, blocks)
     for i = 1, math.min(DIAG_MAX, #same_cxy) do lines[#lines + 1] = row("cxy", same_cxy[i]) end
 end
 
+-- trace-only: why a placed machine failed validation. Appends lines to `lines`; never changes matching.
+local function diag_fail(lines, m, existing)
+    local function dist(e) return math.abs((e.x or 0) - m.x) + math.abs((e.y or 0) - m.y) + math.abs((e.h or 0) - m.h) end
+    local function desc(e) return " id=" .. tostring(e.id) .. " bcls=" .. tostring(e.bcls) .. " x=" .. tostring(e.x) .. " y=" .. tostring(e.y)
+        .. " h=" .. tostring(e.h) .. " rot=" .. tostring(e.rot) end
+    lines[#lines + 1] = "fail " .. tostring(m.bcls) .. " dat=" .. tostring(m.dat) .. " x=" .. m.x .. " y=" .. m.y .. " h=" .. m.h .. " rot=" .. m.rot
+    local same, n_cls, at_xy = {}, 0, {}
+    for _, e in ipairs(existing) do
+        if e.bcls == m.bcls then n_cls = n_cls + 1; same[#same + 1] = e end
+        if e.x == m.x and e.y == m.y then at_xy[#at_xy + 1] = e end
+    end
+    table.sort(same, function(p, q) return dist(p) < dist(q) end)
+    lines[#lines + 1] = "  live same bcls=" .. n_cls
+    for i = 1, math.min(8, #same) do lines[#lines + 1] = "  near" .. desc(same[i]) .. " d=" .. dist(same[i]) end
+    for _, e in ipairs(at_xy) do lines[#lines + 1] = "  same xy" .. desc(e) end
+end
+
 ---------------------------------------------------------------- the plan
 local function build(text, live, F, opts)
     if type(text) ~= "string" then bail("plan: no blueprint text") end
@@ -507,6 +524,7 @@ local function build(text, live, F, opts)
     for _, m in ipairs(cells) do all[#all + 1] = m end
 
     -- identity keep (sync): same class+x+y+h+rot as an existing machine; underground also same Length
+    local json_ms = machines
     local rest, kept, used = {}, {}, {}
     for _, m in ipairs(machines) do
         local found
@@ -530,6 +548,14 @@ local function build(text, live, F, opts)
         end
     end
     machines = rest
+    if opts and type(opts.trace) == "function" then
+        opts.trace(("keep split: json machines %d, kept %d, rest %d, live machines %d"):format(#json_ms, #kept, #rest, #existing))
+        local jb, lb = {}, {}
+        for i = 1, math.min(5, #json_ms) do jb[i] = tostring(json_ms[i].bcls) end
+        for i = 1, math.min(5, #existing) do lb[i] = tostring(existing[i].bcls) end
+        opts.trace("json bcls first5: " .. (#jb > 0 and table.concat(jb, ", ") or "-"))
+        opts.trace("live bcls first5: " .. (#lb > 0 and table.concat(lb, ", ") or "-"))
+    end
 
     -- placed = new machines + exit cells of placed pairs. Kept machines (game already has them) are never validated
     local placed = {}
@@ -540,7 +566,14 @@ local function build(text, live, F, opts)
     for _, m in ipairs(all) do
         if placed[m] then
             local ok, why = F.validate_place(floors, {}, m)
-            if not ok then bail(why .. " at " .. where(m)) end
+            if not ok then
+                if opts and type(opts.trace) == "function" then
+                    local lines = {}
+                    diag_fail(lines, m, existing)
+                    opts.trace(table.concat(lines, "\n"))
+                end
+                bail(why .. " at " .. where(m))
+            end
         end
     end
     -- sweep: sorted by left edge, stop when the next left edge is past this right edge (same pairs as the probe's O(n^2))
