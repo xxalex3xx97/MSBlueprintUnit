@@ -189,7 +189,9 @@ cap('Cost', 'Btn_CostPin', 'Txt_CostPin', 'Pin', 14, (12, 6, 12, 6))   # visual 
 border('Row_CostInset', 'Row_CostCol', INSET, (16, 12, 16, 12), fill=1.0, h='Fill', v='Fill', pad=(0, 8, 0, 0))
 box(U.VerticalBox, 'Row_CostStack', 'Row_CostInset', h='Fill', v='Fill')
 txt('Txt_CostEmpty', 'Row_CostStack', 'No import yet', 14, DIM, h='Fill', pad=(0, 0, 0, 8))   # outside the ScrollBox: ClearChildren keeps it
-box(U.ScrollBox, 'Scr_Cost', 'Row_CostStack', fill=1.0, h='Fill', v='Fill')
+sb_cost = box(U.ScrollBox, 'Scr_Cost', 'Row_CostStack', fill=1.0, h='Fill', v='Fill')
+sb_cost.set_editor_property('always_show_scrollbar', True)
+sb_cost.set_editor_property('consume_mouse_wheel', U.ConsumeMouseWheel.WHEN_SCROLLING_POSSIBLE)
 
 # RIGHT: title bar + close X, status, Import/Build, unit grid, player grid
 box(U.VerticalBox, 'Row_Right', 'Row_Cols', fill=0.46, h='Fill', v='Fill')
@@ -220,7 +222,9 @@ for n in ('Row_UnitInvFrame', 'Host_PlayerInv'):
 box(U.VerticalBox, 'Row_NotesCol', 'Row_Cols', fill=0.30, h='Fill', v='Fill', pad=(12, 0, 0, 0))
 header('Notes', 'Row_NotesCol', 'Txt_NotesHdr', 'Notes', 16)
 border('Row_NotesInset', 'Row_NotesCol', INSET, (16, 12, 16, 12), fill=1.0, h='Fill', v='Fill', pad=(0, 8, 0, 0))
-box(U.ScrollBox, 'Scr_Notes', 'Row_NotesInset', h='Fill', v='Fill')
+sb_notes = box(U.ScrollBox, 'Scr_Notes', 'Row_NotesInset', h='Fill', v='Fill')
+sb_notes.set_editor_property('always_show_scrollbar', True)
+sb_notes.set_editor_property('consume_mouse_wheel', U.ConsumeMouseWheel.WHEN_SCROLLING_POSSIBLE)
 txt('Txt_Removes', 'Scr_Notes', '', 12, DIM, wrap=True, h='Fill', pad=(0, 0, 0, 10)).set_visibility(U.SlateVisibility.COLLAPSED)
 txt('Txt_Notes', 'Scr_Notes', '', 12, WHITE, wrap=True, h='Fill')
 
