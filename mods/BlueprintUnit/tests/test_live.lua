@@ -246,6 +246,29 @@ do
           "window: Build says import first only when S.text is nil")
 end
 
+-- send_pin: SetPinnedCostInput factory on Default__SetPinnedCostInput, AddInputCommand(player.ID, cmd)
+do
+    local created, sent = nil, nil
+    function StaticFindObject(path)
+        return { IsValid = alive, CreateInputSetPinnedCost = function(_, arr) created = { path = path, arr = arr }; return named("SetPinnedCostInput") end }
+    end
+    local pctl = { IsValid = alive, AddInputCommand = function(_, id, cmd) sent = { id = id, cmd = cmd } end }
+    local pplayer = { IsValid = alive, ID = 77 }
+    local okp = Live.send_pin(pctl, pplayer, { { name = "ITEM_A", n = 5 }, { name = "ITEM_Z", n = 1 } })
+    check(okp and created.path == "/Script/MainSequence.Default__SetPinnedCostInput" and #created.arr == 1
+          and created.arr[1].Item == world.Item[1] and created.arr[1].Amount == 5, "send_pin: stacks Item/Amount, unknown item skipped")
+    check(sent and sent.id == 77 and sent.cmd ~= nil, "send_pin: AddInputCommand(player.ID, cmd)")
+    sent = nil
+    local oke = Live.send_pin(pctl, pplayer, {})
+    check(oke and #created.arr == 0 and sent and sent.id == 77, "send_pin: empty array = unpin")
+    local okn, en = Live.send_pin(pctl, nil, {})
+    check(okn == false and en == "no player", "send_pin: no player refused")
+    local fw = assert(io.open(dir .. "../Scripts/bpu_window.lua", "rb"))
+    local src = fw:read("a")
+    fw:close()
+    check(src:find('bind("Btn_CostPin", pinClick)', 1, true) ~= nil and src:find("Live.send_pin(", 1, true) ~= nil, "window: Btn_CostPin bound to pinClick")
+end
+
 -------------------------------------------------------------------- make_io (recording natives)
 local calls = {}
 local native = {}

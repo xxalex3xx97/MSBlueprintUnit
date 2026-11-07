@@ -439,6 +439,28 @@ function L.item_by_name(name)
     return ITEMS[name]
 end
 
+-- pin the modification cost in the game's own HUD: SetPinnedCostInput.CreateInputSetPinnedCost(ItemStack[]) -> ctl:AddInputCommand(player.ID, cmd).
+-- stacks = { {name="ITEM_x", n=amount}, ... }; {} = unpin. Returns ok, err|ret. Every call is traced (UNKNOWNs settle from the trace).
+function L.send_pin(ctl, player, stacks)
+    if not valid(ctl) then ctl = FindFirstOf("DMSPlayerController") end
+    if not valid(ctl) then return false, "no controller" end
+    if not valid(player) then return false, "no player" end
+    local arr = {}
+    for _, s in ipairs(stacks) do
+        local it = L.item_by_name(s.name)
+        if it then arr[#arr + 1] = { Item = it, Amount = s.n } end
+    end
+    local okc, cmd = pcall(function()
+        return StaticFindObject("/Script/MainSequence.Default__SetPinnedCostInput"):CreateInputSetPinnedCost(arr)
+    end)
+    TRACE(("pin create n=%d -> ok=%s cmd=%s"):format(#arr, tostring(okc), tostring(cmd)))
+    if not okc or not valid(cmd) then return false, "CreateInputSetPinnedCost failed: " .. tostring(cmd) end
+    local id = unw(rd(player, "ID"))
+    local oks, r = pcall(function() ctl:AddInputCommand(id, cmd) return true end)
+    TRACE(("pin send receiver=%s -> ok=%s ret=%s"):format(tostring(id), tostring(oks), tostring(r)))
+    return oks, r
+end
+
 -- live item names (ITEM_X) from the Item objects; plan matches Contents names against them
 function L.item_names()
     L.item_by_name("")   -- builds the name cache
