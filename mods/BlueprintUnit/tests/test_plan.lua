@@ -182,10 +182,12 @@ end
 p, err = P.plan(one_container(200, 200), live({ existing = { ex(60, "BP_ContainerObject_2", "DAT_Container_2", 200, 200) } }), F)
 check("outside keep: plan ok", p ~= nil and err == nil)
 check("outside keep: counted as keep", p and p.counts.keep == 1 and p.counts.place == 0 and p.counts.remove == 0)
--- same machine as NEW (not live): still refused by the floor check
+-- same machine as NEW (not live): left out with a note, the plan still succeeds
 p, err = P.plan(one_container(200, 200), live(), F)
-check("outside new: refused", p == nil)
-check("outside new: floor message", err ~= nil and err:find("outside every floor of its layer: DAT_Container_2", 1, true) ~= nil)
+check("outside new: plan ok, nothing placed", p ~= nil and p.counts.place == 0)
+local noted = false
+for _, n in ipairs(p and p.notes or {}) do if n:find("outside the modeled floors", 1, true) then noted = true end end
+check("outside new: skip note", noted)
 -- placed belt overlapping a kept container: still checked (kept-vs-kept is not)
 local ov = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
     '{"Class":"BP_ContainerObject_2","DefaultName":"DAT_Container_2","Transform":{"GridLocation":{"X":12,"Y":12},"Height":0,"GridRotation":0}},' ..

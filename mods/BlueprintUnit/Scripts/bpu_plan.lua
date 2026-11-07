@@ -604,10 +604,14 @@ local function build(text, live, F, opts)
     for _, c in ipairs(cells) do if placed[cell_of[c]] then placed[c] = true end end
     -- floor/parity via F for placed only; overlap pairwise (any layer, as probe), pair skipped when neither side is placed
     local floors = F.floor_rects(blocks, F.block_floor)
+    local skip = {}
     for _, m in ipairs(all) do
         if placed[m] then
             local ok, why = F.validate_place(floors, {}, m)
-            if not ok then
+            if not ok and why:find("outside every floor", 1, true) then
+                -- floor model has gaps (docks, shipyards): leave the machine out, never half-build it
+                skip[cell_of[m] or m] = true
+            elseif not ok then
                 if opts and type(opts.trace) == "function" then
                     local lines = {}
                     diag_fail(lines, m, existing)
@@ -615,6 +619,19 @@ local function build(text, live, F, opts)
                 end
                 bail(why .. " at " .. where(m))
             end
+        end
+    end
+    if next(skip) then
+        local cnt, keep_m, keep_all = {}, {}, {}
+        for _, m in ipairs(machines) do
+            if skip[m] then cnt[m.dat] = (cnt[m.dat] or 0) + 1 else keep_m[#keep_m + 1] = m end
+        end
+        for _, e in ipairs(all) do
+            if skip[e] or skip[cell_of[e]] then placed[e] = nil else keep_all[#keep_all + 1] = e end
+        end
+        machines, all = keep_m, keep_all
+        for _, d in ipairs(sorted_keys(cnt)) do
+            notes[#notes + 1] = ("skipped (outside the modeled floors): %d x %s"):format(cnt[d], d)
         end
     end
     -- sweep: sorted by left edge, stop when the next left edge is past this right edge (same pairs as the probe's O(n^2))
