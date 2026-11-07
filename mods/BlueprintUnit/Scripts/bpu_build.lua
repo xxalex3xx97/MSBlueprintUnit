@@ -11,10 +11,10 @@
 local B = {}
 
 local TOTAL_MS = 300000   -- whole run
-local STAGE_MS = 10000    -- staging round stalls after this
+local STAGE_MS = 3000     -- staging round stalls after this
 local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
 local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the player inventory within this, else STALL
-local DRAIN_MS = 3000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
+local DRAIN_MS = 2000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
 local POLL_MS = 250
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
@@ -453,6 +453,9 @@ function B.new(io)
         for _, s in ipairs(mo) do
             if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
         end
+        local sent = {}
+        for _, s in ipairs(mo) do sent[#sent + 1] = tostring(s - 1) end
+        trace("moveout verify: slots=" .. table.concat(sent, ","))
         R.refund_moved = true
         -- a later batch needs the room back: wait for it (stage 8). The last batch goes on at once, as before.
         if R.rem_pos > #R.rem_list then return after_removals(now) end
@@ -484,7 +487,8 @@ function B.new(io)
         for item in pairs(R.drain) do
             if get(held, item) > 0 then
                 if now - R.t_stage >= DRAIN_MS then
-                    return stall("the game did not move the refund into the unit, empty your inventory and Build again")
+                    for _, k in ipairs(sorted_keys(R.drain)) do trace(("drain stall: held[%s]=%d"):format(k, get(held, k))) end
+                    return stall("the game did not apply the move (see bpu_trace.log: ourcmd recv must equal uicmd recv)")
                 end
                 R.t_next = now + POLL_MS
                 return

@@ -648,7 +648,7 @@ do
     b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
     local st = run(b, f, 4000)
     check(st.state == "error" and st.removed == 15 and f.calls.rm == 15 and st.text ==
-          "stopped after 15 removals: the game did not move the refund into the unit, empty your inventory and Build again",
+          "stopped after 15 removals: the game did not apply the move (see bpu_trace.log: ourcmd recv must equal uicmd recv)",
           "stall: moves never drain -> stop after the first batch, no more removals (" .. st.text .. ")")
     check(noted and #noted.r == 15, "stall: note_build reports only the 15 sent removals")
 end

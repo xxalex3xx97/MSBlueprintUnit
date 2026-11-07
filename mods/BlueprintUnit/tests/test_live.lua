@@ -242,10 +242,14 @@ function native.place(...) calls[#calls + 1] = { "place", ... }; return true end
 function native.set_recipe(...) calls[#calls + 1] = { "set_recipe", ... }; return true end
 function native.port(...) calls[#calls + 1] = { "port", ... }; return true end
 
-local io1 = Live.make_io({ unit = U, player = W.player, ctl = {}, F = F, native = native, plan_mod = P })
+local ctlcalls = {}
+local ctl1 = { IsValid = function() return true end }
+function ctl1.AddInventoryInteraction(_, t) ctlcalls[#ctlcalls + 1] = { t.PrimaryInventoryID, t.SecondaryInventoryID, t.SlotIndex, t.Action } end
+local io1 = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = native, plan_mod = P })
 local okm, errm = io1.send_move(7, 8, 0)
-check(okm and calls[1][1] == "inv_move" and calls[1][2] == 7 and calls[1][3] == 8 and calls[1][4] == 0 and calls[1][5] == 2, "send_move: press inv_move(prim, sec, slot0, 2)")
-check(calls[2][1] == "inv_move" and calls[2][2] == 7 and calls[2][3] == 0 and calls[2][4] == 0 and calls[2][5] == 3, "send_move: release inv_move(prim, 0, slot0, 3) right after the press")
+check(okm and ctlcalls[1][1] == 7 and ctlcalls[1][2] == 8 and ctlcalls[1][3] == 0 and ctlcalls[1][4] == 2, "send_move: press AddInventoryInteraction(prim, sec, slot0, 2)")
+check(ctlcalls[2][1] == 7 and ctlcalls[2][2] == 0 and ctlcalls[2][3] == 0 and ctlcalls[2][4] == 3, "send_move: release AddInventoryInteraction(prim, 0, slot0, 3) right after the press")
+check(#calls == 0, "send_move: no native inv_move call")
 for i = #calls, 1, -1 do calls[i] = nil end
 local okr = io1.send_remove(10)
 check(okr and calls[1][1] == "disassemble" and calls[1][2] == 10 and calls[1][3] == 0, "send_remove: disassemble(id, 0)")
@@ -358,7 +362,9 @@ function mnative.set_recipe() return true end
 function mnative.port() return true end
 
 local B = dofile(dir .. "../Scripts/bpu_build.lua")
-local io2 = Live.make_io({ unit = U2b, player = W2.player, ctl = {}, F = F, native = mnative, plan_mod = P })
+local ctl2 = { IsValid = function() return true end }
+function ctl2.AddInventoryInteraction(_, t) mnative.inv_move(t.PrimaryInventoryID, t.SecondaryInventoryID, t.SlotIndex, t.Action) end
+local io2 = Live.make_io({ unit = U2b, player = W2.player, ctl = ctl2, F = F, native = mnative, plan_mod = P })
 local clock = 1000
 io2.now = function() return clock end
 local b = B.new(io2)
