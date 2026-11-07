@@ -1224,5 +1224,24 @@ do
           "cancel during restore: no further inventory command after cancel (cmds " .. cmds_before .. ", items " .. items_before .. ")")
 end
 
+-- failed recipe/port changes (io.send_changes second result) reach the final status text, legacy and redirect
+do
+    local on = "on: redirect=on probe_log=off groups=yes"
+    for _, fl in ipairs({ { "legacy", "off" }, { "redirect", on } }) do
+        local function final(failc)
+            local f = fake({ redirect = fl[2], player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5) }, 3) })
+            f.io.send_changes = function() return 1, failc end
+            local b = B.new(f.io)
+            b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+            return run(b, f)
+        end
+        local st = final(2)
+        check(st.state == "done" and st.text:sub(-#"; 2 recipe/port change(s) failed") == "; 2 recipe/port change(s) failed",
+              fl[1] .. ": 2 failed changes in final text (" .. st.text .. ")")
+        st = final(0)
+        check(st.state == "done" and st.text:find("failed", 1, true) == nil, fl[1] .. ": no failed changes, no suffix (" .. st.text .. ")")
+    end
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)

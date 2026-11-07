@@ -289,5 +289,26 @@ local ri, rp = row_of(rows, "ITEM_IronOre"), row_of(rows, "ITEM_Plate")
 check("cost rows: IronOre need 120 net 120", ri and ri.need == 120 and ri.net == 120)
 check("cost rows: Plate refund 7 net -7", rp and rp.refund == 7 and rp.net == -7)
 
+-- skipped underground (entrance outside the modeled floors): its exit cell must not drive a removal.
+-- Live Dock sits on the exit cell (never removed), so a leaked exit cell would refuse the whole plan.
+do
+    local ugout = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
+        '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":21,"Y":1},"Height":0,"GridRotation":0}},' ..
+        '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":25,"Y":1},"Height":0,"GridRotation":0}}]}'
+    local pu, eu = P.plan(ugout, live({ existing = { ex(70, "BP_DockObject", "DAT_Dock", 25, 1) } }), F)
+    check("skipped ug: plan ok (exit cell not in the way)", pu ~= nil and eu == nil)
+    check("skipped ug: nothing placed, no cells, no removal", pu and pu.counts.place == 0 and #pu.cells == 0 and pu.counts.remove == 0)
+    local nu = false
+    for _, n in ipairs(pu and pu.notes or {}) do if n:find("outside the modeled floors", 1, true) then nu = true end end
+    check("skipped ug: skip note", nu)
+end
+
+-- negative ids (bpu_live overlay, not in the game view yet): never removed, never stale
+p = plan_of("empty.json", { existing = { ex(-1, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 5, 5) } })
+check("virtual stale: not removed, not in stale_ids", p and p.counts.remove == 0 and #p.removed == 0 and #p.stale_ids == 0)
+-- negative id in the way of a placement: refused up front (send_remove would refuse it mid-build)
+p, err = P.plan(read("belts2.json"), live({ existing = { { id = -2, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", dat = "DAT_ConveyorBelt", x = 1, y = 1, h = 0, rot = 2 } } }), F)
+check("virtual conflict: refused, not queued", p == nil and err ~= nil and err:find("not in the game view yet", 1, true) ~= nil)
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

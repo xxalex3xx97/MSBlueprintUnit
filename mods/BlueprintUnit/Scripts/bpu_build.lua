@@ -253,7 +253,7 @@ local function new_run(plan)
         queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
-        unit_inv = 0, player_inv = 0, creative = false, chg_sent = false,
+        unit_inv = 0, player_inv = 0, creative = false, chg_sent = false, chg_failed = 0,
         rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
         drain = {}, costs = {}, emp = nil,   -- rem_list = { {id, bcls, refund = cost map} } in removal order; batch = rem_pos..last sent
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
@@ -340,9 +340,16 @@ function B.new(io)
 
     local function send_changes_once()
         if not R.chg_sent then
-            io.send_changes(R.plan.chg)
+            local _, failc = io.send_changes(R.plan.chg)
+            R.chg_failed = failc or 0
             R.chg_sent = true
         end
+    end
+
+    -- config part of the status text: "; N recipe/port change(s) failed". Empty when all changes went through.
+    local function chg_suffix()
+        if R.chg_failed > 0 then return ("; %d recipe/port change(s) failed"):format(R.chg_failed) end
+        return ""
     end
 
     -- restore part of the status text: "; restore: restored N items into K container(s); notes". Empty when no restore ran.
@@ -360,7 +367,7 @@ function B.new(io)
         R.active = false
         R.stage = 0
         R.state = "done"
-        R.text = base .. restore_suffix()
+        R.text = base .. restore_suffix() .. chg_suffix()
         mark_changed()
     end
 

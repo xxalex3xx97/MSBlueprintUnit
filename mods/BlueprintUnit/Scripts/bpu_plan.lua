@@ -402,6 +402,8 @@ local function build(text, live, F, opts)
     local function has_buildable(e)
         return (e.dat ~= nil and buildables[e.dat] ~= nil) or (e.bcls ~= nil and dat_for_cls(e.bcls) ~= nil)
     end
+    -- negative id = bpu_live overlay (placed by a recent build, not in the game view yet): send_remove refuses it
+    local function virtual(e) return type(e.id) == "number" and e.id < 0 end
 
     local doc = parse_doc(text)
 
@@ -693,6 +695,10 @@ local function build(text, live, F, opts)
             if skip[e] or skip[cell_of[e]] then placed[e] = nil else keep_all[#keep_all + 1] = e end
         end
         machines, all = keep_m, keep_all
+        -- exit cells of a skipped entrance drop too: they would otherwise drive conflict removals (newall)
+        local keep_c = {}
+        for _, c in ipairs(cells) do if not (skip[c] or skip[cell_of[c]]) then keep_c[#keep_c + 1] = c end end
+        cells = keep_c
         for _, d in ipairs(sorted_keys(cnt)) do
             notes[#notes + 1] = ("skipped (outside the modeled floors): %d x %s"):format(cnt[d], d)
         end
@@ -770,7 +776,7 @@ local function build(text, live, F, opts)
     local keptset = used
     local stale_set, stale = {}, {}
     for k, e in ipairs(existing) do
-        if not keptset[k] and has_buildable(e) then
+        if not keptset[k] and has_buildable(e) and not virtual(e) then
             local never = false
             for _, w in ipairs(NEVER_REMOVED) do
                 if (e.bcls or ""):find(w, 1, true) then never = true end
@@ -797,6 +803,12 @@ local function build(text, live, F, opts)
                 if e.bcls:find(w, 1, true) then
                     bail("replace refused, would remove " .. e.bcls .. "#" .. tostring(e.id) .. " (Dock/SolarPanel/Console are never removed): " .. list)
                 end
+            end
+        end
+        for _, k in ipairs(hits) do
+            if virtual(existing[k]) then
+                local e = existing[k]
+                bail("sync refused, would remove " .. e.bcls .. "#" .. tostring(e.id) .. " (machine not in the game view yet, cannot remove): " .. list)
             end
         end
         for _, k in ipairs(hits) do

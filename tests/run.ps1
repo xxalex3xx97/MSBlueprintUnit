@@ -29,9 +29,14 @@ if (-not $lua -and -not $nvim -and -not $luac) {
     exit 1
 }
 
+# Nested Join-Path, not 'a\b' literals: backslash is not a separator on the ubuntu CI runner (pwsh).
+$modDir = Join-Path (Join-Path $root 'mods') 'BlueprintUnit'
 $tests = @()
 $tests += @(Get-ChildItem -LiteralPath (Join-Path $root 'tests') -Filter '*.lua' -File -ErrorAction SilentlyContinue)
-$tests += @(Get-ChildItem -LiteralPath (Join-Path $root 'mods\BlueprintUnit\tests') -Filter 'test_*.lua' -File -ErrorAction SilentlyContinue)
+$tests += @(Get-ChildItem -LiteralPath (Join-Path $modDir 'tests') -Filter 'test_*.lua' -File -ErrorAction SilentlyContinue)
+$scripts = @(Get-ChildItem -LiteralPath (Join-Path $modDir 'Scripts') -Filter '*.lua' -File -ErrorAction SilentlyContinue)
+if ($tests.Count -eq 0) { Write-Host 'ERROR: no Lua test files found (tests/*.lua, mods/BlueprintUnit/tests/test_*.lua). Nothing was checked.'; exit 1 }
+if ($scripts.Count -eq 0) { Write-Host 'ERROR: no Scripts files found (mods/BlueprintUnit/Scripts/*.lua). Nothing was checked.'; exit 1 }
 
 if ($lua -or $nvim) {
     foreach ($t in $tests) {
@@ -44,7 +49,6 @@ if ($lua -or $nvim) {
 }
 
 if ($luac) {
-    $scripts = @(Get-ChildItem -LiteralPath (Join-Path $root 'mods\BlueprintUnit\Scripts') -Filter '*.lua' -File -ErrorAction SilentlyContinue)
     foreach ($s in $scripts) {
         & $luac -p $s.FullName
         if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: luac -p $($s.Name)"; $fail++ }
