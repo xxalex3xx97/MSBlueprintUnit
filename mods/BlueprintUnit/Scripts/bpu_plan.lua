@@ -528,6 +528,27 @@ local function build(text, live, F, opts)
     -- identity keep (sync): same class+x+y+h+rot as an existing machine; underground also same Length
     local json_ms = machines
     local rest, kept, used = {}, {}, {}
+    local trace_on = opts and type(opts.trace) == "function"
+    -- trace-only: cfg bytes as "type=... len=... hex=..." (hex bytes space separated)
+    local function cfg_desc(b)
+        if type(b) ~= "string" then return "type=" .. type(b) end
+        local hx = {}
+        for i = 1, #b do hx[i] = string.format("%02x", b:byte(i)) end
+        return "type=string len=" .. #b .. " hex=" .. (#hx > 0 and table.concat(hx, " ") or "-")
+    end
+    if trace_on then
+        local first
+        for _, e in ipairs(existing) do
+            if tostring(e.bcls or e.cls or e.dat):lower():find("underground", 1, true) then first = e break end
+        end
+        if first then
+            opts.trace(("live ug first: id=%s bcls=%s x=%s y=%s h=%s rot=%s cfg %s cfg_len=%d"):format(tostring(first.id),
+                tostring(first.bcls), tostring(first.x), tostring(first.y), tostring(first.h), tostring(first.rot),
+                cfg_desc(first.cfg), cfg_len(first.cfg)))
+        else
+            opts.trace("live ug first: none in live list")
+        end
+    end
     for _, m in ipairs(machines) do
         local found
         for k, e in ipairs(existing) do
@@ -535,6 +556,11 @@ local function build(text, live, F, opts)
                 if not (is_ug(m) and e.cfg ~= nil and cfg_len(e.cfg) ~= cfg_len(m.cfg or "")) then
                     found = k
                     break
+                end
+                if trace_on and is_ug(m) then
+                    opts.trace(("ug cfg reject: json %s %d,%d,h%d,rot%d | live id=%s live %s live_len=%d | json %s json_len=%d"):format(
+                        tostring(m.bcls), m.x, m.y, m.h, m.rot, tostring(e.id), cfg_desc(e.cfg), cfg_len(e.cfg),
+                        cfg_desc(m.cfg), cfg_len(m.cfg or "")))
                 end
             end
         end
