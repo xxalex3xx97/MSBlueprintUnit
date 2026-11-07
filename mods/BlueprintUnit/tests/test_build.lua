@@ -42,6 +42,7 @@ local function fake(spec)
         noop_moves = spec.noop_moves, shift_x = spec.shift_x or 0, drop_place = spec.drop_place,
         inv = { player = { id = 101, slots = spec.player }, unit = { id = 202, slots = spec.unit } },
         live_bcls = spec.live_bcls, vanish_after = spec.vanish_after,
+        mult = spec.mult or {},   -- StackMultiplier / 2 per inventory ("player" / "unit")
     }
     local function mx(item) return f.max[item] or 50 end
     local function inv_by_id(id)
@@ -106,8 +107,9 @@ local function fake(spec)
         local v = f.inv[which]
         local slots = {}
         for i, s in ipairs(v.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
-        return { slots = slots, id = v.id, ok = true }
+        return { slots = slots, id = v.id, ok = true, mult = f.mult[which] }
     end
+    if spec.raw then io.item_max = function(k) return spec.raw[k] or 1 end end   -- raw MaxStackSize (live: Item UObject)
     function io.unit_ids() return { unit_id = 202, player_id = 101 } end
     function io.costs(place)
         local out = {}
@@ -519,6 +521,47 @@ do
     local b3 = B.new(f3.io)
     b3:start(plan_for(f3, { place = { M("BP_A", 0, 0, { ITEM_Plate = 9 }) }, need = { ITEM_Plate = 9 } }), {})
     check(b3:status().state == "error" and noted3 == nil, "note_build: refused build (nothing placed) reports nothing")
+end
+
+-- ===== effective stack size: native max 1 is wrong, raw MaxStackSize 200 * StackMultiplier 8 / 2 = 800 per slot =====
+local EFF = { raw = { ITEM_Frame = 200, ITEM_Coil = 10 }, max = { ITEM_Frame = 800, ITEM_Coil = 40 }, mult = { player = 4, unit = 101 } }
+do
+    -- stage_out: items the build does not need go first, slot order, n stacks
+    local so = { S("ITEM_Need", 5), S("ITEM_Junk", 5), E(), S("ITEM_Other", 5) }
+    check(same(P.stage_out(so, { ITEM_Need = 1 }, 2), { 2, 4 }), "stage_out: not-needed stacks first, then needed")
+    check(#P.stage_out(so, {}, 0) == 0, "stage_out: 0 wanted -> none")
+end
+
+-- refund 2 frames (merge room in the 190 stack) + 2 coils (1 new slot): fits with 1 free slot. Old max 1 -> refused.
+do
+    local f = fake(setmetatable({ player = { E(), S("ITEM_Frame", 190, 1) }, unit = inv({}, 3),
+                     station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Frame = 2, ITEM_Coil = 2 } } }, { __index = EFF }))
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = { { id = 7, bcls = "BP_OLD" } }, refund = { ITEM_Frame = 2, ITEM_Coil = 2 } }), {})
+    local st = run(b, f)
+    check(st.state == "done" and st.removed == 1 and not starts_with(st.text, "not enough"),
+          "refund eff max: 2 frames (merge) + 2 coils (1 slot) with 1 free slot -> done (" .. st.text .. ")")
+end
+
+-- unit empty: refund needs 2 new slots, player full of items the build does not need -> moved to the unit, never refused
+do
+    local f = fake(setmetatable({ player = { S("ITEM_Junk", 50, 50), S("ITEM_Other", 50, 50) }, unit = inv({}, 6),
+                     station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Frame = 5, ITEM_Coil = 10 } } }, { __index = EFF }))
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = { { id = 7, bcls = "BP_OLD" } }, refund = { ITEM_Frame = 5, ITEM_Coil = 10 } }), {})
+    local st = run(b, f)
+    check(st.state == "done" and st.removed == 1 and st.moved_out >= 2, "refund room: unit empty -> player stacks moved out, done (" .. st.text .. ")")
+end
+
+-- unit really full (no room for the moved stacks): refund refused after the stage 1 window
+do
+    local f = fake(setmetatable({ player = { S("ITEM_Junk", 50, 50), S("ITEM_Other", 50, 50) }, unit = inv({ S("ITEM_Plate", 50, 50) }, 1),
+                     station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = { [7] = { ITEM_Frame = 5, ITEM_Coil = 10 } } }, { __index = EFF }))
+    local b = B.new(f.io)
+    b:start(plan_for(f, { removed = { { id = 7, bcls = "BP_OLD" } }, refund = { ITEM_Frame = 5, ITEM_Coil = 10 } }), {})
+    local st = run(b, f)
+    check(st.state == "error" and starts_with(st.text, "not enough inventory space for refunds") and f.calls.rm == 0,
+          "refund room: unit full -> error, nothing removed (" .. st.text .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

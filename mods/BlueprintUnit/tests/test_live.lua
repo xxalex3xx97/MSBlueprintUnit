@@ -52,7 +52,7 @@ read_inventory = function(id)
     local out = {}
     for i, d in ipairs(src) do
         if d.Item then
-            out[i] = { item = d.Item:GetFName():ToString(), amount = d.Amount, max = d.Item.MaxStackSize }
+            out[i] = { item = d.Item:GetFName():ToString(), amount = d.Amount, max = d.NativeMax or d.Item.MaxStackSize }
         else
             out[i] = { item = "", amount = 0, max = 1 }
         end
@@ -196,6 +196,42 @@ end
 check(Live.creative(W.player, {}) == false and Live.creative({}, { bCreative = true }) == true and Live.creative({}, {}) == false,
       "creative: player, then ctl, then false")
 check(Live.item_by_name("ITEM_A") == world.Item[1] and Live.item_by_name("ITEM_Z") == nil, "item_by_name: found and nil")
+
+-- effective max: native max 1 (wrong) -> Item MaxStackSize 200; slot max = 200 * StackMultiplier / 2 (SM 8 -> 800, unit SM 202 -> 20200)
+do
+    local frame = named("ITEM_Frame", { MaxStackSize = 200 })
+    world.Item[#world.Item + 1] = frame
+    local recobj = Live._recobj   -- Live.reset clears it; later checks need it
+    Live.reset()
+    fakeInv[55] = { { Item = frame, Amount = 190, NativeMax = 1 }, { Amount = 0 } }
+    local r = Live.read_inv({ ID = 55, IsValid = alive, StackMultiplier = 8 })
+    check(r.ok and r.mult == 4 and r.slots[1].max == 800 and r.slots[2].max == 1 and Live.item_raw("ITEM_Frame") == 200,
+          "read_inv: native max 1 -> Item max 200, SM 8 -> effective 800 (mult 4)")
+    local u = Live.read_inv({ ID = 55, IsValid = alive, StackMultiplier = 202 })
+    check(u.ok and u.mult == 101 and u.slots[1].max == 20200, "read_inv: unit SM 202 -> effective 20200 (mult 101)")
+    local nosm = Live.read_inv({ ID = 55, IsValid = alive })
+    check(nosm.ok and nosm.mult == 1 and nosm.slots[1].max == 200, "read_inv: SM unreadable -> 2 (x1)")
+    local tf = io.open(dir .. "../bpu_trace.log", "r")
+    local tt = tf and tf:read("a") or ""
+    if tf then tf:close() end
+    check(tt:find("maxstack inv=55 item=ITEM_Frame raw=200 (item) sm=8 effective=800", 1, true) ~= nil,
+          "trace: maxstack line with raw, sm, effective")
+    world.Item[#world.Item] = nil
+    Live.reset()
+    Live._recobj = recobj
+end
+
+-- one result line: no window write puts the build status into Txt_Summary (it was a second copy of Txt_Status)
+do
+    local fw = assert(io.open(dir .. "../Scripts/bpu_window.lua", "rb"))
+    local src = fw:read("a")
+    fw:close()
+    local dup = false
+    for line in src:gmatch("[^\n]+") do
+        if line:find("Txt_Summary", 1, true) and line:find("status()", 1, true) then dup = true end
+    end
+    check(not dup, "window: build status not written to Txt_Summary (single result line)")
+end
 
 -------------------------------------------------------------------- make_io (recording natives)
 local calls = {}

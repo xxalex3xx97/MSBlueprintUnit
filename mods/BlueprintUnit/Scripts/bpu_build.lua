@@ -40,6 +40,29 @@ local function maxes(a, b)
     return m
 end
 
+-- Effective MaxStackSize per item in one inventory (inv = normalized slots): io.item_max (raw) * StackMultiplier/2.
+-- Without io.item_max (plain fakes): the largest slot max over both inventories.
+local function capmap(io, inv, other)
+    if io.item_max then
+        return setmetatable({}, { __index = function(_, k)
+            return math.floor(math.max(io.item_max(k) or 1, 1) * (inv.mult or 1))
+        end })
+    end
+    return maxes(inv, other)
+end
+
+-- Player slots to quick-move out (slot order) when the refund needs room: n stacks, items the build does not need first.
+local function stage_out(slots, need, n)
+    local out = {}
+    for pass = 1, 2 do
+        for i, s in ipairs(slots) do
+            if #out >= n then return out end
+            if s.item ~= "" and s.amount > 0 and ((get(need, s.item) <= 0) == (pass == 1)) then out[#out + 1] = i end
+        end
+    end
+    return out
+end
+
 -- "Name xN, ..." (ITEM_ stripped), positive entries only, item order.
 local function list(m)
     local parts = {}
@@ -268,7 +291,7 @@ function B.new(io)
 
     -- inventory slots normalized: item "" when empty, amount/max always numbers
     local function norm(inv)
-        local slots = {}
+        local slots = { mult = inv.mult or 1 }   -- StackMultiplier / 2 of this inventory (capmap)
         for i, s in ipairs(inv.slots or {}) do
             slots[i] = { item = s.item or "", amount = s.amount or 0, max = (s.max and s.max > 0) and s.max or 1 }
         end
@@ -357,7 +380,7 @@ function B.new(io)
         if R.chunk_from > n_place then return finish(now) end
         local ps, us, err = read_both()
         if not ps then return fail(err) end
-        local n = R.creative and (n_place - R.chunk_from + 1) or chunk_len(R.costs, R.chunk_from, ps, maxes(ps, us))
+        local n = R.creative and (n_place - R.chunk_from + 1) or chunk_len(R.costs, R.chunk_from, ps, capmap(io, ps, us))
         if n == 0 then
             return fail(("player inventory full, free slots and build again (%d of %d placed)"):format(R.chunk_from - 1, n_place))
         end
@@ -477,13 +500,23 @@ function B.new(io)
         set_status("working", ("moved %d refund stacks to the unit"):format(#mo))
     end
 
-    -- stage 1: waits until the refund fits the player inventory, 10 s max, then removals go.
+    -- stage 1: the refund must fit the player inventory before removals go. While it does not, player stacks are quick-moved
+    -- to the unit (items the build does not need first), one batch per second, as many as slots are missing. 10 s -> fail (unit full).
     local function room_wait(now)
         local ps, us, err = read_both()
         if not ps then return fail(err) end
         local rerr = refund_check(R.rneed, ps)
         if rerr == "" then return send_removals(now, both_totals(ps, us)) end
         if now - R.t_stage > STAGE_MS then return fail(rerr) end
+        if now - R.t_issue >= 1000 then
+            R.t_issue = now
+            local out = stage_out(ps, R.plan.need, math.max(refund_fit(ps, R.rneed).missing, 1))
+            for _, s in ipairs(out) do
+                if not send_move(R.player_inv, R.unit_inv, s) then return fail("InventoryInput refused") end
+                R.moved_out = R.moved_out + 1
+            end
+            if #out > 0 then set_status("working", ("room for the refund: %d stacks moved to the unit, checking"):format(#out)) end
+        end
         R.t_next = now + 500
     end
 
@@ -553,7 +586,7 @@ function B.new(io)
 
         R.active = true
         if #R.remove_ids > 0 then
-            R.rneed = build_rneed(P.refund, maxes(ps, us))
+            R.rneed = build_rneed(P.refund, capmap(io, ps, us))
             if refund_check(R.rneed, ps) == "" then
                 send_removals(now, both_totals(ps, us))
             else
@@ -617,7 +650,7 @@ end
 B.pure = {
     totals = totals, maxes = maxes, list = list, shortfall = shortfall, total_check = total_check,
     stage_moves = stage_moves, moveout_slots = moveout_slots, moveset = moveset, refund_fit = refund_fit,
-    refund_check = refund_check, chunk_len = chunk_len, present = present,
+    refund_check = refund_check, chunk_len = chunk_len, present = present, stage_out = stage_out,
 }
 
 return B

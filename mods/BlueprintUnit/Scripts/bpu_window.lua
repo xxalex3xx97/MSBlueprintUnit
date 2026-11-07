@@ -215,8 +215,7 @@ local function finishBuild(run)
   if S.run ~= run then return end
   S.run = nil
   setBuildBtns(true)
-  showText("Txt_Summary", S.builder:status().text)
-  KEPT.has = true
+  KEPT.has = true   -- the result line is Txt_Status (buildLoop); Txt_Summary stays the plan summary
   local okR, err = pcall(function()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F), F)
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end

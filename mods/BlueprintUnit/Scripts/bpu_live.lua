@@ -324,8 +324,22 @@ function L.snapshot(U, F)
     return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables }
 end
 
+-- raw MaxStackSize of an Item UObject (cached per name; false when unreadable). nil = unknown.
+local RAW = {}
+local TRACED = {}
+function L.item_raw(name)
+    if RAW[name] == nil then
+        local o = L.item_by_name(name)
+        local v = (o and valid(o)) and unw(rd(o, "MaxStackSize")) or nil
+        RAW[name] = (type(v) == "number" and v > 0) and v or false
+    end
+    return RAW[name] or nil
+end
+
 -- MSCore 0.7.3 native read: factory_native.read_inventory(id) -> slots {item="ITEM_X" | "", amount, max}, or nil, err.
 -- ok=false when the inventory is invalid, MSCore is older than 0.7.3, or the native read fails (err says why).
+-- Slot max = effective max in this inventory: raw MaxStackSize (native, or the Item UObject when native <= 1) * StackMultiplier / 2.
+-- mult = StackMultiplier / 2 (SM 2 = x1, SM 8 = x4, unit SM 202 = x101). SM unreadable -> 2.
 function L.read_inv(inv)
     if not valid(inv) then return { ok = false, slots = {} } end
     local id = unw(rd(inv, "ID"))
@@ -334,7 +348,25 @@ function L.read_inv(inv)
         return { ok = false, id = id, slots = {}, err = "MSCore 0.7.3 or newer is needed (factory_native.read_inventory missing)" }
     end
     local s, err = FN.read_inventory(id)
-    return { ok = s ~= nil, id = id, slots = s or {}, err = err }
+    if not s then return { ok = false, id = id, slots = {}, err = err } end
+    local sm = unw(rd(inv, "StackMultiplier"))
+    if type(sm) ~= "number" or sm <= 0 then sm = 2 end
+    for _, sl in ipairs(s) do
+        if sl.item ~= "" then
+            local raw, src = sl.max, "native"
+            if not raw or raw <= 1 then
+                raw, src = L.item_raw(sl.item), "item"
+                if not raw then raw, src = (sl.max or 1), "native-fallback" end
+            end
+            sl.max = math.floor(raw * sm / 2)
+            local key = tostring(id) .. "|" .. sl.item
+            if not TRACED[key] then
+                TRACED[key] = true
+                TRACE(("maxstack inv=%s item=%s raw=%s (%s) sm=%s effective=%s"):format(tostring(id), sl.item, tostring(raw), src, tostring(sm), tostring(sl.max)))
+            end
+        end
+    end
+    return { ok = true, id = id, slots = s, mult = sm / 2, sm = sm }
 end
 
 function L.creative(player, ctl)
@@ -361,6 +393,7 @@ function L.reset()
     cache = nil
     BUILDABLES = nil
     ITEMS = nil
+    RAW, TRACED = {}, {}
     L._recobj = {}
 end
 
@@ -388,6 +421,7 @@ function L.make_io(ctx)
         if which == "player" then return L.read_inv(rd(player, "Inventory")) end
         return L.read_inv(U.unit_inv)
     end
+    function io.item_max(name) return L.item_raw(name) or 1 end   -- raw MaxStackSize; bpu_build applies the inventory multiplier
     function io.unit_ids()
         return { unit_id = unw(rd(U.unit_inv, "ID")), player_id = unw(rd(rd(player, "Inventory"), "ID")) }
     end
