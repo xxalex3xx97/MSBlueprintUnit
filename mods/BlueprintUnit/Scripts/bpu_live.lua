@@ -107,23 +107,47 @@ local function fallback_station()
     return pick
 end
 
--- block: the station block the console is on. Container: BP_BPUnitStoreObj_01 with ParentID == station id.
+-- Station id candidates, best first. The block's own ID is NOT the station id, so it is never used as one.
+local function station_ids(block)
+    local out, seen = {}, {}
+    local function add(v)
+        if v ~= nil and not seen[v] then seen[v] = true; out[#out + 1] = v end
+    end
+    local okF, fr = pcall(function() return block:GetFrame() end)
+    if okF and fr then add(idOf(fr)) end
+    for _, k in ipairs({ "StationID", "AttachTargetID", "ParentID" }) do add(unw(rd(block, k))) end
+    add(idOf(unw(rd(block, "Frame"))))
+    local bid = idOf(block)
+    if bid ~= nil then
+        for _, s in ipairs(FindAllOf("StationObject") or {}) do
+            if valid(s) and nm(s):find("^Default__") == nil then
+                local hit = false
+                each(bp_arr(s, "Blocks"), function(e) if not hit and idOf(e) == bid then hit = true end end)
+                if hit then add(idOf(s)) end
+            end
+        end
+        add(bid) -- lowest priority: block id as station id (only matters when no other candidate has a container)
+    end
+    return out
+end
+
+-- block: the station block the console is on. Container: BP_BPUnitStoreObj_01 with ParentID == a station id.
 function L.find_unit(block, player_hint)
     if not valid(block) then return nil, "no block" end
-    local sid = idOf(block)
-    if sid == nil then
-        local okF, fr = pcall(function() return block:GetFrame() end)
-        if okF and fr then sid = idOf(fr) end
-    end
-    if sid == nil then return nil, "station id unknown" end
-    local cont
+    local cands = station_ids(block)
+    local conts = {}
     for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
-        if valid(c) and short(nm(rd(c, "Class"))) == "BP_BPUnitStoreObj_01" and unw(rd(c, "ParentID")) == sid then
-            cont = c
-            break
-        end
+        if valid(c) and short(nm(rd(c, "Class"))) == "BP_BPUnitStoreObj_01" then conts[#conts + 1] = c end
     end
-    if not cont then return nil, "no Blueprint Unit container on station " .. tostring(sid) end
+    local cont
+    for _, sid in ipairs(cands) do
+        for _, c in ipairs(conts) do
+            if unw(rd(c, "ParentID")) == sid then cont = c break end
+        end
+        if cont then break end
+    end
+    if not cont and #conts == 1 then cont = conts[1] end
+    if not cont then return nil, "no Blueprint Unit container on station " .. tostring(cands[1]) end
     local station_id = unw(rd(cont, "ParentID"))
     local unit_inv = rd(cont, "Inventory")
     if unit_inv == nil then return nil, "unit inventory unreadable" end

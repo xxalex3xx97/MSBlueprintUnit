@@ -90,6 +90,18 @@ world.ContainerObject = {}
 local U3, err3 = Live.find_unit(W.block, nil)
 check(U3 == nil and type(err3) == "string", "find_unit: no container -> nil, err")
 world.ContainerObject = saved
+-- real game: block ID 261217 is not the station id. Station 163811 holds the block in Blueprint.Blocks,
+-- container 77 has ParentID 163811, block has no GetFrame. Old code used the block ID and found nothing.
+local keepWorld = world
+local W4 = make_world({}, { slot() }, { slot(), slot() })
+W4.station.ID = 163811
+W4.station.Blueprint.Blocks = { get = function() return { { ID = 261217, Class = named("BPO_Station_01_C"), Transform = { GridLocation = { X = 0, Y = 0 }, Height = 0, GridRotation = 0 } } } end }
+world.ContainerObject[2].ParentID = 163811
+local U4, e4 = Live.find_unit({ ID = 261217, IsValid = alive }, nil)
+check(U4 ~= nil and U4.station == 163811 and U4.cont.ID == 77 and U4.station_obj == W4.station,
+    "find_unit: block ID 261217 != station; station 163811 found via Blueprint.Blocks " .. tostring(e4))
+world = keepWorld
+Live.reset()
 
 local ms = Live.read_machines(W.station)
 check(#ms == 3 and ms[1].id == 10 and ms[2].id == 11 and ms[3].id == 12, "read_machines: ids, array order kept")
