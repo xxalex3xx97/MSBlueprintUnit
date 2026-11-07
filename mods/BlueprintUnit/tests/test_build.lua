@@ -34,8 +34,10 @@ local function M(bcls, x, y, cost) return { bcls = bcls, x = x, y = y, cost = co
 
 -- fake game: inventories, station, quick moves with partial fills, removals refund to the player
 local function fake(spec)
+    B.last_build_at = nil   -- guard state is module level: every fixture starts free
     local f = {
         calls = { rm = 0, mv = 0, pl = 0, ch = 0 }, moves = {}, clock = 1000,
+        no_charge = spec.no_charge,
         station = spec.station or {}, next_id = 100, creative = spec.creative or false,
         max = spec.max or {}, refund_of = spec.refund_of or {}, max_per_move = spec.max_per_move,
         noop_moves = spec.noop_moves, shift_x = spec.shift_x or 0, drop_place = spec.drop_place,
@@ -145,7 +147,7 @@ local function fake(spec)
         local cost = m.cost or {}
         if not f.creative then
             for item, n in pairs(cost) do if have(f.inv.player.slots, item) < n then return false end end
-            for item, n in pairs(cost) do take(f.inv.player.slots, item, n) end
+            if not f.no_charge then for item, n in pairs(cost) do take(f.inv.player.slots, item, n) end end
         end
         if f.drop_place then return true end   -- accepted, never shows up on the station
         f.next_id = f.next_id + 1
@@ -182,6 +184,7 @@ local function run(b, f, limit)
 end
 
 local function starts_with(s, p) return type(s) == "string" and s:sub(1, #p) == p end
+local DONE2 = "placed 2 machines (the game updates its blueprint view in about 30 s)"
 
 -- ===== pure helpers =====
 do
@@ -230,7 +233,7 @@ do
     local ok, msg = b:start(plan, {})
     check(ok and msg == "ok build started", "plain: start ok")
     local st = run(b, f)
-    check(st.state == "done" and st.placed == 2 and st.moved_in == 1 and st.chunk == "1/1" and st.verify == "2/2", "plain: staged from unit, placed 2, verify 2/2")
+    check(st.state == "done" and st.placed == 2 and st.moved_in == 1 and st.chunk == "1/1" and st.text == DONE2, "plain: staged from unit, placed 2, final text")
     check(f.calls.rm == 0 and f.calls.pl == 2 and same(f.moves[1], { 202, 101, 0, 2 }), "plain: no removals, unit->player quick move slot 0 action 2")
 end
 
@@ -243,7 +246,7 @@ do
                                refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD" } } })
     b:start(plan, {})
     local st = run(b, f)
-    check(st.state == "done" and st.removed == 1 and st.moved_out == 1 and st.placed == 1 and st.verify == "1/1", "removal: refund moved out, machine replaced, verify 1/1")
+    check(st.state == "done" and st.removed == 1 and st.moved_out == 1 and st.placed == 1, "removal: refund moved out, machine replaced")
 end
 
 -- refund does not fit at start -> move out, stage 1 re-check, removal, move out again
@@ -276,7 +279,7 @@ do
     local plan = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 30 }), M("BP_B", 2, 0, { ITEM_Plate = 30 }) }, need = { ITEM_Plate = 60 } })
     b:start(plan, {})
     local st = run(b, f)
-    check(st.state == "done" and st.chunk == "2/2" and st.placed == 2 and st.moved_in == 2 and st.verify == "2/2", "chunking: 2 chunks of 1, placed 2, verify 2/2")
+    check(st.state == "done" and st.chunk == "2/2" and st.placed == 2 and st.moved_in == 2, "chunking: 2 chunks of 1, placed 2")
 end
 
 -- missing items -> refused before any change
@@ -319,7 +322,7 @@ do
     local plan = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 5 }), M("BP_B", 2, 0, { ITEM_Plate = 5 }) }, need = { ITEM_Plate = 10 } })
     local ok = b:start(plan, {})
     local st = run(b, f)
-    check(ok and st.state == "done" and st.placed == 2 and st.moved_in == 0 and f.calls.mv == 0 and st.verify == "2/2", "creative: placed without moves or cost check")
+    check(ok and st.state == "done" and st.placed == 2 and st.moved_in == 0 and f.calls.mv == 0, "creative: placed without moves or cost check")
 end
 
 -- cancel and busy
@@ -362,7 +365,7 @@ do
     local b = B.new(f.io)
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 30 }) }, need = { ITEM_Plate = 30 } }), {})
     local st = run(b, f)
-    check(st.state == "done" and st.moved_in == 2 and st.placed == 1 and st.verify == "1/1" and f.inv.unit.slots[1].amount == 10,
+    check(st.state == "done" and st.moved_in == 2 and st.placed == 1 and f.inv.unit.slots[1].amount == 10,
           "partial moves: 2 rounds of 20, unit keeps 10, placed 1")
 end
 
@@ -384,7 +387,7 @@ do
           "room_wait: removal sent once on a tick at or after 1500 (now passed in), done")
 end
 
--- placed machine one cell off the plan: count met -> done as soon as seen (well before PLACE_MS), position only traced
+-- placed machine one cell off the plan: done on the charge, position only traced in the +3 s diagnostic
 do
     local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), shift_x = 1 })
     local traces = {}
@@ -394,24 +397,36 @@ do
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
     local st = run(b, f)
     local traced = false
-    for _, t in ipairs(traces) do if t:find("position differs from plan", 1, true) then traced = true end end
-    check(st.state == "done" and st.verify == "1/1" and st.text:find("1 position differs from plan", 1, true)
-          and traced and f.clock - t0 < 20000, "count met, position shifted: done before PLACE_MS, position traced")
+    for _, t in ipairs(traces) do if t:find("position may differ from plan", 1, true) then traced = true end end
+    check(st.state == "done" and st.text == "placed 1 machines (the game updates its blueprint view in about 30 s)" and traced
+          and f.clock - t0 < 20000, "count met, position shifted: done, position traced only")
 end
 
--- placed count short (accepted but never seen): error with expected vs live, nearest live machine traced
+-- charge never appears (sim refused silently): error after CHARGE_MS, not 20 s
 do
-    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true,
-                     station = { { id = 3, bcls = "BP_A", x = 5, y = 5 } } })
-    local traces = {}
-    f.io.trace = function(t) traces[#traces + 1] = t end
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), no_charge = true })
     local b = B.new(f.io)
+    local t0 = f.clock
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
     local st = run(b, f)
-    local near = false
-    for _, t in ipairs(traces) do if t:find("near BP_A@(0,0): id=3 x=5 y=5", 1, true) then near = true end end
-    check(st.state == "error" and st.text:find("chunk 1: 1 machines not placed (total expected 2, live 1)", 1, true)
-          and near, "count short: error names expected 2 / live 1, nearest BP_A traced")
+    check(st.state == "error" and st.text:find("chunk 1: items were not charged (sim did not accept the build)", 1, true)
+          and f.clock - t0 <= 6000, "no charge: error 'items were not charged' within 5 s")
+end
+
+-- charge appears on the first poll -> chunk accepted in < 2 s of fake time, even if the station view never shows the machine
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true })
+    local b = B.new(f.io)
+    local t0 = f.clock
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
+    local chunk_done_at
+    while b:status().state == "working" and not chunk_done_at do
+        f.clock = f.clock + 250
+        b:tick(f.clock)
+        if b:status().chunk == "1/1" then chunk_done_at = f.clock end
+    end
+    check(chunk_done_at and chunk_done_at - t0 < 2000 and f.calls.pl == 1,
+          "charge seen: chunk accepted in < 2 s, station view not needed")
 end
 
 -- live class name differs from the plan (BP_A -> BP_A_Live): total met -> done quickly, new machines traced
@@ -429,22 +444,73 @@ do
         if t:find("new live: id=101 bcls=BP_A_Live x=0 y=0", 1, true) then newln = true end
         if t:find("planned: bcls=BP_A bdat=nil x=2 y=0", 1, true) then planln = true end
     end
-    check(st.state == "done" and st.placed == 2 and st.verify == "2/2" and f.clock - t0 < 20000,
-          "class differs, total met: done quickly, verify 2/2")
+    check(st.state == "done" and st.placed == 2 and f.clock - t0 < 20000,
+          "class differs: done, placed 2")
     check(newln and planln, "class differs: new live machines and planned machines traced")
     local bl = false
     for _, t in ipairs(traces) do if t:find("new live: id=3 ", 1, true) then bl = true end end
     check(not bl, "baseline machine (id 3) not traced as new")
 end
 
--- machine gone between chunk check and verify: error with expected vs live totals
+-- machine missing from the station view after the charge: still done (the view is not the acceptance rule)
 do
     local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), vanish_after = 1000 })
     local b = B.new(f.io)
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }), M("BP_A", 2, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 6 } }), {})
     local st = run(b, f)
-    check(st.state == "error" and st.text:find("verify missing 1 machines: total expected 2, live 1", 1, true),
-          "verify short: error with total expected 2, live 1")
+    check(st.state == "done" and st.placed == 2 and st.text == DONE2, "view lag: machine missing from the view does not fail the build")
+end
+
+-- removal: refund shows up -> placing starts before REMOVE_MS; no refund -> the 3 s settle is waited
+do
+    local function rm_gap(refund_of)
+        local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 3), unit = inv({}, 3),
+                         station = { { id = 7, bcls = "BP_OLD", x = 0, y = 0 } }, refund_of = refund_of })
+        local b = B.new(f.io)
+        b:start(plan_for(f, { place = { M("BP_NEW", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 },
+                              refund = { ITEM_Gear = 2 }, removed = { { id = 7, bcls = "BP_OLD" } } }), {})
+        local rm_at = f.calls.rm == 1 and f.clock   -- removals are sent inside start
+        local pl_at
+        while b:status().state == "working" do
+            f.clock = f.clock + 250
+            b:tick(f.clock)
+            if not pl_at and f.calls.pl == 1 then pl_at = f.clock end
+        end
+        return b:status(), pl_at and rm_at and pl_at - rm_at
+    end
+    local st1, gap1 = rm_gap({ [7] = { ITEM_Gear = 2 } })
+    local st2, gap2 = rm_gap({})   -- the refund never shows up in the fake
+    check(st1.state == "done" and gap1 and gap1 < 3000, "removal: refund arrived, placed before the 3 s settle")
+    check(st2.state == "done" and gap2 and gap2 >= 3000, "removal: refund not seen, placing waits the 3 s settle")
+end
+
+-- guard: a build that placed machines refuses Import/Build for 45 s (B.settle_msg); a later start is free
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }) }, need = { ITEM_Plate = 3 } }), {})
+    run(b, f)
+    local last = B.last_build_at
+    check(last ~= nil and B.settle_msg(last + 10000) == "wait 35s: the game is still updating its blueprint view after the build",
+          "guard: 35 s left 10 s after a build")
+    check(B.settle_msg(last + 44999) ~= nil and B.settle_msg(last + 45000) == nil, "guard: free at exactly 45 s")
+    local b2 = B.new(f.io)
+    f.clock = last + 10000
+    local ok2, msg2 = b2:start(plan_for(f, {}), {})
+    check(not ok2 and starts_with(msg2, "error: wait 35s: the game is still updating its blueprint view after the build"),
+          "guard: second build refused with the wait message")
+    f.clock = last + 45000
+    local b3 = B.new(f.io)
+    local ok3, msg3 = b3:start(plan_for(f, {}), {})
+    check(ok3 and msg3 == "ok nothing to build", "guard: second build allowed after 45 s")
+end
+
+-- guard: a run that placed nothing and removed nothing does not start the guard
+do
+    local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 1), unit = inv({ S("ITEM_Plate", 4) }, 1) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 9 }) }, need = { ITEM_Plate = 9 } }), {})
+    check(b:status().state == "error" and B.last_build_at == nil, "guard: refused build (nothing placed) leaves the guard off")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

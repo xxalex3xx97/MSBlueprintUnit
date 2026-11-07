@@ -7,8 +7,21 @@ local B = {}
 
 local TOTAL_MS = 300000   -- whole run
 local STAGE_MS = 10000    -- staging round, moveout
-local PLACE_MS = 20000    -- chunk placed on the station
-local REMOVE_TRIES = 60   -- x 1 s
+local CHARGE_MS = 5000    -- chunk charge (player+unit items drop by the cost) must show within this
+local REMOVE_MS = 3000    -- fixed settle after DisassembleInput (refund may show earlier)
+local POLL_MS = 500
+
+-- The game's blueprint view (station.Blueprint.Machines) lags 20-30 s behind a build. Import and Build are refused for
+-- GUARD_MS after a run that placed or removed machines (B.last_build_at, io.now clock, module level: survives window reopen).
+B.GUARD_MS = 45000
+B.last_build_at = nil
+
+-- nil when no guard applies; else "wait Ns: ..." (N = seconds left, rounded up).
+function B.settle_msg(now)
+    if not B.last_build_at or now - B.last_build_at >= B.GUARD_MS then return nil end
+    local s = math.ceil((B.last_build_at + B.GUARD_MS - now) / 1000)
+    return ("wait %ds: the game is still updating its blueprint view after the build"):format(s)
+end
 
 local function get(m, k) return m[k] or 0 end
 
@@ -180,52 +193,39 @@ end
 local function new_run(plan)
     return {
         plan = plan, active = false, state = "idle", text = "", stage = 0,
-        tries = 0, rounds = 0, stage_rounds = 0,
+        rounds = 0, stage_rounds = 0,
         t_next = 0, t_start = 0, t_stage = 0, t_issue = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false,
         rneed = {}, remove_ids = {}, costs = {},
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
-        chunk_need = {}, snap = {}, issued = {},
-        placed = 0, removed = 0, moved_out = 0, moved_in = 0, verify_p = -1, verify_n = 0,
-        base = {}, rem = {}, want = {},   -- live count per bcls at start, planned removals per bcls, placed per bcls (cumulative)
+        chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
+        placed = 0, removed = 0, moved_out = 0, moved_in = 0,
         base_total = 0, base_ids = {},    -- live machine count and id set at start (diagnostics: new ids)
     }
 end
 
--- live machines per bcls
-local function count_by(list)
-    local c = {}
-    for _, m in ipairs(list) do c[m.bcls] = get(c, m.bcls) + 1 end
-    return c
+-- both inventories summed per item (player + unit): staging moves keep it, a charge lowers it
+local function both_totals(ps, us)
+    local t = totals(ps)
+    for k, v in pairs(totals(us)) do t[k] = get(t, k) + v end
+    return t
 end
 
--- expected live count of a class: start count - removed + placed so far. Position is not part of it.
-local function expected_of(R, bcls)
-    return get(R.base, bcls) - get(R.rem, bcls) + get(R.want, bcls)
-end
-
--- pass rule: live total (all classes) >= start total - planned removals + placed so far. Class and position never fail a build.
-local function expected_total(R)
-    return R.base_total - #R.remove_ids + R.placed
-end
-
--- classes (set) whose live count is below expected: { {bcls, expected, live}, ... } and the total short count.
-local function short_classes(R, classes, live)
-    local lc, out, total = count_by(live), {}, 0
-    for _, k in ipairs(sorted_keys(classes)) do
-        local e, l = expected_of(R, k), get(lc, k)
-        if l < e then
-            out[#out + 1] = { bcls = k, expected = e, live = l }
-            total = total + (e - l)
+-- true when every refund item (refund > 0) rose by its amount since `before`. No refund items -> false (the settle time decides).
+local function refund_arrived(refund, held, before)
+    local any = false
+    for k, v in pairs(refund) do
+        if v > 0 then
+            any = true
+            if get(held, k) - get(before, k) < v then return false end
         end
     end
-    return out, total
+    return any
 end
 
--- first machine of class bcls in list (the wanted cell), or nil
-local function first_of(list, bcls)
-    for _, m in ipairs(list) do if m.bcls == bcls then return m end end
-    return nil
+-- pass rule for the +3 s diagnostic only: live total (all classes) >= start total - planned removals + placed so far.
+local function expected_total(R)
+    return R.base_total - #R.remove_ids + R.placed
 end
 
 -- io (injected, plain Lua values). Every send_* returns true when the game accepted it.
@@ -245,20 +245,6 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
-    -- up to 3 live machines of class bcls nearest to the wanted machine wm (trace only)
-    local function trace_near(wm, bcls, live)
-        if not wm then return end
-        local c = {}
-        for _, m in ipairs(live) do if m.bcls == bcls then c[#c + 1] = m end end
-        local function d2(m) return ((m.x or 0) - wm.x) ^ 2 + ((m.y or 0) - wm.y) ^ 2 end
-        table.sort(c, function(a, b) return d2(a) < d2(b) end)
-        if #c == 0 then trace(("no live %s on the station"):format(bcls)) end
-        for i = 1, math.min(3, #c) do
-            local m = c[i]
-            trace(("near %s@(%d,%d): id=%s x=%s y=%s h=%s rot=%s"):format(bcls, wm.x, wm.y,
-                tostring(m.id), tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
-        end
-    end
     -- diagnostics (trace only): live machines whose id was not in the start scan, and the planned machines given
     local function trace_diag(ex, planned)
         for _, m in ipairs(ex) do
@@ -272,12 +258,17 @@ function B.new(io)
                 tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot)))
         end
     end
+    -- a run that placed or removed machines starts the blueprint-view guard (any end: done, error, cancel)
+    local function mark_changed()
+        if R.placed + R.removed > 0 then B.last_build_at = io.now() end
+    end
     -- ends the run with error|msg (counts). Returns false.
     local function fail(msg)
         R.state = "error"
         R.text = msg .. " (" .. counts() .. ")"
         R.active = false
         R.stage = 0
+        mark_changed()
         return false
     end
     local function start_fail(msg)
@@ -305,8 +296,8 @@ function B.new(io)
         return io.send_move(prim, sec, i - 1, 2) and true or false
     end
 
-    -- DisassembleInput per planned removal. Stage 2 then waits until they are gone.
-    local function send_removals(now)
+    -- DisassembleInput per planned removal. Stage 2 then waits for the refund (or REMOVE_MS). held = totals before.
+    local function send_removals(now, held)
         local sent = 0
         for _, id in ipairs(R.remove_ids) do
             if io.send_remove(id) then sent = sent + 1 end
@@ -315,9 +306,10 @@ function B.new(io)
         if sent ~= #R.remove_ids then
             return fail(("removal refused for %d machines"):format(#R.remove_ids - sent))
         end
+        R.rem_before = held
         R.stage = 2
-        R.tries = 0
-        R.t_next = now + 1500
+        R.t_stage = now
+        R.t_next = now + POLL_MS
         set_status("working", ("removing %d machines"):format(sent))
     end
 
@@ -328,33 +320,44 @@ function B.new(io)
         end
     end
 
-    -- all chunks placed: config changes, then verify at +3 s (stage 7)
+    -- all chunks charged: config changes, then the trace-only check at +3 s (stage 7)
     local function finish(now)
         send_changes_once()
         R.stage = 7
         R.t_next = now + 3000
-        set_status("working", "verifying at +3 s")
+        set_status("working", "finishing")
     end
 
-    -- BuildInput for chunk [chunk_from, chunk_to). Stage 6 waits for the machines.
+    -- chunk accepted (charged, or creative): next chunk at once
+    local function chunk_done(now)
+        R.chunks_done = R.chunks_done + 1
+        R.chunk_from = R.chunk_to
+        R.stage_rounds = 0
+        R.stage = 4
+        R.t_next = now
+    end
+
+    -- BuildInput for chunk [chunk_from, chunk_to). Totals are read first: stage 6 needs the charge to lower them.
     local function place_chunk(now)
         send_changes_once()
+        if not R.creative then
+            local ps, us, err = read_both()
+            if not ps then return fail(err) end
+            R.before = both_totals(ps, us)
+        end
         local count, n = R.chunk_to - R.chunk_from, 0
         for k = R.chunk_from, R.chunk_to - 1 do
-            local m = R.plan.place[k]
-            if io.send_place(m) then
-                n = n + 1
-                R.want[m.bcls] = get(R.want, m.bcls) + 1
-            end
+            if io.send_place(R.plan.place[k]) then n = n + 1 end
         end
         R.placed = R.placed + n
         if n ~= count then
             return fail(("BuildInput refused for %d machines in chunk %d"):format(count - n, R.chunks_done + 1))
         end
+        if R.creative then return chunk_done(now) end   -- creative: no charge to wait for
         R.stage = 6
         R.t_stage = now
-        R.t_next = now + 500
-        set_status("working", ("placed chunk %d (%d machines), waiting"):format(R.chunks_done + 1, count))
+        R.t_next = now + POLL_MS
+        set_status("working", ("placed chunk %d (%d machines), waiting for the charge"):format(R.chunks_done + 1, count))
     end
 
     -- stage 4: size the chunk by free player space, move what the player lacks in from the unit (or place at once).
@@ -417,34 +420,20 @@ function B.new(io)
         R.t_next = now + 250
     end
 
-    -- stage 6: live total (all classes) >= expected total -> next chunk at once. Class/position only traced.
-    -- PLACE_MS without the total -> fail with expected vs live totals.
-    local function place_wait(now)
-        local P = R.plan
-        local ex, err = io.scan(P.station)
-        if not ex then return fail(err or "live read fault while placing") end
-        local want, live = expected_total(R), #ex
-        local slice = {}
-        for k = R.chunk_from, R.chunk_to - 1 do slice[#slice + 1] = P.place[k] end
-        if live >= want then
-            local pres, missing = present(slice, ex)
-            if pres < #slice then
-                trace(("chunk %d: count met, %d of %d at planned cells (position differs from plan): %s"):format(R.chunks_done + 1, pres, #slice, missing))
-            end
-            trace_diag(ex, slice)
-            R.chunks_done = R.chunks_done + 1
-            R.chunk_from = R.chunk_to
-            R.stage_rounds = 0
-            R.stage = 4
-            R.t_next = now
-            return
+    -- stage 6: the chunk is accepted when player+unit items dropped by the chunk cost (the charge). The station view is not read.
+    -- CHARGE_MS without the charge -> fail.
+    local function charge_wait(now)
+        local ps, us, err = read_both()
+        if not ps then return fail(err) end
+        local held, charged = both_totals(ps, us), true
+        for item, v in pairs(R.chunk_need) do
+            if get(R.before, item) - get(held, item) < v then charged = false end
         end
-        if now - R.t_stage > PLACE_MS then
-            trace_diag(ex, slice)
-            for _, s in ipairs(short_classes(R, R.want, ex)) do trace_near(first_of(P.place, s.bcls), s.bcls, ex) end
-            return fail(("chunk %d: %d machines not placed (total expected %d, live %d)"):format(R.chunks_done + 1, want - live, want, live))
+        if charged then return chunk_done(now) end
+        if now - R.t_stage > CHARGE_MS then
+            return fail(("chunk %d: items were not charged (sim did not accept the build)"):format(R.chunks_done + 1))
         end
-        R.t_next = now + 500
+        R.t_next = now + POLL_MS
     end
 
     -- stage 3: refund stacks the build does not need must leave the player. Re-issued every 2 s, 3 rounds; 10 s -> fail.
@@ -468,26 +457,17 @@ function B.new(io)
         R.t_next = now + 250
     end
 
-    -- stage 2: waits until the removed machines are gone (60 checks, 1 s apart). Then the unneeded refund goes to the unit (stage 3) or stage 4.
+    -- stage 2: wait until the refund shows up (every refund item rose by its amount) or REMOVE_MS passed, whichever first.
+    -- The station view is not read. Then the unneeded refund goes to the unit (stage 3) or stage 4.
     local function removal_wait(now)
-        local ex, err = io.scan(R.plan.station)
-        if not ex then return fail(err or "live read fault after removal") end
-        local here, left = {}, 0
-        for _, e in ipairs(ex) do here[e.id] = true end
-        for _, id in ipairs(R.remove_ids) do
-            if here[id] then left = left + 1 end
+        local ps, us, err = read_both()
+        if not ps then return fail(err) end
+        local arrived = refund_arrived(R.plan.refund, both_totals(ps, us), R.rem_before)
+        if not arrived and now - R.t_stage < REMOVE_MS then
+            set_status("working", ("removing %d machines"):format(R.removed))
+            R.t_next = now + POLL_MS
+            return
         end
-        if left > 0 then
-            R.tries = R.tries + 1
-            if R.tries < REMOVE_TRIES then
-                set_status("working", ("removing, %d left"):format(left))
-                R.t_next = now + 1000
-                return
-            end
-            return fail(("%d machines still present after removal"):format(left))
-        end
-        local ps, _, err2 = read_both()
-        if not ps then return fail(err2) end
         local mo = R.creative and {} or moveout_slots(ps, moveset(R.plan.refund, R.plan.need))
         if #mo == 0 then
             R.stage = 4
@@ -500,7 +480,6 @@ function B.new(io)
         end
         R.moved_out = R.moved_out + #mo
         R.stage = 3
-        R.tries = 0
         R.rounds = 0
         R.t_stage = now
         R.t_issue = now
@@ -510,46 +489,32 @@ function B.new(io)
 
     -- stage 1: waits until the refund fits the player inventory, 10 s max, then removals go.
     local function room_wait(now)
-        local ps, _, err = read_both()
+        local ps, us, err = read_both()
         if not ps then return fail(err) end
         local rerr = refund_check(R.rneed, ps)
-        if rerr == "" then return send_removals(now) end
+        if rerr == "" then return send_removals(now, both_totals(ps, us)) end
         if now - R.t_stage > STAGE_MS then return fail(rerr) end
         R.t_next = now + 500
     end
 
-    -- stage 7: +3 s verify over placed + kept machines.
+    -- stage 7 (+3 s): diagnostics only (trace). The station view may still be stale, so it never fails the run.
     local function verify_final()
         local P = R.plan
-        local ex = io.scan(P.station)
-        local chk = {}
-        for _, m in ipairs(P.place) do chk[#chk + 1] = m end
-        for _, m in ipairs(P.kept) do chk[#chk + 1] = m end
         R.active = false
         R.stage = 0
-        if not ex then
-            R.state = "error"
-            R.text = "verify could not read the station (" .. counts() .. ")"
-            return
+        local ex = io.scan(P.station)
+        if ex then
+            local chk = {}
+            for _, m in ipairs(P.place) do chk[#chk + 1] = m end
+            for _, m in ipairs(P.kept) do chk[#chk + 1] = m end
+            trace(("diag: expected total %d, view total %d"):format(expected_total(R), #ex))
+            trace_diag(ex, P.place)
+            local pex = present(chk, ex)
+            if pex < #chk then trace(("diag: %d of %d at planned cells (position may differ from plan)"):format(pex, #chk)) end
         end
-        local want, live = expected_total(R), #ex
-        local short = math.max(want - live, 0)
-        R.verify_p, R.verify_n = math.max(#chk - short, 0), #chk
-        trace_diag(ex, P.place)
-        if short > 0 then
-            local classes = {}
-            for k in pairs(R.want) do classes[k] = true end
-            for _, m in ipairs(P.kept) do classes[m.bcls] = true end
-            for _, s in ipairs(short_classes(R, classes, ex)) do trace_near(first_of(chk, s.bcls), s.bcls, ex) end
-            R.state = "error"
-            R.text = ("verify missing %d machines: total expected %d, live %d (%s)"):format(short, want, live, counts())
-            return
-        end
-        local pex = present(chk, ex)
-        local off = #chk - pex
-        if off > 0 then trace(("verify: count met, %d of %d at planned cells (position differs from plan)"):format(pex, #chk)) end
         R.state = "done"
-        R.text = counts() .. (off > 0 and (" (%d position differs from plan)"):format(off) or "")
+        R.text = ("placed %d machines (the game updates its blueprint view in about 30 s)"):format(R.placed)
+        mark_changed()
     end
 
     local builder = {}
@@ -560,6 +525,8 @@ function B.new(io)
         if R.active then return false, "error: busy: another build is running" end
         R = new_run(nil)
         if not plan or not plan.valid then return start_fail("import first") end
+        local wait = B.settle_msg(io.now())
+        if wait then return start_fail(wait) end
         local P = {
             station = plan.station, fp = plan.fp,
             place = plan.place or {}, kept = plan.kept or {}, chg = plan.chg or {},
@@ -575,7 +542,6 @@ function B.new(io)
         local ex, err = io.scan(P.station)
         if not ex then return start_fail(err or "live read fault") end
         if io.fingerprint(ex) ~= P.fp then return start_fail("station changed since import, import again") end
-        R.base = count_by(ex)
         R.base_total = #ex
         for _, m in ipairs(ex) do if m.id ~= nil then R.base_ids[m.id] = true end end
         local ps, us, rerr = read_both()
@@ -591,7 +557,6 @@ function B.new(io)
             if terr ~= "" then return start_fail(terr) end
         end
         for _, m in ipairs(P.removed) do R.remove_ids[#R.remove_ids + 1] = m.id end
-        R.rem = count_by(P.removed)
         if #P.place == 0 and #R.remove_ids == 0 and #P.chg == 0 then
             R.state = "done"
             R.text = "nothing to build"
@@ -602,7 +567,7 @@ function B.new(io)
         if #R.remove_ids > 0 then
             R.rneed = build_rneed(P.refund, maxes(ps, us))
             if refund_check(R.rneed, ps) == "" then
-                send_removals(now)
+                send_removals(now, both_totals(ps, us))
             else
                 -- refund does not fit: move the unneeded refund stacks to the unit, stage 1 re-checks
                 local mo = R.creative and {} or moveout_slots(ps, moveset(P.refund, P.need))
@@ -634,7 +599,7 @@ function B.new(io)
         elseif s == 3 then moveout_wait(now)
         elseif s == 4 then chunk_start(now)
         elseif s == 5 then staging_wait(now)
-        elseif s == 6 then place_wait(now)
+        elseif s == 6 then charge_wait(now)
         elseif s == 7 then verify_final()
         else fail("internal: unknown stage " .. s) end
     end
@@ -654,7 +619,6 @@ function B.new(io)
             placed = R.placed, kept = P and #P.kept or 0, removed = R.removed,
             recipe = P and P.recChanged or 0, moved_out = R.moved_out, moved_in = R.moved_in,
             chunk = R.chunks_done .. "/" .. R.chunks,
-            verify = (R.verify_p < 0 and "-" or tostring(R.verify_p)) .. "/" .. R.verify_n,
         }
     end
 

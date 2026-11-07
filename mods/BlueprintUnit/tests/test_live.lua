@@ -333,7 +333,7 @@ while b:status().state == "working" and n < 800 do
 end
 local st = b:status()
 check(st.state == "done" and st.placed == 2 and st.placed == #plan2.place, ("integration: done, placed %d (%s)"):format(st.placed, st.text))
-check(st.verify == "2/2" and #W2.machines == 2, "integration: verify 2/2, 2 machines on the station")
+check(st.text == "placed 2 machines (the game updates its blueprint view in about 30 s)" and #W2.machines == 2, "integration: final text, 2 machines on the station")
 
 -- real read path at Main-Base size: 2246 stub machine structs -> Live.snapshot -> P.plan (identity keep, no non-table entries)
 do

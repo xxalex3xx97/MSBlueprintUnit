@@ -158,6 +158,8 @@ end
 -- Btn_ImportOk: plan the pasted JSON against the live station. Error -> status, modal stays open.
 local function impOk()
   if not M.impOpen() then return end
+  local wait = Build.settle_msg(os.clock() * 1000)   -- the station view is stale for ~30 s after a build
+  if wait then txt("Txt_Status", "error: " .. wait); return end
   local box = w("Edt_ImportJson")
   local sr, text = pcall(function() return box:GetText():ToString() end)
   if not ok(box) or not sr or type(text) ~= "string" then txt("Txt_Status", "error: could not read text"); return end
@@ -209,6 +211,8 @@ local function finishBuild(run)
   S.run = nil
   setBuildBtns(true)
   showText("Txt_Summary", S.builder:status().text)
+  -- stale station right after a build: re-planning now would list the built machines as missing again
+  if Build.settle_msg(os.clock() * 1000) then return end
   local okR, err = pcall(function()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F), F)
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
