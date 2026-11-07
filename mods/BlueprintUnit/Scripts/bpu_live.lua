@@ -21,6 +21,12 @@ local function TRACE(m)
 end
 L.trace = TRACE
 
+-- per-field trace for late machine entries only (crash hunt); i < TRACE_FROM writes nothing
+local TRACE_FROM = 2100
+local function MT(i, m)
+    if i and i >= TRACE_FROM then TRACE("m" .. i .. " " .. m) end
+end
+
 -- many lines, one io open (prints each line too)
 local function TRACE_MANY(lines)
     for _, m in ipairs(lines) do print("[BPUnit] " .. m) end
@@ -115,10 +121,20 @@ end
 --   Blocks:    Class, Transform.{GridLocation.X, GridLocation.Y, Height, GridRotation}
 --   Machines:  MachineID (else ID), Class, Transform.{...same...}, SerializedMachineConfig (bytes)
 --   ItemCost:  Item, Amount (P0 R2)
-local function xf(e)
+local function xf(e, i)
+    MT(i, "xf Transform")
     local t = rd(e, "Transform")
+    MT(i, "xf GridLocation")
     local gl = unw(rd(t, "GridLocation"))
-    return unw(rd(gl, "X")), unw(rd(gl, "Y")), unw(rd(t, "Height")), unw(rd(t, "GridRotation"))
+    MT(i, "xf X")
+    local x = unw(rd(gl, "X"))
+    MT(i, "xf Y")
+    local y = unw(rd(gl, "Y"))
+    MT(i, "xf Height")
+    local h = unw(rd(t, "Height"))
+    MT(i, "xf GridRotation")
+    local rot = unw(rd(t, "GridRotation"))
+    return x, y, h, rot
 end
 
 local function bp_arr(st, key)
@@ -204,11 +220,13 @@ function L.read_blocks(st)
     return out
 end
 
-local function cfg_bytes(e)
+local function cfg_bytes(e, i)
+    MT(i, "cfg SerializedMachineConfig")
     local bytes = rd(e, "SerializedMachineConfig")
     if bytes == nil then return nil end
     local ok, s = pcall(function()
         local t = {}
+        MT(i, "cfg bytes walk")
         each(bytes, function(b) t[#t + 1] = string.char(unw(b)) end)
         return table.concat(t)
     end)
@@ -228,10 +246,14 @@ function L.read_machines(st)
             if unw(rd(e, "ID")) == nil then idkey = "MachineID" end
             TRACE("machine id field=" .. idkey)
         end
+        MT(i, "id")
         local id = unw(rd(e, idkey))
+        MT(i, "class")
         local cls = short(nm(rd(e, "Class")))
-        local x, y, h, rot = xf(e)
-        out[#out + 1] = { id = id, cls = cls, bcls = cls, x = x, y = y, h = h, rot = rot, cfg = cfg_bytes(e) }
+        MT(i, "class=" .. cls)
+        local x, y, h, rot = xf(e, i)
+        out[#out + 1] = { id = id, cls = cls, bcls = cls, x = x, y = y, h = h, rot = rot, cfg = cfg_bytes(e, i) }
+        MT(i, "done")
     end)
     TRACE("read_machines done n=" .. #out)
     return out
