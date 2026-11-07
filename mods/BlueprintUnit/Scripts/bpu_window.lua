@@ -36,7 +36,7 @@ local S = { h = nil, w = nil, p = nil, U = nil, player = nil, ctl = nil, tc = ni
 -- has = an import or build ran in this session. S.plan / S.text are kept too (Build re-plans from S.text).
 -- Notes panel (Txt_Notes) = status line, plan summary, removes line, folded notes. Txt_Status, Txt_Summary and Txt_Removes
 -- are collapsed (empty): no text above the buttons.
-local KEPT = { has = false, rows = {} }
+local KEPT = { has = false, rows = {}, pinned = false }
 local NOTE = { status = "", summary = "", removes = "", list = "" }
 
 -- ESlateVisibility: 0 Visible, 1 Collapsed
@@ -389,6 +389,24 @@ function M.fKey()
   if M.isOpen() and os.clock() - S.t0 > 0.5 and not typing() then M.close() end
 end
 
+-- Pin (Btn_CostPin): sends the game's SetPinnedCostInput with the net-need stacks (net > 0, amount = net). Pressed again = empty array = unpin.
+-- The game HUD shows the list (amounts only, no live refresh). The label follows our last click only.
+local function pinClick()
+  local stacks = {}
+  if not KEPT.pinned then
+    for _, r in ipairs(KEPT.rows) do if r.net > 0 then stacks[#stacks + 1] = { name = r.name, n = r.net } end end
+    if #stacks == 0 then setStatus("nothing to pin"); return end
+  end
+  local okp, r = Live.send_pin(S.ctl, S.player, stacks)
+  L(("pin %s n=%d -> ok=%s ret=%s"):format(KEPT.pinned and "clear" or "set", #stacks, tostring(okp), tostring(r)))
+  if okp then
+    KEPT.pinned = not KEPT.pinned
+    txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
+  else
+    setStatus("pin failed (see log)")
+  end
+end
+
 local function openWindow(block, player, ctl)
   local U, err = Live.find_unit(block)
   if not U then L("open: " .. tostring(err)); return end
@@ -419,6 +437,7 @@ local function openWindow(block, player, ctl)
   bind("Btn_ImportClose", M.impClose)
   bind("Btn_ImportCancel", impCancel)
   bind("Btn_ImportOk", impOk)
+  bind("Btn_CostPin", pinClick)
 
   setVis(w("Pnl_ImportModal"), false)
   showText("Txt_Status", "")    -- collapsed: the text lives in the Notes panel
@@ -431,7 +450,8 @@ local function openWindow(block, player, ctl)
     resetResults()
   end
   readStationBuild()
-  L("open unit=" .. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
+  txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
+  L("open unit=".. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
   Invtrace.open()
 end
 
