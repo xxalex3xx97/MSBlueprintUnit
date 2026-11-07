@@ -158,15 +158,33 @@ function L.find_unit(block, player_hint)
     for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
         if valid(c) and clsname(c) == "BP_BPUnitStoreObj_01" then conts[#conts + 1] = c end
     end
-    local cont
+    local tl = { "find_unit block=" .. tostring(idOf(block)) .. " cands=" .. table.concat(cands, ",") .. " nconts=" .. #conts }
+    for _, c in ipairs(conts) do
+        tl[#tl + 1] = "  cont id=" .. tostring(idOf(c)) .. " parent=" .. tostring(unw(rd(c, "ParentID"))) .. " inv=" .. tostring(idOf(rd(c, "Inventory")))
+    end
+    TRACE_MANY(tl)
+    local bid = idOf(block)
+    local pool = {}
     for _, sid in ipairs(cands) do
         for _, c in ipairs(conts) do
-            if unw(rd(c, "ParentID")) == sid then cont = c break end
+            if unw(rd(c, "ParentID")) == sid then pool[#pool + 1] = c end
         end
-        if cont then break end
+        if #pool > 0 then break end
     end
-    if not cont and #conts == 1 then cont = conts[1] end
-    if not cont then return nil, "no Blueprint Unit container on station " .. tostring(cands[1]) end
+    local cont
+    if #pool == 1 then
+        cont = pool[1]
+    elseif #pool > 1 and type(bid) == "number" then
+        -- ponytail: ID order guess (unit container id = smallest container id above its block id); confirm with the trace
+        for _, c in ipairs(pool) do
+            local cid = idOf(c)
+            if type(cid) == "number" and cid > bid and (not cont or cid < idOf(cont)) then cont = c end
+        end
+    elseif #pool == 0 and #conts == 1 then
+        cont = conts[1]
+    end
+    if not cont then return nil, "no Blueprint Unit container for block " .. tostring(bid) .. " on station " .. tostring(cands[1]) end
+    TRACE("find_unit chosen cont=" .. tostring(idOf(cont)) .. " pool=" .. #pool)
     local station_id = unw(rd(cont, "ParentID"))
     local unit_inv = rd(cont, "Inventory")
     if unit_inv == nil then return nil, "unit inventory unreadable" end

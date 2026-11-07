@@ -132,6 +132,21 @@ check(U4 ~= nil and U4.station == 163811 and U4.cont.ID == 77 and U4.station_obj
 -- no GetFrame, no ParentID: only the block ID is left (no container matches, 2 containers) -> nil, no struct ID scan
 local U5, e5 = Live.find_unit({ ID = 261217, IsValid = alive }, nil)
 check(U5 == nil and type(e5) == "string", "find_unit: no station candidate -> nil, err (Blocks never scanned)")
+make_world({}, { slot() }, { slot(), slot() })
+local function cont(id, invid)
+    return named("C" .. id, { ID = id, ParentID = 163811, Class = named("BP_BPUnitStoreObj_01_C"), Inventory = { ID = invid, IsValid = alive } })
+end
+world.ContainerObject = { cont(261225, 261226), cont(261218, 261219), cont(261221, 261222) }
+world.StationObject[2].ID = 163811
+local function blk(id) return { ID = id, IsValid = alive, GetFrame = function() return { ID = 163811, IsValid = alive } end } end
+local u1 = Live.find_unit(blk(261217), nil)
+local u2 = Live.find_unit(blk(261220), nil)
+local u3 = Live.find_unit(blk(261224), nil)
+check(u1 and u1.cont.ID == 261218 and u1.unit_inv.ID == 261219, "find_unit: 3 units, block 261217 -> container 261218")
+check(u2 and u2.cont.ID == 261221 and u2.unit_inv.ID == 261222, "find_unit: 3 units, block 261220 -> container 261221")
+check(u3 and u3.cont.ID == 261225 and u3.unit_inv.ID == 261226, "find_unit: 3 units, block 261224 -> container 261225")
+local ua, ea = Live.find_unit({ IsValid = alive, GetFrame = function() return { ID = 163811, IsValid = alive } end }, nil)
+check(ua == nil and type(ea) == "string", "find_unit: 3 units, block without id -> nil, err (no first-match guess)")
 world = keepWorld
 fakeMachines = W.machines
 Live.reset()
