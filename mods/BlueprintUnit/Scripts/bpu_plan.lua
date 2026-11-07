@@ -7,6 +7,7 @@
 --       P.removes_text(plan) -> "removes: 3 belts, 1 splitter" ("" when none)
 --       P.cost_rows(plan) -> sorted { {name=ITEM_raw, need=, refund=, net=}, ... } (need>0 or refund>0)
 --       P.fingerprint(existing) -> FNV-1a 32-bit over id,bcls,x,y,h,rot (plan staleness check)
+--       opts (optional) = { trace = fn(text) }: called once with diagnostics when blocks are missing (no effect otherwise)
 -- F = MSCore factory module (mscore_factory.lua), injected: F.tables, F.block_floor, F.floor_rects, F.validate_place,
 --     F.footprint, F.encode_cfg, F.decode_cfg, F.encode_ug. Tests pass a snapshot copy (tests/fixtures).
 -- live (injected by bpu_live, this file never touches the game):
@@ -294,8 +295,33 @@ local function parse_doc(text)
     return doc
 end
 
+-- trace-only: why a JSON block has no live twin. Appends lines to `lines`; never changes matching.
+local DIAG_MAX = 5
+local function diag_missing(lines, jb, blocks)
+    local function dist(b) return math.abs((b.gx or 0) - jb.gx) + math.abs((b.gy or 0) - jb.gy) + math.abs((b.h or 0) - jb.h) end
+    local function row(tag, b, extra)
+        return "  " .. tag .. " class=" .. tostring(b.class) .. " gx=" .. tostring(b.gx) .. " gy=" .. tostring(b.gy)
+            .. " h=" .. tostring(b.h) .. " rot=" .. tostring(b.rot) .. (extra or "")
+    end
+    local same_cls, same_xyh, same_cxy = {}, {}, {}
+    for _, b in ipairs(blocks) do
+        if b.class == jb.class then
+            same_cls[#same_cls + 1] = b
+            if b.gx == jb.gx and b.gy == jb.gy then same_cxy[#same_cxy + 1] = b end   -- same class+grid, h differs (exact match failed)
+        elseif b.gx == jb.gx and b.gy == jb.gy and b.h == jb.h then
+            same_xyh[#same_xyh + 1] = b
+        end
+    end
+    table.sort(same_cls, function(p, q) return dist(p) < dist(q) end)
+    lines[#lines + 1] = "miss " .. jb.class .. "@(" .. jb.gx .. "," .. jb.gy .. ",h" .. jb.h .. "): live same class=" .. #same_cls
+        .. ", same grid other class=" .. #same_xyh .. ", same class+grid other h=" .. #same_cxy
+    for i = 1, math.min(DIAG_MAX, #same_cls) do lines[#lines + 1] = row("near", same_cls[i], " d=" .. dist(same_cls[i])) end
+    for i = 1, math.min(DIAG_MAX, #same_xyh) do lines[#lines + 1] = row("xyh", same_xyh[i]) end
+    for i = 1, math.min(DIAG_MAX, #same_cxy) do lines[#lines + 1] = row("cxy", same_cxy[i]) end
+end
+
 ---------------------------------------------------------------- the plan
-local function build(text, live, F)
+local function build(text, live, F, opts)
     if type(text) ~= "string" then bail("plan: no blueprint text") end
     if type(live) ~= "table" or type(F) ~= "table" or type(F.tables) ~= "table" then bail("plan: live or factory module missing") end
     local buildables = live.buildables or {}
@@ -335,13 +361,19 @@ local function build(text, live, F)
     -- Blocks must be on the live station Blueprint
     local blockset = {}
     for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = true end
-    local missing = {}
+    local missing, missing_jb = {}, {}
     for _, jb in ipairs(doc.blocks) do
         if not blockset[jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h] then
             missing[#missing + 1] = jb.class .. "@(" .. jb.gx .. "," .. jb.gy .. ",h" .. jb.h .. ")"
+            missing_jb[#missing_jb + 1] = jb
         end
     end
     if #missing > 0 then
+        if opts and type(opts.trace) == "function" then
+            local lines = {}
+            for _, jb in ipairs(missing_jb) do diag_missing(lines, jb, blocks) end
+            opts.trace(table.concat(lines, "\n"))
+        end
         local msg = "Blocks are not on the grid:"
         for i = 1, math.min(#missing, 5) do msg = msg .. " " .. missing[i] .. ";" end
         bail(msg)
@@ -650,9 +682,9 @@ local function build(text, live, F)
     }
 end
 
-function P.plan(text, live, F)
+function P.plan(text, live, F, opts)
     if type(F) ~= "table" or type(F.footprint) ~= "function" then return nil, "plan: factory module missing" end
-    local ok, res = pcall(build, text, live, F)
+    local ok, res = pcall(build, text, live, F, opts)
     if ok then return res end
     if type(res) == "table" and res.bpu then return nil, res.bpu end
     error(res, 0)

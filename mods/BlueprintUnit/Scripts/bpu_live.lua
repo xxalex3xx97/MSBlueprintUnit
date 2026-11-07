@@ -21,6 +21,20 @@ local function TRACE(m)
 end
 L.trace = TRACE
 
+-- many lines, one io open (prints each line too)
+local function TRACE_MANY(lines)
+    for _, m in ipairs(lines) do print("[BPUnit] " .. m) end
+    pcall(function()
+        local f = io.open(TRACE_PATH, "a")
+        if f then
+            local ts = os.date("%H:%M:%S ")
+            for _, m in ipairs(lines) do f:write(ts .. m .. "\n") end
+            f:flush()
+            f:close()
+        end
+    end)
+end
+
 local function rd(o, k)
     if o == nil then return nil end
     local ok, v = pcall(function() return o[k] end)
@@ -263,6 +277,11 @@ function L.snapshot(U, F)
     TRACE("snapshot start station=" .. tostring(U.station))
     local blocks = L.read_blocks(st)
     TRACE("snapshot blocks=" .. #blocks)
+    local bl = {}
+    for i, b in ipairs(blocks) do
+        bl[i] = ("blk %d class=%s gx=%s gy=%s h=%s rot=%s"):format(i, tostring(b.class), tostring(b.gx), tostring(b.gy), tostring(b.h), tostring(b.rot))
+    end
+    TRACE_MANY(bl)
     local existing = L.read_machines(st)
     TRACE("snapshot machines=" .. #existing)
     local recipes = L.read_recipes()

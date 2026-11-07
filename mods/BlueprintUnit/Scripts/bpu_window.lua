@@ -171,7 +171,7 @@ local function impOk()
     local live = Live.snapshot(S.U, F)
     Live.trace(("impOk snapshot %.1f ms blocks=%d machines=%d"):format((os.clock() - t0) * 1000, #live.blocks, #live.existing))
     t0 = os.clock()
-    local plan, perr = Plan.plan(text, live, F)
+    local plan, perr = Plan.plan(text, live, F, { trace = Live.trace })
     Live.trace(("impOk plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then txt("Txt_Status", "error: " .. tostring(perr)); return end
     S.plan, S.text = plan, text
