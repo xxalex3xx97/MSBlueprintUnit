@@ -275,6 +275,7 @@ local function parse_doc(text)
     if err then bail(err) end
     if type(root) ~= "table" or root[1] ~= nil then bail("bad JSON: top level is not an object") end
     local doc = { name = "", blocks = {}, machines = {} }
+    -- root.SiteOnly (website simulation data, e.g. infinite containers) is never read: absent, null or any shape is fine
     if type(root.DisplayName) == "string" then doc.name = root.DisplayName end
     local bl = root.Blocks
     if type(bl) ~= "table" or not is_array(bl) then bail("bad JSON: Blocks missing or not an array") end

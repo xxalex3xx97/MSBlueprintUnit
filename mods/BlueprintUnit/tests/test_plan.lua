@@ -182,6 +182,12 @@ end
 p, err = P.plan(one_container(200, 200), live({ existing = { ex(60, "BP_ContainerObject_2", "DAT_Container_2", 200, 200) } }), F)
 check("outside keep: plan ok", p ~= nil and err == nil)
 check("outside keep: counted as keep", p and p.counts.keep == 1 and p.counts.place == 0 and p.counts.remove == 0)
+-- website-only root key "SiteOnly": ignored whatever its shape, and absence is fine
+for _, so in ipairs({ '{"InfiniteContainers":[8,386]}', '[]', '"x"', '5', 'null', '{}' }) do
+    local t = one_container(200, 200):gsub('^{', '{"SiteOnly":' .. so .. ',')
+    local pp, ee = P.plan(t, live({ existing = { ex(60, "BP_ContainerObject_2", "DAT_Container_2", 200, 200) } }), F)
+    check("SiteOnly " .. so .. ": ignored", pp ~= nil and ee == nil)
+end
 -- same machine as NEW (not live): left out with a note, the plan still succeeds
 p, err = P.plan(one_container(200, 200), live(), F)
 check("outside new: plan ok, nothing placed", p ~= nil and p.counts.place == 0)
