@@ -22,7 +22,7 @@ end
 L.trace = TRACE
 
 -- per-field trace for late machine entries only (crash hunt); i < TRACE_FROM writes nothing
-local TRACE_FROM = 2100
+local TRACE_FROM = 1
 local function MT(i, m)
     if i and i >= TRACE_FROM then TRACE("m" .. i .. " " .. m) end
 end
