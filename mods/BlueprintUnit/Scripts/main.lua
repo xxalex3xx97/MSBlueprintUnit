@@ -97,12 +97,52 @@ hookOne("/Script/MainSequence.WidgetSubsystem:ToggleWindow", "WidgetSubsystem:To
 hookOne("/Script/MainSequence.WidgetSubsystem:ShowWindow", "WidgetSubsystem:ShowWindow")
 hookOne("/Script/MainSequence.DMSPlayerController:ToggleWidget", "DMSPlayerController:ToggleWidget")
 
+-- ESC close -> the same key press reaches the game's IA_Escape and opens the pause menu. lastEsc = time of our ESC close.
+-- The pause menu SetupWidget post-hook closes it again when it fires within 0.3 s of that close.
+local lastEsc = -1e9
+local PAUSE_CLS = "/Game/Blueprints/Widgets/Menus/WBP_PauseMenu.WBP_PauseMenu_C"
+local pauseHooked = false
+
+local function closePause(w)
+  if not ok(w) then print(TAG .. "pause menu suppress: widget invalid\n") return end
+  local okC, errC = pcall(function() w:CloseSelf() end)
+  local okH, errH = false, nil
+  if not okC then
+    local pc = FindFirstOf("DMSPlayerController")
+    okH, errH = pcall(function() pc:HideWidget(w, false) end)
+  end
+  local how = okC and "CloseSelf" or (okH and "HideWidget" or "failed")
+  print(TAG .. "pause menu suppressed after ESC via " .. how .. (okC and "" or (" err=" .. tostring(errC))) .. "\n")
+end
+
+local function onPause(self)
+  if os.clock() - lastEsc >= 0.3 then return end
+  lastEsc = -1e9
+  local w = unw(self)
+  ExecuteInGameThread(function() pcall(closePause, w) end)
+end
+
+local function hookPause()
+  if pauseHooked then return true end
+  local s, pre, post = pcall(RegisterHook, PAUSE_CLS .. ":SetupWidget", function() end, function(self) pcall(onPause, self) end)
+  if s then pauseHooked = true end
+  print(TAG .. "hook pause menu " .. (s and ("registered ids=" .. tostring(pre) .. "," .. tostring(post)) or "FAILED") .. " path=" .. PAUSE_CLS .. "\n")
+  return s
+end
+if not hookPause() then
+  -- class not loaded yet: retry when a pause menu object is created (full path, then short name)
+  for _, n in ipairs({ PAUSE_CLS, "WBP_PauseMenu_C" }) do
+    local sN = pcall(NotifyOnNewObject, n, function() pcall(ExecuteInGameThread, hookPause) end)
+    print(TAG .. "pause menu NotifyOnNewObject " .. n .. (sN and " armed" or " FAILED") .. "\n")
+  end
+end
+
 -- keys: all do nothing while our window is closed
 pcall(function()
   RegisterKeyBind(Key.ESCAPE, function()
     pcall(function()
-      if BPU.impOpen() then pcall(ExecuteInGameThread, BPU.impClose)
-      elseif BPU.isOpen() then pcall(ExecuteInGameThread, BPU.close) end
+      if BPU.impOpen() then lastEsc = os.clock(); pcall(ExecuteInGameThread, BPU.impClose)
+      elseif BPU.isOpen() then lastEsc = os.clock(); pcall(ExecuteInGameThread, BPU.close) end
     end)
   end)
 end)
