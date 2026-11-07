@@ -14,6 +14,9 @@ function Find-Cmd([string[]]$names) {
 }
 
 $lua = Find-Cmd @('lua.exe', 'lua5.4', 'luajit')
+if (-not $lua -and (Test-Path -LiteralPath 'F:\MSDemoMods\tools\lua\lua.exe' -PathType Leaf)) {
+    $lua = 'F:\MSDemoMods\tools\lua\lua.exe'  # portable Lua 5.4.7 built from UE4SS sources (see tools\lua\README.md)
+}
 $nvim = $null
 if (-not $lua) { $nvim = Find-Cmd @('nvim.exe') }
 $luac = Find-Cmd @('luac.exe', 'luac5.4', 'luac')
