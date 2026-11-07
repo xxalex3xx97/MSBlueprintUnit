@@ -267,24 +267,17 @@ function L.snapshot(U, F)
     return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables }
 end
 
--- slots: GetItemSlots() first, else ItemSlots property. ok=false when the inventory is invalid or unreadable.
+-- MSCore 0.7.3 native read: factory_native.read_inventory(id) -> slots {item="ITEM_X" | "", amount, max}, or nil, err.
+-- ok=false when the inventory is invalid, MSCore is older than 0.7.3, or the native read fails (err says why).
 function L.read_inv(inv)
     if not valid(inv) then return { ok = false, slots = {} } end
-    local okG, src = pcall(function() return inv:GetItemSlots() end)
-    if not (okG and src ~= nil) then src = rd(inv, "ItemSlots") end
-    local slots = {}
-    local okE = pcall(function()
-        each(src, function(s)
-            local it = rd(s, "Item")
-            local item, mx = "", 1
-            if valid(it) then
-                item = nm(it)
-                mx = unw(rd(it, "MaxStackSize")) or 1
-            end
-            slots[#slots + 1] = { item = item, amount = unw(rd(s, "Amount")) or 0, max = mx }
-        end)
-    end)
-    return { ok = okE and src ~= nil, id = unw(rd(inv, "ID")), slots = slots }
+    local id = unw(rd(inv, "ID"))
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.read_inventory) then
+        return { ok = false, id = id, slots = {}, err = "MSCore 0.7.3 or newer is needed (factory_native.read_inventory missing)" }
+    end
+    local s, err = FN.read_inventory(id)
+    return { ok = s ~= nil, id = id, slots = s or {}, err = err }
 end
 
 function L.creative(player, ctl)

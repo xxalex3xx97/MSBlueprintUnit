@@ -1,5 +1,5 @@
 -- BlueprintUnit: Blueprint Unit window (bpu_window.lua) on MSCore. F / ESC = close (ESC closes the import modal first).
--- Needs MSCore >= 0.7.2 (Lua api 3 + native api 4). Opened by post-hooks on WidgetSubsystem:ToggleWindow, WidgetSubsystem:ShowWindow
+-- Needs MSCore >= 0.7.3 (Lua api 3 + native api 4). Opened by post-hooks on WidgetSubsystem:ToggleWindow, WidgetSubsystem:ShowWindow
 -- and DMSPlayerController:ToggleWidget (ONLY when an arg is the block, class BPO_BlueprintUnit_C). Blocks and research come from pak100.
 
 local TAG = "[BPUnit] "

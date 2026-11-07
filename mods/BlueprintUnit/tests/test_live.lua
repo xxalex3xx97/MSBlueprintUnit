@@ -32,9 +32,10 @@ local function named(s, extra)
     o.GetClass = function() return c or named("?") end
     return o
 end
--- MSCore 0.7.2 native read: Live.read_blocks / read_machines take their data from here (no Lua struct reads).
--- fakeMachines is what make_world sets for the station; fakeCalls counts native calls.
+-- MSCore 0.7.2 native read_station + 0.7.3 native read_inventory: Live takes its data from here (no Lua struct reads).
+-- fakeMachines / fakeInv (id -> slot structs) are what make_world sets; fakeCalls counts read_station calls.
 local fakeCalls = 0
+local fakeInv = {}
 local fakeMachines = {
     { id = 10, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", x = 1, y = 1, h = 0, rot = 0, cfg = "\1\2\255" },
     { id = 11, cls = "BP_Splitter", bcls = "BP_Splitter", x = 3, y = 1, h = 0, rot = 0, cfg = "" },
@@ -43,6 +44,20 @@ local fakeMachines = {
 Live.mscore = { factory_native = { read_station = function(sid)
     fakeCalls = fakeCalls + 1
     return { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0 } }, fakeMachines
+end,
+-- native shape: {item="ITEM_X" | "", amount, max} per slot; the fake keeps game-like slot structs {Item, Amount}
+read_inventory = function(id)
+    local src = fakeInv[id]
+    if not src then return nil, "no inventory " .. tostring(id) end
+    local out = {}
+    for i, d in ipairs(src) do
+        if d.Item then
+            out[i] = { item = d.Item:GetFName():ToString(), amount = d.Amount, max = d.Item.MaxStackSize }
+        else
+            out[i] = { item = "", amount = 0, max = 1 }
+        end
+    end
+    return out
 end } }
 -- native machine entry (read_station shape)
 local function rm(id, cls, x, y, cfg, h, rot)
@@ -62,10 +77,11 @@ end
 -- station 42 (block at 0,0) with container 77 (unit inv 8), decoy container for station 99, player inv 7
 local function make_world(machines, uslots, pslots)
     fakeMachines = machines
+    fakeInv = { [8] = uslots, [7] = pslots }
     -- no Blueprint table on the station: a Lua struct read of Blocks/Machines would fail
     local st = named("BP_StationObject_C_0", { ID = 42, Class = named("BP_StationObject_C") })
-    local unit = { ID = 8, IsValid = alive, slots = uslots, GetItemSlots = function(self) return self.slots end }
-    local pinv = { ID = 7, IsValid = alive, ItemSlots = pslots }
+    local unit = { ID = 8, IsValid = alive }
+    local pinv = { ID = 7, IsValid = alive }
     local player = named("BP_PlayerObject_C", { bCreative = false, Inventory = pinv })
     world = {
         StationObject = { named("Default__BP_StationObject_C", { ID = 42 }), st },
@@ -158,13 +174,24 @@ check(Live.read_buildables(F) == bd, "read_buildables: cached")
 local rc = Live.read_recipes()
 check(rc.REC_TitaniumPlates == "TitaniumPlates" and Live._recobj.TitaniumPlates == world.Recipe[1], "read_recipes: name map + _recobj")
 
+fakeInv = { [8] = W.uslots, [7] = W.pslots }  -- later make_world calls replace it
 local ui = Live.read_inv(W.unit)
 check(ui.ok and ui.id == 8 and #ui.slots == 2 and ui.slots[1].item == "ITEM_A" and ui.slots[1].amount == 5 and ui.slots[1].max == 50,
-      "read_inv: GetItemSlots, item name, amount, max")
+      "read_inv: native read_inventory, item name, amount, max")
 check(ui.slots[2].item == "" and ui.slots[2].amount == 0, "read_inv: empty slot item \"\"")
 local pi = Live.read_inv(W.pinv)
-check(pi.ok and pi.id == 7 and #pi.slots == 2, "read_inv: ItemSlots fallback")
+check(pi.ok and pi.id == 7 and #pi.slots == 2, "read_inv: player inventory by id")
 check(not Live.read_inv(nil).ok, "read_inv: nil inventory -> ok=false")
+check(not Live.read_inv({ ID = 99, IsValid = alive }).ok and Live.read_inv({ ID = 99, IsValid = alive }).err == "no inventory 99",
+      "read_inv: native read fails -> ok=false with its err")
+do
+    local saved = Live.mscore
+    Live.mscore = {}
+    local nat = Live.read_inv(W.unit)
+    Live.mscore = saved
+    check(not nat.ok and nat.id == 8 and #nat.slots == 0 and tostring(nat.err):find("0.7.3", 1, true) ~= nil,
+          "read_inv without read_inventory: ok=false, error names 0.7.3")
+end
 
 check(Live.creative(W.player, {}) == false and Live.creative({}, { bCreative = true }) == true and Live.creative({}, {}) == false,
       "creative: player, then ctl, then false")
@@ -191,6 +218,7 @@ local cl = io1.costs({ { bdat = "DAT_ConveyorBelt" }, { bdat = "DAT_Splitter" } 
 check(cl[1].ITEM_A == 2 and cl[2].ITEM_B == 3, "costs: per machine")
 check(io1.creative() == false and io1.unit_ids().unit_id == 8 and io1.unit_ids().player_id == 7, "creative and unit_ids")
 check(io1.read_inv("unit").id == 8 and io1.read_inv("player").id == 7, "io.read_inv: unit and player")
+check(io1.read_inv("unit").slots[1].item == "ITEM_A" and io1.read_inv("player").slots[2].item == "", "io.read_inv: native slots")
 check(#io1.scan(42) == 3 and select(1, io1.scan(999)) == nil and select(2, io1.scan(999)) == "station not found", "scan: by id, station not found")
 
 -- send_changes: recipe once, one port call per index
