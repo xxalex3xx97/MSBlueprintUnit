@@ -265,7 +265,8 @@ function L.read_buildables(F)
             each(rd(b, "ItemCost"), function(c)
                 cost[nm(rd(c, "Item"))] = unw(rd(c, "Amount"))
             end)
-            BUILDABLES[name] = { bcls = clsname(b), cost = cost }
+            -- the Buildable's own "Class" PROPERTY = machine class it builds (GetClass() would give "Buildable")
+            BUILDABLES[name] = { bcls = short(nm(rd(b, "Class"))), cost = cost }
         end
     end
     return BUILDABLES

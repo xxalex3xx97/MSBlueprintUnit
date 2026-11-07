@@ -59,8 +59,11 @@ local function mach(id, cls, x, y, cfg, h, rot)
     return strukt({ Class = named(cls), MachineID = id, SerializedMachineConfig = cfg,
              Transform = xform(x, y, h or 0, rot or 0) }, MACH_OK)
 end
+-- a Buildable keeps a real "Class" PROPERTY (the machine class it builds); its UClass is "Buildable"
 local function bld(dat, cls, cost)
-    return named(dat, { Class = named(cls), ItemCost = cost })
+    local o = named(dat, { ItemCost = cost })
+    o.Class = named(cls)
+    return o
 end
 
 -- station 42 (block at 0,0) with container 77 (unit inv 8), decoy container for station 99, player inv 7
