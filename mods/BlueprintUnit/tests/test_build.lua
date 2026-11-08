@@ -158,12 +158,16 @@ local function fake(spec)
     local io = {}
     local redirect = type(spec.redirect) == "string" and spec.redirect:sub(1, 2) == "on"
     f.rd_log = {}   -- redirect switch calls in order: "enable:true", "status", "enable:false"
-    if spec.redirect ~= nil then io.redirect_status = function() f.rd_log[#f.rd_log + 1] = "status"; return spec.redirect end end
+    -- the switch has a state: it starts as spec.rd_initial (default off; without redirect_enable it is simply spec.redirect), enable(true) turns it
+    -- into spec.redirect, enable(false) into off. redirect_status reads the state.
+    f.rd_state = spec.no_enable and spec.redirect or spec.rd_initial or "off"
+    if spec.redirect ~= nil then io.redirect_status = function() f.rd_log[#f.rd_log + 1] = "status"; return f.rd_state end end
     if not spec.no_enable then
         io.redirect_enable = function(on)
             f.rd_log[#f.rd_log + 1] = "enable:" .. tostring(on)
             if spec.enable_error then error("enable boom") end
-            return on and (spec.redirect or "off") or "off"
+            f.rd_state = on and (spec.redirect or "off") or "off"
+            return f.rd_state
         end
     end
     f.order = {}   -- sent commands in order: "rm:<id>" / "pl:<x>"
@@ -2135,7 +2139,7 @@ do
     local b = B.new(f.io)
     local ok = b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
     local st = run(b, f)
-    check(ok and st.flow == "redirect" and f.rd_log[1] == "enable:true" and f.rd_log[2] == "status",
+    check(ok and st.flow == "redirect" and f.rd_log[1] == "status" and f.rd_log[2] == "enable:true" and f.rd_log[3] == "status",
           "redirect switch: enable(true) before status, flow redirect (" .. table.concat(f.rd_log, ",") .. ")")
     check(st.state == "done" and count(f.rd_log, "enable:false") == 1 and f.rd_log[#f.rd_log] == "enable:false",
           "redirect switch: enable(false) once on finish")
@@ -2147,7 +2151,7 @@ do
     local b = B.new(f.io)
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
     local st = run(b, f)
-    check(st.flow == "legacy" and f.rd_log[1] == "enable:true" and count(f.rd_log, "enable:false") == 1,
+    check(st.flow == "legacy" and f.rd_log[2] == "enable:true" and count(f.rd_log, "enable:false") == 1,
           "redirect switch: legacy flow enabled then released once (" .. table.concat(f.rd_log, ",") .. ")")
 end
 
@@ -2199,6 +2203,16 @@ do
     local b = B.new(f.io)
     local ok, msg = b:start(nil, {})
     check(not ok and msg == "error: import first" and #f.rd_log == 0, "redirect switch: refused before enable -> no enable call")
+end
+
+-- redirect already on before the build (opt-in file, another mod): the build leaves it on, it never switches off what it did not switch on
+do
+    local f = fake({ redirect = RON2, rd_initial = RON2, player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and count(f.rd_log, "enable:false") == 0 and f.rd_state == RON2,
+          "redirect switch: already on before the build -> never switched off (" .. table.concat(f.rd_log, ",") .. ")")
 end
 
 -- io without redirect_enable (old MSCore): treated as off, no error, flow still from the status

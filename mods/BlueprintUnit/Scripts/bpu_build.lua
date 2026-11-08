@@ -1561,7 +1561,10 @@ function B.new(io)
         end
         -- redirect on for this run only (off again on every end, see release_redirect). Absent io.redirect_enable = off.
         if io.redirect_enable then
-            R.redirect_ours = true
+            -- already on (opt-in file refund_redirect_on.txt, another mod): leave it on afterwards, only switch off what we switched on
+            local oks, prev = false, nil
+            if io.redirect_status then oks, prev = pcall(io.redirect_status) end
+            R.redirect_ours = not (oks and type(prev) == "string" and prev:sub(1, 2) == "on")
             pcall(io.redirect_enable, true)   -- status is read below, the same as before
         end
         local rs = "off"
