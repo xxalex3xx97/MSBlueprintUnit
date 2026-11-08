@@ -394,5 +394,57 @@ check("kept splitter: no live cfg counts as different", split_note(ps3))
 local ps4 = split_kept("\1\2")
 check("kept splitter: same bytes -> no note", ps4 ~= nil and not split_note(ps4))
 
+-- Station Build (opts.station_build): missing station blocks are classified, not refused
+local SB_BOUNDS = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }
+local SB_INFO = {
+    BPO_Station_01 = { station = true, unlocked = true, bounds = SB_BOUNDS, cost = { ITEM_A = 2 } },
+    BPO_Station_02 = { station = true, unlocked = true, bounds = SB_BOUNDS, cost = { ITEM_B = 1 } },
+}
+local function sb_info(cls) return SB_INFO[cls] end
+local function sb_json(...)
+    local parts = { ... }
+    return '{"Version":2,"Blocks":[' .. table.concat(parts, ",") .. '],"DefaultMachines":[]}'
+end
+local function sb_block(cls, x, y, h)
+    return '{"Class":"/Game/B/' .. cls .. '.' .. cls .. '_C","GridLocation":{"X":' .. x .. ',"Y":' .. y .. '},"Height":' .. h .. ',"GridRotation":0}'
+end
+local function sb_plan(text, over, trace)
+    local l = live({ block_info = sb_info, have = { ITEM_A = 10, ITEM_B = 10 } })
+    for k, v in pairs(over or {}) do l[k] = v end
+    return P.plan(text, l, F, { station_build = true, trace = trace })
+end
+local function has_note(p, s)
+    for _, n in ipairs(p and p.notes or {}) do if n:find(s, 1, true) then return true end end
+    return false
+end
+
+local trace_lines = {}
+local sp = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), nil, function(t) trace_lines[#trace_lines + 1] = t end)
+check("sb: valid plan, one block accepted", sp and sp.valid and sp.block_count == 1 and sp.blocks[1].gx == 2)
+check("sb: block cost in need rows", sp and sp.block_need.ITEM_A == 2 and #P.cost_rows(sp) == 1 and P.cost_rows(sp)[1].need == 2)
+check("sb: summary adds blocks N", sp and P.summary(sp) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1")
+check("sb: no refusal when enough", sp and sp.block_refuse == nil)
+local self_line = false
+for _, t in ipairs(trace_lines) do if t == "station blocks self overlaps: 0" then self_line = true end end
+check("sb: trace self overlaps 0", self_line)
+
+-- shortfall: refused only when not creative
+local sh = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 } })
+check("sb: shortfall list", sh and sh.block_refuse and #sh.block_refuse == 1 and sh.block_refuse[1].item == "ITEM_A"
+    and sh.block_refuse[1].need == 2 and sh.block_refuse[1].have == 1)
+local cr = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 }, creative = true })
+check("sb: creative skips refusal", cr and cr.block_refuse == nil and cr.block_count == 1)
+
+-- occupied cell (BPO_Station_02 overlaps live BPO_Station_01 at 0,0) and unknown class
+local oc = sb_plan(sb_json(sb_block("BPO_Station_02", 0, 0, 0), sb_block("BPO_Gone", 5, 0, 0)))
+check("sb: occupied skipped with note", oc and oc.block_count == 0 and has_note(oc, "BPO_Station_02 at 0,0,0: cell occupied"))
+check("sb: unknown class note", has_note(oc, "BPO_Gone at 5,0,0: class not in this game"))
+
+-- off: same file refused as before, nothing added
+local off, off_err = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F, { station_build = false })
+check("sb off: still refused", off == nil and off_err:find("Blocks are not on the grid", 1, true) ~= nil)
+local off2 = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F)
+check("sb default (no opts): refused", off2 == nil)
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
