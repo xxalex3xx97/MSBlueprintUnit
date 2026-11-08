@@ -953,9 +953,22 @@ function B.new(io)
         R.t_next = now + POLL_MS
     end
 
+    local function slots_text(slots)
+        local parts = {}
+        for _, s in ipairs(slots) do
+            local item, amount = s.item or "", s.amount or 0
+            parts[#parts + 1] = (item ~= "" and amount > 0) and (shortname(item) .. ":" .. amount) or "-"
+        end
+        return table.concat(parts, " ")
+    end
     local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
     -- end of the restore phase (probe: its summary note first)
     local function restore_end()
+        -- unit stacks at the end (read only: a failed read is not an error here)
+        if io.read_inv then
+            local ps2, us2 = read_both()
+            if ps2 then trace("restore unit stacks (end): " .. slots_text(us2)) end
+        end
         if (R.skipped or 0) > 0 then rs_note(("%s command(s) skipped (refused)"):format(R.skipped)) end
         local j = R.probe_job
         if R.probe and j then
@@ -967,14 +980,6 @@ function B.new(io)
     local function delivered(n, id)
         R.rcount = R.rcount + n
         if n > 0 and not R.rseen[id] then R.rseen[id] = true; R.rcont = R.rcont + 1 end
-    end
-    local function slots_text(slots)
-        local parts = {}
-        for _, s in ipairs(slots) do
-            local item, amount = s.item or "", s.amount or 0
-            parts[#parts + 1] = (item ~= "" and amount > 0) and (shortname(item) .. ":" .. amount) or "-"
-        end
-        return table.concat(parts, " ")
     end
     -- probe: slot lists of the unit and the container
     local function probe_trace(us, cslots)
@@ -1063,7 +1068,7 @@ function B.new(io)
                     local need = it.count
                     local have = get(totals(um), it.name)
                     if have < need then
-                        rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), it.count, have))
+                        rs_note(("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have), commas(it.count), shortname(it.name), commas(it.count - have)))
                         jm.short[#jm.short + 1] = { name = it.name, count = need - have }
                         need = have
                     end
@@ -1203,6 +1208,7 @@ function B.new(io)
         for k, v in pairs(R.skip_u or {}) do eU[k] = get(eU, k) + v end   -- skipped moves never left the unit
         local eUo = only(eU)
         if not same_totals(uT, eUo) then why, udet = "unit", "unit: " .. rows(uT, eUo) end
+        local unit_ok = (why == nil)
         -- a container that matched its model once is not read again (jm.confirmed)
         R.last_reads, R.last_slow, R.last_confirmed = 0, 0, 0
         for _, jm in ipairs(R.pm.jobs) do
@@ -1221,11 +1227,20 @@ function B.new(io)
                 local eC = totals(jm.slots)
                 for k, v in pairs((R.skip_c or {})[jm.id] or {}) do eC[k] = get(eC, k) - v end
                 local eCo = only(eC)
+                -- drain: the unit matches the model, the container did not go up since the last read, no move of it was skipped
+                local rose = false
+                if jm.prev then
+                    for _, k in ipairs(names) do if cT[k] > jm.prev[k] then rose = true end end
+                end
                 if geq(cT, eCo) then jm.confirmed = true
+                elseif unit_ok and jm.prev and not rose and (R.skip_c or {})[jm.id] == nil then
+                    jm.confirmed, jm.drained = true, true
+                    trace(("restore drain: container id=%s treated as drained (%s)"):format(tostring(jm.id), rows(cT, eCo)))
                 else
                     why = why or ("container " .. tostring(jm.id))
                     cdet = cdet or ("container id " .. tostring(jm.id) .. ": " .. rows(cT, eCo))
                 end
+                jm.prev = cT
             end
         end
         -- split route, nothing skipped: the unit slots must match the model too (slot layout after the sort and the splits)
@@ -1245,6 +1260,9 @@ function B.new(io)
             local _, _, cinv = contents_of(R.pm.jobs[1])
             if ps and cinv then probe_trace(us2, cinv.slots) end
         end
+        local drained = {}
+        for _, jm in ipairs(R.pm.jobs) do if jm.drained then drained[#drained + 1] = tostring(jm.id) end end
+        if #drained > 0 then trace("restore drained containers: " .. table.concat(drained, ",")) end
         for _, jm in ipairs(R.pm.jobs) do
             local sk = 0
             for _, v in pairs((R.skip_c or {})[jm.id] or {}) do sk = sk + v end
@@ -1271,6 +1289,7 @@ function B.new(io)
         if not R.pm then
             local ps, us, err = read_both()
             if not ps then return fail(err) end
+            trace("restore unit stacks (start): " .. slots_text(us))
             R.pq, R.pm = pipe_build(us)
             full_notes(R.pm.full)
             R.qpos = 1

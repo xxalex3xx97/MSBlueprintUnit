@@ -1214,6 +1214,7 @@ do
     check(#f.cmd_log == 3 and cmds_of(f, 2) == 3 and #f.violations == 0 and f.cmd_log[1][1] == 202 and f.cmd_log[1][2] == cid + 5000,
           "restore whole stacks: 3 TRANSFER (2) unit -> container INVENTORY id, no other action, no violation (" .. #f.cmd_log .. " sent)")
     check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=120 moves=3 moved=120 short=0"), "restore whole stacks: plan trace")
+    check(starts(traces, "restore unit stacks (start): ") and starts(traces, "restore unit stacks (end): "), "restore: unit stack traces at start and end")
 end
 
 -- SM 12, raw Plate 25: slot max 300, 32-slot container = 9600. Unit 32 full stacks of 300 -> all 9600 go in, short 0
@@ -1382,6 +1383,30 @@ do
     local cid = new_cont(f)
     check(st.state == "done" and cid and cont_plate(f, cid) > 120 and st.text:find("stalled", 1, true) == nil and #f.violations == 0,
           "inflow: container above the model (lower bound) confirms, no stall (" .. st.text .. ")")
+end
+
+-- restore drain: the unit matches, the container loses 5 Plate per read (belts take it) -> drained, not a stall
+do
+    local f = whole_fake()
+    local orig = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id)
+        local c = f.containers[id]
+        if c and id > 500 and #f.cmd_log >= 3 then
+            local s = c.slots[1]
+            s.amount = math.max(0, s.amount - 5)
+            if s.amount == 0 then s.item = "" end
+        end
+        return orig(id)
+    end
+    local traces = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and st.text:find("stalled", 1, true) == nil and st.text:find("check both inventories", 1, true) == nil
+          and #f.violations == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
+          "drain: container below the model and falling, unit matches -> no stall (" .. st.text .. ")")
+    check(cid and starts(traces, "restore drain: container id=" .. cid) and starts(traces, "restore drained containers: " .. cid),
+          "drain: drain and drained-containers traces name the container")
 end
 
 -- live inflow, nothing applied (unit unchanged): +1 Plate per read keeps the container moving, the stall clock still fires
@@ -1744,7 +1769,18 @@ do
     local st = run(b, f, 400)
     local cid = new_cont(f)
     check(cid and cont_plate(f, cid) == 70 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.splits == 0 and #f.violations == 0
-          and st.text:find("Plate x120 not restored (unit has 70)", 1, true) ~= nil, "split unit short: 70 in, note, no split (" .. st.text .. ")")
+          and st.text:find("plan reduced: unit has 70 of 120 for Plate (short 50)", 1, true) ~= nil, "split unit short: 70 in, note, no split (" .. st.text .. ")")
+end
+
+-- plan reduced: unit has 30, job wants 50 -> 30 in, note names have / want / short, no old wording
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 50 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 30 and #f.violations == 0
+          and st.text:find("plan reduced: unit has 30 of 50 for Plate (short 20)", 1, true) ~= nil
+          and st.text:find("not restored (unit has", 1, true) == nil, "plan reduced: 30 in, note 'unit has 30 of 50 (short 20)' (" .. st.text .. ")")
 end
 
 -- container room 50 (one slot, cap 50), unit 40 + 40, need 80 -> 40 direct, 10 split, container 50, unit keeps 30, full note

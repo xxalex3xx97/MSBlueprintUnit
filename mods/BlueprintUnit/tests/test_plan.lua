@@ -188,12 +188,12 @@ for _, so in ipairs({ '{"InfiniteContainers":[8,386]}', '[]', '"x"', '5', 'null'
     local pp, ee = P.plan(t, live({ existing = { ex(60, "BP_ContainerObject_2", "DAT_Container_2", 200, 200) } }), F)
     check("SiteOnly " .. so .. ": ignored", pp ~= nil and ee == nil)
 end
--- same machine as NEW (not live): left out with a note, the plan still succeeds
+-- same machine as NEW (not live): placed anyway (the game does not check floors), with a note
 p, err = P.plan(one_container(200, 200), live(), F)
-check("outside new: plan ok, nothing placed", p ~= nil and p.counts.place == 0)
+check("outside new: plan ok, placed", p ~= nil and err == nil and p.counts.place == 1)
 local noted = false
-for _, n in ipairs(p and p.notes or {}) do if n:find("outside the modeled floors", 1, true) then noted = true end end
-check("outside new: skip note", noted)
+for _, n in ipairs(p and p.notes or {}) do if n == "1 placed outside the modeled floors: DAT_Container_2 x1" then noted = true end end
+check("outside new: placed note", noted)
 -- placed belt overlapping a kept container: still checked (kept-vs-kept is not)
 local ov = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
     '{"Class":"BP_ContainerObject_2","DefaultName":"DAT_Container_2","Transform":{"GridLocation":{"X":12,"Y":12},"Height":0,"GridRotation":0}},' ..
@@ -293,18 +293,18 @@ local ri, rp = row_of(rows, "ITEM_IronOre"), row_of(rows, "ITEM_Plate")
 check("cost rows: IronOre need 120 net 120", ri and ri.need == 120 and ri.net == 120)
 check("cost rows: Plate refund 7 net -7", rp and rp.refund == 7 and rp.net == -7)
 
--- skipped underground (entrance outside the modeled floors): its exit cell must not drive a removal.
--- Live Dock sits on the exit cell (never removed), so a leaked exit cell would refuse the whole plan.
+-- off-floor underground pair: placed anyway (one machine + exit cell), note counts the machine.
+-- A live Dock on the exit cell refused the plan (never-removed machine in the way), so the case has no live Dock.
 do
     local ugout = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
         '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":21,"Y":1},"Height":0,"GridRotation":0}},' ..
         '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":25,"Y":1},"Height":0,"GridRotation":0}}]}'
-    local pu, eu = P.plan(ugout, live({ existing = { ex(70, "BP_DockObject", "DAT_Dock", 25, 1) } }), F)
-    check("skipped ug: plan ok (exit cell not in the way)", pu ~= nil and eu == nil)
-    check("skipped ug: nothing placed, no cells, no removal", pu and pu.counts.place == 0 and #pu.cells == 0 and pu.counts.remove == 0)
+    local pu, eu = P.plan(ugout, live(), F)
+    check("off-floor ug: plan ok", pu ~= nil and eu == nil)
+    check("off-floor ug: placed 1, exit cell 1, no removal", pu and pu.counts.place == 1 and #pu.cells == 1 and pu.counts.remove == 0)
     local nu = false
-    for _, n in ipairs(pu and pu.notes or {}) do if n:find("outside the modeled floors", 1, true) then nu = true end end
-    check("skipped ug: skip note", nu)
+    for _, n in ipairs(pu and pu.notes or {}) do if n:find("placed outside the modeled floors", 1, true) then nu = true end end
+    check("off-floor ug: placed note", nu)
 end
 
 -- negative ids (bpu_live overlay, not in the game view yet): never removed, never stale
@@ -313,6 +313,62 @@ check("virtual stale: not removed, not in stale_ids", p and p.counts.remove == 0
 -- negative id in the way of a placement: refused up front (send_remove would refuse it mid-build)
 p, err = P.plan(read("belts2.json"), live({ existing = { { id = -2, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", dat = "DAT_ConveyorBelt", x = 1, y = 1, h = 0, rot = 2 } } }), F)
 check("virtual conflict: refused, not queued", p == nil and err ~= nil and err:find("not in the game view yet", 1, true) ~= nil)
+
+-- ===== off-floor placement notes and restore note =====
+local RESTORE_NOTE = "items on belts and in machines are not restored (the blueprint holds container contents only)"
+local function has_note(pl, text)
+    for _, n in ipairs(pl and pl.notes or {}) do if n == text then return true end end
+    return false
+end
+-- placed container with contents on the floor: restore note; belts-only doc (no contents): no restore note
+check("restore note: container contents on the floor", has_note(pc, RESTORE_NOTE))
+check("restore note: none without container contents", not has_note(plan_of("belts2.json"), RESTORE_NOTE))
+
+-- empty block list: every machine placed off-floor, exactly one note with N = machine count
+local nb_doc = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
+    '{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":1,"Y":1},"Height":0,"GridRotation":0}},' ..
+    '{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":3,"Y":1},"Height":0,"GridRotation":0}}]}'
+p, err = P.plan(nb_doc, live({ blocks = {} }), F)
+check("no blocks: plan ok, both placed", p ~= nil and err == nil and p.counts.place == 2)
+local n_placed_notes = 0
+for _, n in ipairs(p and p.notes or {}) do if n:find("placed outside the modeled floors", 1, true) then n_placed_notes = n_placed_notes + 1 end end
+check("no blocks: one placed note, N = 2", n_placed_notes == 1 and has_note(p, "2 placed outside the modeled floors: DAT_ConveyorBelt x2"))
+
+-- integration: Main_Base-style station; every machine on a modeled floor, so no off-floor note
+do
+    local B = {
+        { "BPO_Station_02A", 2, 42, 0, 0 }, { "BPO_Station_02A", 2, -42, 0, 0 },
+        { "BPO_Station_02A", 14, 10, 4, 0 }, { "BPO_Station_02A", -2, 10, 4, 0 },
+        { "BPO_Dock_2", 2, 50, 0, 1 }, { "BPO_Dock_2", 2, -50, 0, 3 },
+        { "BPO_ElevatorBlock_03", 16, 16, 0, 0 }, { "BPO_ElevatorBlock_03", -4, 16, 0, 0 },
+    }
+    local dblocks, lblocks = {}, {}
+    for i, b in ipairs(B) do
+        dblocks[i] = ('{"Class":"%s","GridLocation":{"X":%d,"Y":%d},"Height":%d,"GridRotation":%d}'):format(b[1], b[2], b[3], b[4], b[5])
+        lblocks[i] = { class = b[1], gx = b[2], gy = b[3], h = b[4], rot = b[5] }
+    end
+    local function mach(cls, dat, x, y)
+        return ('{"Class":"%s","DefaultName":"%s","Transform":{"GridLocation":{"X":%d,"Y":%d},"Height":0,"GridRotation":0}}'):format(cls, dat, x, y)
+    end
+    local ms = {
+        mach("BP_ContainerObject_2", "DAT_Container_2", 8, 386),
+        mach("BP_ContainerObject_2", "DAT_Container_2", 24, 386),
+        mach("BP_ContainerObject_2", "DAT_Container_2", 8, 376),
+        mach("BP_ConveyorBeltObject", "DAT_ConveyorBelt", 5, 367),
+        mach("BP_ConveyorBeltObject", "DAT_ConveyorBelt", 37, -367),
+        mach("BP_ConveyorBeltObject", "DAT_ConveyorBelt", 123, 111),
+        mach("BP_ConveyorBeltObject", "DAT_ConveyorBelt", -27, 111),
+    }
+    local text = '{"Version":2,"Blocks":[' .. table.concat(dblocks, ",") .. '],"DefaultMachines":[' .. table.concat(ms, ",") .. "]}"
+    local pi, ei = P.plan(text, live({ blocks = lblocks }), F)
+    check("integration: plan ok", pi ~= nil and ei == nil)
+    check("integration: every machine placed", pi ~= nil and pi.counts.place == #ms)
+    local off_note = false
+    for _, n in ipairs(pi and pi.notes or {}) do
+        if n:find("skipped (outside", 1, true) or n:find("placed outside", 1, true) then off_note = true end
+    end
+    check("integration: no off-floor note", pi ~= nil and not off_note)
+end
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -53,7 +53,7 @@ M.tables = { -- machine DAT -> footprint {w,h} in cells (half extents); odd rot 
 M.block_floor = { -- block class -> floor {w,h} half extents in units; nofloor = no floor rect
     BPO_CommandModule = { w = 0, h = 0 },
     BPO_Dock = { w = 0, h = 0, nofloor = true },
-    BPO_Dock_2 = { w = 14, h = 30 },
+    BPO_Dock_2 = { w = 30, h = 30 },
     BPO_ElevatorBlock_03 = { w = 12, h = 12 },
     BPO_MiningDroneBayBlock = { w = 0, h = 0 },
     BPO_ShipyardCore = { w = 0, h = 0, nofloor = true },
@@ -99,8 +99,42 @@ function M.floor_rects(blocks, tbl)
     return out
 end
 
+-- real floors sit 2 units inside their 64-unit pitch, so neighbours leave 4-6 unit gaps that belts/machines cross:
+-- every rect is padded by PAD and a footprint is valid when the UNION of padded same-layer rects covers it.
+-- footprint is inflated by PAD too (morphological closing): gaps <= 2*PAD between floors are bridged,
+-- a lone floor edge stays exact (a footprint hanging 1 past it fails). ponytail: exact cell extents if the probe gives them
+M.PAD = 3
+local function covered(floors, layer, x0, x1, y0, y1)
+    local rs, xs, ys = {}, { x0, x1 }, { y0, y1 }
+    for _, f in ipairs(floors) do
+        if f.layer == layer then
+            local a, b, c, d = f.x - f.w - M.PAD, f.x + f.w + M.PAD, f.y - f.h - M.PAD, f.y + f.h + M.PAD
+            if a < x1 and b > x0 and c < y1 and d > y0 then
+                rs[#rs + 1] = { a, b, c, d }
+                if a > x0 and a < x1 then xs[#xs + 1] = a end
+                if b > x0 and b < x1 then xs[#xs + 1] = b end
+                if c > y0 and c < y1 then ys[#ys + 1] = c end
+                if d > y0 and d < y1 then ys[#ys + 1] = d end
+            end
+        end
+    end
+    table.sort(xs); table.sort(ys)
+    for i = 1, #xs - 1 do
+        for j = 1, #ys - 1 do
+            if xs[i + 1] > xs[i] and ys[j + 1] > ys[j] then
+                local cx, cy, hit = (xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2, false
+                for _, r in ipairs(rs) do
+                    if cx > r[1] and cx < r[2] and cy > r[3] and cy < r[4] then hit = true break end
+                end
+                if not hit then return false end
+            end
+        end
+    end
+    return true
+end
+
 -- floors: list from floor_rects. existing: machine records {dat,x,y,h,rot}. m: {dat,x,y,h,rot}.
--- Rules (probe pp_check_new): parity (x-w and y-h even); inside one floor of the same layer (DAT_SignWall exempt);
+-- Rules (probe pp_check_new): parity (x-w and y-h even); covered by the union of padded floors of the same layer (DAT_SignWall exempt);
 -- no overlap with an existing machine of the same layer. Returns true, or false + reason.
 function M.validate_place(floors, existing, m)
     local w, h = M.footprint(m.dat, m.rot)
@@ -110,14 +144,7 @@ function M.validate_place(floors, existing, m)
     end
     local layer = M.layer(m.h)
     if m.dat ~= "DAT_SignWall" then
-        local inside = false
-        for _, f in ipairs(floors) do
-            if f.layer == layer and m.x - w >= f.x - f.w and m.x + w <= f.x + f.w
-                and m.y - h >= f.y - f.h and m.y + h <= f.y + f.h then
-                inside = true
-                break
-            end
-        end
+        local inside = covered(floors, layer, m.x - w - M.PAD, m.x + w + M.PAD, m.y - h - M.PAD, m.y + h + M.PAD)
         if not inside then return false, "outside every floor of its layer: " .. m.dat end
     end
     for _, e in ipairs(existing) do
@@ -215,6 +242,49 @@ function M.to_hex(b)
     return table.concat(t, " ")
 end
 
+-- split s on a plain separator; empty fields are kept (gmatch "([^\t]*)" would drop them)
+local function split_plain(s, sep)
+    local out, pos = {}, 1
+    while true do
+        local i = string.find(s, sep, pos, true)
+        if not i then out[#out + 1] = string.sub(s, pos) break end
+        out[#out + 1] = string.sub(s, pos, i - 1)
+        pos = i + #sep
+    end
+    return out
+end
+
+-- parse_station(text) -> blocks, machines. Text from MSCore.native.read_station (format: cpp/MSCore/msc_station.hpp).
+-- B\tclass\tgx\tgy\th\trot ; M\tid\tcls\tx\ty\th\trot\tcfg. cfg "-" -> nil (unreadable), "" -> "" (empty), else raw bytes.
+function M.parse_station(text)
+    local blocks, machines = {}, {}
+    for _, line in ipairs(split_plain(text or "", "\n")) do
+        local f = split_plain(line, "\t")
+        if f[1] == "B" and #f >= 6 then
+            blocks[#blocks + 1] = { class = f[2], gx = tonumber(f[3]), gy = tonumber(f[4]), h = tonumber(f[5]), rot = tonumber(f[6]) }
+        elseif f[1] == "M" and #f >= 8 then
+            local cfg = f[8]
+            if cfg == "-" then cfg = nil
+            elseif cfg ~= "" then cfg = cfg:gsub("%x%x", function(p) return string.char(tonumber(p, 16)) end) end
+            machines[#machines + 1] = { id = tonumber(f[2]), cls = f[3], bcls = f[3], x = tonumber(f[4]), y = tonumber(f[5]),
+                h = tonumber(f[6]), rot = tonumber(f[7]), cfg = cfg }
+        end
+    end
+    return blocks, machines
+end
+
+-- parse_inventory(text) -> slots {item, amount, max}. Text from MSCore.native.read_inventory: S\titem\tamount\tmax, item "" = empty slot.
+function M.parse_inventory(text)
+    local slots = {}
+    for _, line in ipairs(split_plain(text or "", "\n")) do
+        local f = split_plain(line, "\t")
+        if f[1] == "S" and #f >= 4 then
+            slots[#slots + 1] = { item = f[2], amount = tonumber(f[3]) or 0, max = tonumber(f[4]) or 1 }
+        end
+    end
+    return slots
+end
+
 ---------------------------------------------------------------- game reads (in game only)
 local function valid(o)
     if o == nil or type(o) ~= "userdata" then return false end
@@ -222,25 +292,47 @@ local function valid(o)
     return ok and v == true
 end
 
+-- cache: {list, index}. Built by one FindAllOf; reused while every entry is still valid. An empty result is not cached (recipes may load later).
+-- ponytail: a stale cache is only seen when an entry dies; a recipe that appears later is missed until then. Clear with M.recipes_reset().
+local rcache
+
 -- every Recipe object: {name = asset FName, obj = object}. crafter/inputs/outputs not read (fields UNK).
 function M.recipes()
-    local out = {}
+    if rcache then
+        local fresh = true
+        for _, r in ipairs(rcache.list) do
+            if not valid(r.obj) then fresh = false break end
+        end
+        if fresh then return rcache.list end
+    end
+    local out, index = {}, {}
     local ok, all = pcall(FindAllOf, "Recipe")
-    if not ok or not all then return out end
-    for _, o in ipairs(all) do
-        if valid(o) then
-            local okn, n = pcall(function() return o:GetFName():ToString() end)
-            if okn and n then out[#out + 1] = { name = n, obj = o } end
+    if ok and all then
+        for _, o in ipairs(all) do
+            if valid(o) then
+                local okn, n = pcall(function() return o:GetFName():ToString() end)
+                if okn and n then
+                    local r = { name = n, obj = o }
+                    out[#out + 1] = r
+                    if not index[n] then index[n] = r end
+                end
+            end
         end
     end
+    rcache = nil
+    if #out > 0 then rcache = { list = out, index = index } end
     return out
 end
 
+function M.recipes_reset() rcache = nil end
+
+-- O(1) on a cache hit with a live entry. A miss (or dead entry) rebuilds through recipes().
 function M.recipe_by_name(name)
-    for _, r in ipairs(M.recipes()) do
-        if r.name == name then return r end
-    end
-    return nil
+    local hit = rcache and rcache.index[name]
+    if hit and valid(hit.obj) then return hit end
+    M.recipes()
+    local r = rcache and rcache.index[name]
+    return r or nil
 end
 
 function M.install(MSCore) MSCore.factory = M; return M end
