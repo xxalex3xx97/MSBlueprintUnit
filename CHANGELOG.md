@@ -2,9 +2,9 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-08
 
-Station Build needs **MSCore 0.8.0 or newer** (the add_block, pending and read_block_class natives). Without it the rest of the mod works as before.
+Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes. Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size. Station Build needs **MSCore 0.8.0 or newer**; the hand-deconstruction refund fix needs **MSCore 0.8.1**.
 
 ### Added
 - **Station Build (place station blocks + factory)** checkbox (`Chk_StationBuild`, default unchecked). Ticked: the JSON's station blocks are placed first (one add sequence through MSCore), then the factory as before.
@@ -17,14 +17,7 @@ Station Build needs **MSCore 0.8.0 or newer** (the add_block, pending and read_b
 - A splitter that already exists with different port settings is removed and placed again with the new config ("N splitters replaced").
 - Ticked on an older MSCore: the hint under the box and the status line read "Station Build needs MSCore 0.8.0 or newer"; Import and Build stop.
 - Trace (`bpu_trace.log`): every add, the poll of the station blocks, the research-state read per class.
-
-### Known limits
-- Tested in game (2026-11-08): research read, replace of a Shipyard side by a Station 1x1, the apply. Not tested: blocks of other classes and rotations, machines standing on a removed block (the game refunds as for the factory).
-- Machines of a placed block show up in the game 20-30 s later (the existing overlay covers the wait).
-
-## [0.2.0] - 2026-11-08
-
-Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes. Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size.
+- The refund redirect (MSCore) is switched on only while a Blueprint Unit build runs and off again afterwards, so deconstructing by hand refunds into your own inventory. Needs MSCore 0.8.1 for this (older MSCore keeps the redirect always on).
 
 ### Changed
 - Window: **Enable container item restoration** checkbox (`Chk_Restore`, checked by default) with a hint line (`Txt_Restore`, `Txt_RestoreHint`). Unchecked = Build does no container restoration.
@@ -50,6 +43,11 @@ Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for ma
 - Removed the inventory-trace diagnostics hooks.
 - Restore verify: a container drained by adjacent belts (all TRANSFERs acked, total not up) counts as confirmed; no false stall.
 - Floor check: Dock_2 floor is 30x30 (no rotation swap); a footprint across two touching floors validates against their union.
+
+### Known limits (Station Build)
+- Tested in game (2026-11-08): research read, replace of a Shipyard side by a Station 1x1, the apply. Not tested: blocks of other classes and rotations, machines standing on a removed block (the game refunds as for the factory).
+- Machines of a placed block show up in the game 20-30 s later (the existing overlay covers the wait).
+
 
 ## [0.1.0] - 2026-11-07
 
