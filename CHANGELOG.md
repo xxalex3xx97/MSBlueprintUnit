@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [0.2.0] - 2026-11-08
 
-Requires **MSCore 0.7.6 or newer** (the split native). Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size.
+Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes. Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size.
 
 ### Changed
 - Window: **Enable container item restoration** checkbox (`Chk_Restore`, checked by default) with a hint line (`Txt_Restore`, `Txt_RestoreHint`). Unchecked = Build does no container restoration.

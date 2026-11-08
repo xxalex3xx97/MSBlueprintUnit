@@ -749,6 +749,12 @@ local function build(text, live, F, opts)
             end
         end
     end
+    -- kept splitters: port settings are never applied; count the ones whose live cfg bytes differ (empty live = different)
+    local split_diff = 0
+    for _, m in ipairs(kept) do
+        if tostring(m.dat):find("Splitter", 1, true) and m.cfg and m.cfg ~= "" and (m.live or "") ~= m.cfg then split_diff = split_diff + 1 end
+    end
+    if split_diff > 0 then notes[#notes + 1] = split_diff .. " kept splitters have different port settings than the blueprint (not changed)" end
 
     -- removals: conflicts (same layer overlap with new machines, kept ones excluded) + stale (existing the blueprint no longer has)
     local newall = {}

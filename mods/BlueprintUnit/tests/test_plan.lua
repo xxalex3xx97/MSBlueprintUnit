@@ -370,5 +370,29 @@ do
     check("integration: no off-floor note", pi ~= nil and not off_note)
 end
 
+-- kept splitter: live cfg bytes vs the blueprint ConfigHex. Different (or empty/missing live cfg) = counted; equal = not
+local function split_json(hex)
+    return '{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"BP_Splitter","DefaultName":"DAT_Splitter","ConfigHex":"' .. hex ..
+        '","Transform":{"GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}}]}'
+end
+local function split_note(pp)
+    for _, n in ipairs(pp and pp.notes or {}) do
+        if n == "1 kept splitters have different port settings than the blueprint (not changed)" then return true end
+    end
+    return false
+end
+local function split_kept(live_cfg)
+    return P.plan(split_json("0102"), live({ existing = { ex(7, "BP_Splitter", "DAT_Splitter", 0, 0, live_cfg) } }), F)
+end
+local ps1, pe1 = split_kept("\1\3")
+check("kept splitter: plan ok, kept", ps1 ~= nil and pe1 == nil and ps1.counts.keep == 1 and ps1.counts.place == 0)
+check("kept splitter: different live cfg -> note", split_note(ps1))
+local ps2 = split_kept("")
+check("kept splitter: empty live cfg counts as different", split_note(ps2))
+local ps3 = split_kept(nil)
+check("kept splitter: no live cfg counts as different", split_note(ps3))
+local ps4 = split_kept("\1\2")
+check("kept splitter: same bytes -> no note", ps4 ~= nil and not split_note(ps4))
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

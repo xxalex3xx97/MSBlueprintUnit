@@ -42,6 +42,7 @@ local CONT_READY_POLLS = 2   -- restore: container contents readable on this man
 local RESTORE_MS = 300000    -- restore: whole restore phase cap
 local SORT_SETTLE_MS = 1500  -- split route: unit inventory unchanged for this long after the SORT -> settled
 local SORT_MS = 15000        -- split route: SORT wait cap (still changing after this -> go on)
+local CFG_MS = 120000        -- config check (stage 17): placed machines must show in the raw game view within this (= bpu_live OV_MS)
 
 local function get(m, k) return m[k] or 0 end
 
@@ -348,6 +349,7 @@ local function new_run(plan)
         chunk_need = {}, before = {}, rem_before = {}, snap = {}, issued = {},
         placed = 0, removed = 0, moved_in = 0, refund_moved = false,
         placed_list = {}, removed_list = {},   -- machines actually sent (io.note_build: live overlay)
+        cfg_want = {}, t_cfg = 0, base_text = "", marked = false,   -- config check (stage 17): placed machines with a config
     }
 end
 
@@ -365,6 +367,7 @@ end
 --   io.remember(cell_key, list {name,count}) (optional, session memory of removed containers) | io.read_machine_inv(id) (contents)
 --   io.now() -> ms
 --   io.note_build(placed, removed) optional: run end with machines placed (plan entries) / removed (live ids)
+--   io.scan_raw(station) optional: raw station machines (no overlay, has cfg); config check after the run (stage 17)
 --   io.trace(text) optional: diagnostics only
 -- plan (from bpu_plan): station, fp, place, kept, chg, removed={ {id=,bcls=,x=,y=} }, need, refund (ITEM -> n), recChanged, valid.
 function B.new(io)
@@ -385,6 +388,8 @@ function B.new(io)
     end
     -- any end (done, error, cancel) with placed or removed machines: io.note_build keeps them as a live overlay
     local function mark_changed()
+        if R.marked then return end   -- once per run (end_run, then a cancel in the config check must not add a second batch)
+        R.marked = true
         if #R.placed_list + #R.removed_list > 0 and io.note_build then io.note_build(R.placed_list, R.removed_list) end
     end
     -- ends the run with error|msg (counts). Returns false.
@@ -462,13 +467,30 @@ function B.new(io)
         return "; restore: " .. table.concat(parts, "; ")
     end
 
-    -- the run ends with base (the Build text) + restore part
+    -- the run ends with base (the Build text) + restore part. Placed machines with a config go to the config check
+    -- (stage 17) first; the run is done after it.
     local function end_run(base)
+        R.base_text = base .. restore_suffix() .. chg_suffix()
+        mark_changed()
+        R.cfg_want = {}
+        if io.scan_raw then
+            for _, pl in ipairs(R.placed_list) do
+                if pl.cfg and pl.cfg ~= "" and not tostring(pl.bcls):lower():find("underground", 1, true) then   -- underground cfg is never in the game view
+                    R.cfg_want[#R.cfg_want + 1] = pl
+                end
+            end
+        end
+        if #R.cfg_want > 0 then
+            R.stage = 17
+            R.t_cfg = io.now()
+            R.t_next = R.t_cfg + PIPE_POLL_MS
+            set_status("working", R.base_text .. "; checking the machine configs in the game")
+            return
+        end
         R.active = false
         R.stage = 0
         R.state = "done"
-        R.text = base .. restore_suffix() .. chg_suffix()
-        mark_changed()
+        R.text = R.base_text
     end
 
     -- Build text of the legacy flow
@@ -1355,6 +1377,57 @@ function B.new(io)
         R.t_next = now + PIPE_POLL_MS
     end
 
+    -- stage 17, config check: the RAW game view (io.scan_raw, not the live overlay, which shows the sent config) must hold
+    -- each placed machine with a config. Cell-key match; polls until all show or CFG_MS. Compares the ones shown by config
+    -- length (game vs bytes sent). None shown (timeout or never placed) = no note.
+    local function cfg_finish(matched)
+        local n, first, shown = 0, nil, 0
+        for i, w in ipairs(R.cfg_want) do
+            local e = matched[i]
+            if e then
+                shown = shown + 1
+                local sent, got = #w.cfg, type(e.cfg) == "string" and #e.cfg or 0
+                if got ~= sent then
+                    n = n + 1
+                    first = first or { sent = sent, got = got, cls = w.bcls, x = w.x, y = w.y }
+                end
+            end
+        end
+        trace(("config check: %d of %d placed machines shown, %d with a different config"):format(shown, #R.cfg_want, n))
+        local text = R.base_text
+        if n > 0 then
+            trace(("config check: first mismatch %s@(%s,%s) sent %d bytes, game has %d"):format(tostring(first.cls), tostring(first.x), tostring(first.y), first.sent, first.got))
+            text = text .. ("; config not applied for %d machines (sent %d bytes, game has %d)"):format(n, first.sent, first.got)
+        end
+        R.active = false
+        R.stage = 0
+        R.state = "done"
+        R.text = text
+    end
+    local function cfg_wait(now)
+        local okr, raw = pcall(io.scan_raw, R.plan.station)
+        local matched = {}
+        if okr and type(raw) == "table" then
+            local byKey = {}
+            for _, e in ipairs(raw) do
+                local k = ckey(e)
+                byKey[k] = byKey[k] or {}
+                table.insert(byKey[k], e)
+            end
+            for i, w in ipairs(R.cfg_want) do
+                local list = byKey[ckey(w)]
+                if list and #list > 0 then matched[i] = table.remove(list, 1) end
+            end
+        else
+            trace("config check: raw read failed: " .. tostring(raw))
+        end
+        local shown = 0
+        for i = 1, #R.cfg_want do if matched[i] then shown = shown + 1 end end
+        if shown == #R.cfg_want or now - R.t_cfg > CFG_MS then return cfg_finish(matched) end
+        set_status("working", R.base_text .. ("; checking the machine configs in the game (%d of %d shown)"):format(shown, #R.cfg_want))
+        R.t_next = now + PIPE_POLL_MS
+    end
+
     local builder = {}
 
     -- start(plan, opts): checks station, totals, creative; sends the first removal batch. Nothing is sent on a refusal.
@@ -1478,6 +1551,7 @@ function B.new(io)
         elseif s == 13 then sort_wait(now)
         elseif s == 15 then pipe_send(now)
         elseif s == 16 then pipe_wait(now)
+        elseif s == 17 then cfg_wait(now)
         elseif s == 2 then arrival_wait(now)
         elseif s == 4 or s == 9 then chunk_start(now)
         elseif s == 5 then staging_wait(now)

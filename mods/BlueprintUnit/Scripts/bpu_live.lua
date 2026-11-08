@@ -524,6 +524,13 @@ function L.make_io(ctx)
         if not ok then return nil, tostring(res) end
         return res
     end
+    -- raw station read (config check after a Build): fresh native read, no live overlay
+    function io.scan_raw(station)
+        local st = find_by_id(station)
+        if not st then return nil, "station not found" end
+        cache = nil
+        return L.read_machines(st)
+    end
     io.fingerprint = Plan.fingerprint
     function io.read_inv(which)
         if which == "player" then return L.read_inv(rd(player, "Inventory")) end

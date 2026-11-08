@@ -182,6 +182,11 @@ local function fake(spec)
         for i, m in ipairs(f.station) do out[i] = m end
         return out
     end
+    function io.scan_raw(station)   -- raw view: no overlay in the fake, same list as scan
+        local out = {}
+        for i, m in ipairs(f.station) do out[i] = m end
+        return out
+    end
     function io.fingerprint(ex)
         local parts = {}
         for _, m in ipairs(ex) do parts[#parts + 1] = table.concat({ m.id, m.bcls, m.x, m.y }, ":") end
@@ -258,7 +263,8 @@ local function fake(spec)
         f.next_id = f.next_id + 1
         f.placed_at = f.placed_at or f.clock
         local bcls = f.live_bcls or m.bcls
-        f.station[#f.station + 1] = { id = f.next_id, bcls = bcls, x = m.x + f.shift_x, y = m.y, h = 0, rot = 0 }
+        f.station[#f.station + 1] = { id = f.next_id, bcls = bcls, x = m.x + f.shift_x, y = m.y, h = 0, rot = 0,
+                                      cfg = spec.game_cfg and spec.game_cfg(m.cfg) or m.cfg }   -- game_cfg: what the game keeps
         if bcls:find("Container", 1, true) then
             local slots = {}
             for i = 1, f.cont_slots do slots[i] = { item = "", amount = 0, max = 50 } end
@@ -1940,6 +1946,30 @@ do
     local worst = math.max(reads[ids[1]] or 0, reads[ids[2]] or 0)
     check(st.state == "done" and #ids == 2 and cont_plate(f, ids[1]) == 100 and cont_plate(f, ids[2]) == 100 and #f.violations == 0
           and worst <= 8, "verify poll: container reads per container " .. worst .. " max over a 3 s wait (" .. st.text .. ")")
+end
+
+-- config check (stage 17): the raw game view must show each placed machine with the config bytes sent
+do
+    local CFG = "\1\0\2\0\0\0"
+    local function cfg_run(over)
+        local m = M("BP_Splitter", 0, 0, { ITEM_Plate = 1 })
+        m.cfg, m.h, m.rot = CFG, 0, 0   -- plan machines carry h/rot (cell key)
+        local f = fake(over)
+        local b = B.new(f.io)
+        b:start(plan_for(f, { place = { m }, need = { ITEM_Plate = 1 } }), {})
+        local t0 = f.clock
+        local st = run(b, f, 1000)
+        return st, f.clock - t0
+    end
+    local st1 = cfg_run({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), game_cfg = function(c) return c:sub(1, 2) end })
+    check(st1.state == "done" and st1.text:find("config not applied for 1 machines (sent 6 bytes, game has 2)", 1, true) ~= nil,
+          "config check: game keeps 2 of 6 bytes -> note (" .. st1.text .. ")")
+    local st2 = cfg_run({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    check(st2.state == "done" and st2.text == "sent: placed 1, removed 0 (the game updates its blueprint view in about 30 s)" and not st2.text:find("config", 1, true),
+          "config check: game keeps the same bytes -> no note (" .. st2.text .. ")")
+    local st3, waited = cfg_run({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true })
+    check(st3.state == "done" and not st3.text:find("config", 1, true) and waited >= 120000 and waited < 130000,
+          "config check: machine never shows -> no note after 120 s (" .. st3.text .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))
