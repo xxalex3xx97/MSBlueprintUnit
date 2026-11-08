@@ -8,10 +8,10 @@ cdo = U.get_default_object(wbp.generated_class())  # a widget is a variable iff 
 names = ['Panel', 'Txt_Title', 'Btn_Close', 'Txt_Close', 'Txt_Status', 'Btn_Import', 'Txt_Import', 'Btn_Build', 'Txt_Build',
          'Txt_CostHdr', 'Btn_CostPin', 'Txt_CostPin', 'Scr_Cost', 'Txt_CostEmpty', 'Txt_UnitInvTitle', 'Scr_UnitInv', 'Txt_PlayerInvTitle', 'Host_PlayerInv',
          'Txt_Summary', 'Txt_Removes', 'Scr_Notes', 'Txt_Notes', 'Txt_NotesHdr', 'Pnl_ImportModal', 'Txt_ImportTitle', 'Btn_ImportClose', 'Txt_ImportClose', 'Edt_ImportJson',
-         'Btn_ImportOk', 'Txt_ImportOk', 'Btn_ImportCancel', 'Txt_ImportCancel', 'Txt_ImportHint']
+         'Btn_ImportOk', 'Txt_ImportOk', 'Btn_ImportCancel', 'Txt_ImportCancel', 'Txt_ImportHint', 'Chk_Restore', 'Txt_Restore', 'Txt_RestoreHint']
 gone = [n for n in ('Row_Cost_1', 'Img_Cost_1', 'Txt_CostHave_1', 'Txt_CostName_1', 'Txt_CostRefund_1', 'Row_Cost_40') if ELib.find_source_widget_by_name(wbp, n)]
 print('LEFTOVER-ROWS', gone)
-for n in ('Txt_Title', 'Txt_CostHdr', 'Txt_Status', 'Txt_Summary', 'Txt_Removes', 'Txt_Import', 'Txt_Build', 'Txt_UnitInvTitle', 'Txt_PlayerInvTitle', 'Txt_CostEmpty', 'Txt_CostPin', 'Txt_Notes', 'Txt_NotesHdr'):
+for n in ('Txt_Title', 'Txt_CostHdr', 'Txt_Status', 'Txt_Summary', 'Txt_Removes', 'Txt_Import', 'Txt_Build', 'Txt_UnitInvTitle', 'Txt_PlayerInvTitle', 'Txt_CostEmpty', 'Txt_CostPin', 'Txt_Restore', 'Txt_RestoreHint', 'Txt_Notes', 'Txt_NotesHdr'):
     t = ELib.find_source_widget_by_name(wbp, n)
     print('FONT', n, t.get_editor_property('font').get_editor_property('size'), 'wrap', t.get_editor_property('auto_wrap_text'))
 miss = nonvar = 0
@@ -24,6 +24,8 @@ for n in names:
             cdo.get_editor_property(n)
         except Exception:
             print('NOTVAR', n); nonvar += 1
+cr = ELib.find_source_widget_by_name(wbp, 'Chk_Restore')
+print('CHK_RESTORE checked_state', cr.get_editor_property('checked_state') if cr else None)
 def chain(w):
     o = []
     while w:
