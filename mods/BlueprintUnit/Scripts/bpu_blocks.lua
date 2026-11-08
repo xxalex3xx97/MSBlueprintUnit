@@ -235,7 +235,8 @@ function B.classify(missing, live, info_of, have, doc)
                 if not gone[i] and B.overlap(box, lb) then hits[#hits + 1] = i end
             end
             for _, i in ipairs(hits) do
-                if keep_all or in_doc[B.key(live[i])] then reason = "occupied"; break end
+                -- never remove the Blueprint Unit block itself (it runs this build); blocks of the file are kept too
+                if keep_all or in_doc[B.key(live[i])] or tostring(live[i].class):find("BlueprintUnit", 1, true) then reason = "occupied"; break end
             end
         end
         if not reason then

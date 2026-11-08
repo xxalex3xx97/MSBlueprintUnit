@@ -146,6 +146,11 @@ check("remove: net refund needs nothing", #rr.shortfall == 0)
 local rk = B.classify({ S1 }, { SIDE }, rinfo_of, {}, { S1, SIDE })
 check("in file: not removed, skipped as occupied", #rk.remove == 0 and #rk.accept == 0 and rk.notes[1] == "Skipped Station 01: another block of the blueprint already occupies that spot.")
 
+-- the Blueprint Unit block itself is never removed, even when the file does not list it
+local UNIT = { class = "BPO_BlueprintUnit", gx = 0, gy = 0, h = 0, rot = 0, path = "/Game/BPO_BlueprintUnit" }
+local ru = B.classify({ S1 }, { UNIT }, rinfo_of, {}, { S1 })
+check("unit block is never removed", #ru.remove == 0 and #ru.accept == 0)
+
 -- net cost: 6 Plate for the new block, 4 Plate + 1 Frame refund -> 2 Plate short when holding 1
 local rn = B.classify({ { class = "Station_02A", gx = 0, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, { ITEM_Plate = 1 },
                       { { class = "Station_02A", gx = 0, gy = 0, h = 0, rot = 0 } })
