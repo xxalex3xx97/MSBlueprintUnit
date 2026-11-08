@@ -4,6 +4,7 @@
 -- Never call ForEach on a TrivialObject: each() checks for it first (P0 R1d).
 
 local L = {}
+local Blk = require("bpu_blocks")
 L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
 -- Trace trail for native crashes: print + append to <mod dir>bpu_trace.log (open/append/flush/close per call).
@@ -354,9 +355,63 @@ local function contents_list(inv)
     return out
 end
 
-function L.snapshot(U, F)
+-- Station Build needs the MSCore 0.8.0 natives (add_block, pending, read_block_class). Returns true, or false + reason.
+function L.station_build_capable()
+    local M = L.mscore
+    local N, FN = M and M.native, M and M.factory_native
+    if N and N.add_block and N.pending and N.read_block_class and FN and FN.add_block and FN.pending and FN.read_block_class then
+        return true
+    end
+    return false, "Station Build needs MSCore >= 0.8.0"
+end
+
+-- class defaults per class path (read once, cached): {station, unlocked, bounds, cost={ITEM=n}} | nil.
+-- BlockBounds comes raw (65536 = 1.0). unlocked is nil: no research-state native in MSCore 0.8.0 (every block is skipped as unknown).
+local BINFO = {}
+local function block_info(cls, path)
+    if not path then return nil end
+    if BINFO[path] == nil then
+        local FN = L.mscore and L.mscore.factory_native
+        local ok, info = false, nil
+        if FN and FN.read_block_class then ok, info = pcall(FN.read_block_class, path) end
+        local r = false
+        if ok and type(info) == "table" and info.min and info.max then
+            local cost = {}
+            for _, c in ipairs(info.cost or {}) do cost[c.item] = c.amount end
+            local s = 65536
+            r = { station = info.station == true, unlocked = nil, cost = cost,
+                  bounds = { x0 = info.min.x / s, x1 = info.max.x / s, y0 = info.min.y / s, y1 = info.max.y / s,
+                             z0 = info.min.z / s, z1 = info.max.z / s } }
+        end
+        BINFO[path] = r
+    end
+    return BINFO[path] or nil
+end
+
+-- player + unit stock: {ITEM_X = n}
+local function have_totals(U, player)
+    local have = {}
+    local function add(inv)
+        if not inv then return end
+        local r = L.read_inv(inv)
+        if not (r and r.ok) then return end
+        for _, s in ipairs(r.slots) do
+            if s.item ~= "" and s.amount > 0 then have[s.item] = (have[s.item] or 0) + s.amount end
+        end
+    end
+    add(U.unit_inv)
+    add(rd(player, "Inventory"))
+    return have
+end
+
+-- opts (Station Build only): { station_build = true, player = <player object> } adds block_info (lazy per class), have, creative.
+function L.snapshot(U, F, opts)
     cache = nil
     local st = U.station_obj
+    if opts and opts.station_build then
+        local okc, why = L.station_build_capable()
+        if not okc then error(why, 0) end
+    end
     TRACE("snapshot start station=" .. tostring(U.station))
     local blocks = L.read_blocks(st)
     TRACE("snapshot blocks=" .. #blocks)
@@ -383,8 +438,16 @@ function L.snapshot(U, F)
     TRACE("snapshot recipes=" .. count(recipes))
     local buildables = L.read_buildables(F)
     TRACE("snapshot buildables=" .. count(buildables))
-    return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables,
-             items = L.item_names(), memory = L.memory() }
+    local snap = { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables,
+                   items = L.item_names(), memory = L.memory() }
+    if opts and opts.station_build then
+        local player = opts.player or L.player()
+        snap.block_info = block_info
+        snap.have = have_totals(U, player)
+        snap.creative = L.creative(player, nil)
+        TRACE("snapshot station build: have items=" .. count(snap.have))
+    end
+    return snap
 end
 
 -- raw MaxStackSize of an Item UObject (cached per name; false when unreadable). nil = unknown.
@@ -502,6 +565,7 @@ function L.reset()
     BUILDABLES = nil
     ITEMS = nil
     RAW, TRACED = {}, {}
+    BINFO = {}
     L._recobj = {}
 end
 
@@ -663,6 +727,37 @@ function L.make_io(ctx)
         end
         print(("[BPUnit] config changes: %d ok, %d failed"):format(okc, failc))
         return okc, failc
+    end
+    -- Station Build (MSCore 0.8.0): one add sequence through factory_native (bpu_blocks send), every native call traced
+    function io.station_build_capable() return L.station_build_capable() end
+    function io.send_blocks(station, blocks, ids)
+        local FN = native
+        if not (FN and FN.add_block and FN.pending) then return false, "MSCore 0.8.0 natives missing" end
+        local traced = {
+            pending = function(st, apply, reset, p, pl, ed)
+                local ok, err = FN.pending(st, apply, reset, p, pl, ed)
+                TRACE(("station blocks: pending station=%s apply=%s reset=%s primary=%s player=%s editing=%s -> ok=%s err=%s"):format(
+                    tostring(st), tostring(apply), tostring(reset), tostring(p), tostring(pl), tostring(ed), tostring(ok), tostring(err)))
+                return ok, err
+            end,
+            add_block = function(st, cls, x, y, h, rot)
+                local ok, err = FN.add_block(st, cls, x, y, h, rot)
+                TRACE(("station blocks: add_block %s at %s,%s,h%s rot%s -> ok=%s err=%s"):format(tostring(cls), tostring(x),
+                    tostring(y), tostring(h), tostring(rot), tostring(ok), tostring(err)))
+                return ok, err
+            end,
+        }
+        local ok, err = Blk.send(traced, station, blocks, ids)
+        TRACE(("station blocks: send %d block(s) -> ok=%s err=%s"):format(#blocks, tostring(ok), tostring(err)))
+        return ok, err
+    end
+    -- live station blocks, fresh native read (no cache): the poll of a Station Build run
+    function io.scan_blocks(station)
+        local st = find_by_id(station)
+        if not st then return nil, "station not found" end
+        local ok, res = pcall(function() cache = nil; return L.read_blocks(st) end)
+        if not ok then return nil, tostring(res) end
+        return res
     end
     function io.now() return L.now() end
     function io.note_build(placed, removed) L.note_build(placed, removed) end

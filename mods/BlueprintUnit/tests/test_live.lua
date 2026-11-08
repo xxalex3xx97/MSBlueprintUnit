@@ -522,6 +522,54 @@ do
     check(oke == false and tostring(msge):find("boom", 1, true) ~= nil, "split: erroring native -> false, error text")
 end
 
+-- Station Build (B3): capability, snapshot extras (lazy block_info), send_blocks / scan_blocks through make_io
+do
+    local saved = Live.mscore
+    local nat_calls = {}
+    local FN = {
+        read_station = saved.factory_native.read_station,
+        read_inventory = saved.factory_native.read_inventory,
+        add_block = function(...) nat_calls[#nat_calls + 1] = { "add_block", ... }; return true end,
+        pending = function(...) nat_calls[#nat_calls + 1] = { "pending", ... }; return true end,
+        read_block_class = function(path)
+            if path == "/G/BPO_A.BPO_A_C" then
+                return { station = true, ship = false, machines = 0, min = { x = 0, y = 0, z = 0 }, max = { x = 65536, y = 0, z = 0 },
+                         cost = { { item = "ITEM_A", amount = 3 } } }
+            end
+            return nil, "not found"
+        end,
+    }
+    Live.mscore = { factory_native = FN }
+    local okc, whyc = Live.station_build_capable()
+    check(not okc and whyc == "Station Build needs MSCore >= 0.8.0", "station build: no 0.8.0 natives -> refused")
+    local oks, errs = pcall(Live.snapshot, U, F, { station_build = true })
+    check(not oks and tostring(errs):find("Station Build needs MSCore >= 0.8.0", 1, true) ~= nil, "station build: snapshot refuses without 0.8.0 natives")
+    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    check(Live.station_build_capable() == true, "station build: 0.8.0 natives present")
+
+    local snap = Live.snapshot(U, F, { station_build = true, player = W.player })
+    local info = snap.block_info("BPO_A", "/G/BPO_A.BPO_A_C")
+    check(info and info.station == true and info.unlocked == nil and info.cost.ITEM_A == 3 and info.bounds.x0 == 0 and info.bounds.x1 == 1,
+          "block_info: station, cost map, bounds from raw /65536")
+    check(snap.block_info("X", "/G/X.X_C") == nil and snap.block_info("BPO_A", nil) == nil, "block_info: unknown path or no path -> nil")
+    check(type(snap.have) == "table" and type(snap.creative) == "boolean", "snapshot: have table, creative boolean")
+    local plain = Live.snapshot(U, F)
+    check(plain.block_info == nil and plain.have == nil and plain.creative == nil, "snapshot: no Station Build fields when off")
+
+    local ioB = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = FN, plan_mod = P })
+    local okb = ioB.send_blocks(42, { { class = "BPO_A", gx = 1, gy = 0, h = 0, rot = 1 } }, { primary = 8, player = 7, editing = 0 })
+    check(okb and #nat_calls == 3 and nat_calls[1][2] == 42 and nat_calls[1][3] == false and nat_calls[1][4] == true
+          and nat_calls[1][5] == 8 and nat_calls[1][6] == 7 and nat_calls[1][7] == 0
+          and nat_calls[2][1] == "add_block" and nat_calls[2][3] == "BPO_A" and nat_calls[2][4] == 1 and nat_calls[2][7] == 1
+          and nat_calls[3][3] == true and nat_calls[3][4] == false, "send_blocks: pending reset, add_block, pending apply")
+    local sbk = ioB.scan_blocks(42)
+    check(sbk and #sbk == 1 and sbk[1].class == "BPO_Station_01", "scan_blocks: fresh station block list")
+    local ioNo = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = {}, plan_mod = P })
+    local okn, errn = ioNo.send_blocks(42, { { class = "BPO_A", gx = 1, gy = 0, h = 0, rot = 0 } }, { primary = 8, player = 7, editing = 0 })
+    check(okn == false and errn == "MSCore 0.8.0 natives missing", "send_blocks: no natives -> false, nothing called")
+    Live.mscore = saved
+end
+
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

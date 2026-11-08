@@ -1,6 +1,7 @@
 -- test_build: plain asserts for Scripts/bpu_build.lua (pure helpers + build flows on a fake io).
 -- Run: lua test_build.lua   (exit 0 = all pass, 1 = failures)
 local dir = (arg and arg[0] or ""):match("^(.*)[/\\]") or "."
+package.path = dir .. "/../Scripts/?.lua;" .. package.path   -- bpu_build requires bpu_blocks (Station Build)
 local B = dofile(dir .. "/../Scripts/bpu_build.lua")
 local P = B.pure
 
@@ -1970,6 +1971,99 @@ do
     local st3, waited = cfg_run({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true })
     check(st3.state == "done" and not st3.text:find("config", 1, true) and waited >= 120000 and waited < 130000,
           "config check: machine never shows -> no note after 120 s (" .. st3.text .. ")")
+end
+
+-- ===== Station Build: station blocks go in first (one send, polled), then the factory; refusals before any send =====
+local BLK = { class = "BPO_Station_02", gx = 2, gy = 0, h = 0, rot = 0 }
+local function blocks_fake(spec)
+    local f = fake(spec)
+    f.sent_blocks, f.blocks_out, f.shown_at = 0, nil, 0
+    f.io.station_build_capable = function() return spec.capable ~= false, "Station Build needs MSCore >= 0.8.0" end
+    f.io.send_blocks = function(_, blocks, ids)
+        f.sent_blocks = f.sent_blocks + 1
+        f.block_ids = ids
+        if spec.block_send_fail then return false, "add_block failed" end
+        f.blocks_out, f.shown_at = blocks, f.clock + (spec.block_delay or 0)
+        return true
+    end
+    f.io.scan_blocks = function()
+        local out = {}
+        if f.blocks_out and not spec.block_never and f.clock >= f.shown_at then
+            for i, b in ipairs(f.blocks_out) do out[i] = { class = b.class, gx = b.gx, gy = b.gy, h = b.h, rot = b.rot } end
+        end
+        return out
+    end
+    return f
+end
+local function with_blocks(f, need_blocks, need_cost, refuse)
+    local p = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p.blocks, p.block_need, p.block_count, p.block_refuse = need_blocks, need_cost, #need_blocks, refuse
+    return p
+end
+
+-- placed after one send: machines wait for the blocks, then go; exactly one send
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), block_delay = 1000 })
+    local b = B.new(f.io)
+    local ok = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    check(ok and f.sent_blocks == 1 and f.calls.pl == 0 and b:status().state == "working", "station blocks: one send at start, no machine placed yet")
+    local st = run(b, f)
+    check(st.state == "done" and f.sent_blocks == 1 and f.calls.pl == 1, "station blocks: shown, then factory placed, still one send (" .. st.text .. ")")
+    check(f.block_ids.primary == 202 and f.block_ids.player == 101 and f.block_ids.editing == 0, "station blocks: ids unit=primary, player, editing 0")
+end
+
+-- shortfall in the plan: refused before any send
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }, { { item = "ITEM_Plate", need = 2, have = 0 } }), {})
+    check(not ok and f.sent_blocks == 0 and f.calls.pl == 0 and msg:find("not enough items for all station blocks, nothing was built: Plate need 2 have 0", 1, true),
+          "station blocks: shortfall refused, nothing sent (" .. msg .. ")")
+end
+
+-- total check at start counts machines + blocks: 3 + 2 needed, 4 held
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 4) }, 2) })
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.need = { ITEM_Plate = 3 }
+    local ok, msg = b:start(p, {})
+    check(not ok and msg == "error: not enough items: Plate x1" and f.sent_blocks == 0 and f.calls.pl == 0, "station blocks: total check includes block cost (" .. msg .. ")")
+end
+
+-- blocks never show: STALL after 10 s, not sent again
+do
+    local f = blocks_fake({ block_never = true, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    local st, waited = run(b, f)
+    check(st.state == "error" and st.text:find("station blocks not placed in 10 s (1 missing), nothing was resent", 1, true)
+          and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: never shown -> stall after 10 s, no resend (" .. st.text .. ")")
+end
+
+-- send fails: start refuses, no resend, no machine placed
+do
+    local f = blocks_fake({ block_send_fail = true, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    check(not ok and f.sent_blocks == 1 and f.calls.pl == 0 and msg:find("station blocks not placed: add_block failed (nothing was resent)", 1, true),
+          "station blocks: send failure -> error, not resent (" .. msg .. ")")
+end
+
+-- creative: no total check, blocks still sent
+do
+    local f = blocks_fake({ creative = true, player = inv({}, 2), unit = inv({}, 2) })
+    local b = B.new(f.io)
+    local ok = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 100 }), {})
+    check(ok and f.sent_blocks == 1, "station blocks: creative skips the total check, blocks sent")
+end
+
+-- MSCore without the 0.8.0 natives: refused before any send
+do
+    local f = blocks_fake({ capable = false, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    check(not ok and f.sent_blocks == 0 and msg == "error: Station Build needs MSCore >= 0.8.0", "station blocks: old MSCore refused (" .. msg .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))
