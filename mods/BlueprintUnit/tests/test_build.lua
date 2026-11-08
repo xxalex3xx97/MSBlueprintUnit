@@ -2058,6 +2058,48 @@ do
     check(ok and f.sent_blocks == 1, "station blocks: creative skips the total check, blocks sent")
 end
 
+-- removal: the send gets the removes, the poll waits until the removed block is gone as well as the added one shows
+do
+    local f = blocks_fake({ block_delay = 1000, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local removed_gone_at = 3000
+    local live_old = { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 }
+    f.io.send_blocks = function(_, blocks, ids, removes)
+        f.sent_blocks = f.sent_blocks + 1
+        f.sent_removes = removes
+        f.blocks_out, f.shown_at = blocks, f.clock + 1000
+        return true
+    end
+    local base_scan = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base_scan()
+        if f.clock < removed_gone_at then out[#out + 1] = { class = live_old.class, gx = 9, gy = 0, h = 0, rot = 0 } end
+        return out
+    end
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.block_remove = { live_old }
+    local ok = b:start(p, {})
+    local st = run(b, f)
+    check(ok and f.sent_removes and #f.sent_removes == 1 and f.sent_removes[1] == live_old, "station removes: passed to the one send")
+    check(st.state == "done" and f.sent_blocks == 1 and f.calls.pl == 1 and f.clock >= removed_gone_at,
+          "station removes: waits until the removed block is gone, then factory (" .. st.text .. ")")
+end
+
+-- removal never goes away: STALL after 10 s, not sent again, message as before
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f.io.send_blocks = function(_, blocks, ids, removes) f.sent_blocks = f.sent_blocks + 1; f.blocks_out, f.shown_at = blocks, f.clock; return true end
+    local base_scan = f.io.scan_blocks
+    f.io.scan_blocks = function() local out = base_scan(); out[#out + 1] = { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 }; return out end
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.block_remove = { { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 } }
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "error" and st.text:find("station blocks not placed in 10 s (1 missing), nothing was resent", 1, true)
+          and f.sent_blocks == 1 and f.calls.pl == 0, "station removes: removed block never gone -> stall, no resend (" .. st.text .. ")")
+end
+
 -- MSCore without the 0.8.0 natives: refused before any send
 do
     local f = blocks_fake({ capable = false, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })

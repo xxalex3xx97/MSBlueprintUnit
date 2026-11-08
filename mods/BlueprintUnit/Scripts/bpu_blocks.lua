@@ -1,23 +1,25 @@
 -- bpu_blocks.lua: Station Build block logic. Pure Lua 5.4, no game globals. Places a file's station blocks
--- (MSCore native add_block / pending) before the factory is built. Game work happens only via the native passed in.
+-- (MSCore native add_block / remove_block / pending) before the factory is built. Game work happens only via the native passed in.
 --
 -- API:  B.key(b) -> "class|gx|gy|h"
 --       B.diff(doc, live) -> { missing = {doc blocks not in live}, extra = {live blocks not in doc} }  (multiset by key)
---       B.missing_after(doc, live) -> missing list (same as diff(...).missing)
+--       B.missing_after(doc, live, removes) -> missing list + removed blocks still present (done = empty)
 --       B.box(info, b) -> {x0,x1,y0,y1,z0,z1} inclusive grid box of block b (info.bounds rotated by b.rot % 4, moved to gx,gy,h)
 --       B.overlap(a, b) -> true when two boxes share a cell (inclusive AABB, 3 axes)
 --       B.self_overlaps(doc, info_of) -> list of {i=, j=} index pairs of doc blocks whose boxes overlap (trace; expect none)
---       B.classify(missing, live, info_of, have) -> {
+--       B.classify(missing, live, info_of, have, doc) -> {
 --           accept = { {block=, info=, box=}, ... }, notes = {text, ...}, locked = {class, ...},
---           cost = {ITEM=n}, shortfall = { {item=, need=, have=}, ... } }
---       B.send(native, station, blocks, ids) -> true | false, err
+--           remove = { live block, ... } (live blocks in the way of an accepted block, deduped),
+--           cost = {ITEM=n} (added), refund = {ITEM=n} (removed), shortfall = { {item=, need=net, have=}, ... } }
+--       B.send(native, station, blocks, ids, removes) -> true | false, err
 --
--- info_of(class) -> info | nil. info = { station = bool, unlocked = true|false|nil, bounds = {x0,x1,y0,y1,z0,z1}, cost = {ITEM=n} }
+-- info_of(class, path) -> info | nil. info = { station = bool, unlocked = true|false|nil, bounds = {x0,x1,y0,y1,z0,z1}, cost = {ITEM=n} }
 --   (nil = class not in this game; unlocked nil = research state unknown; bounds from MSCore read_block_class)
--- live   = { {class=, gx=, gy=, h=, rot=}, ... }  live station blocks (a live block with no info is treated as one cell)
+-- live   = { {class=, gx=, gy=, h=, rot=, path=}, ... }  live station blocks (path = MSCore 7th column; no info = one cell)
+-- doc    = the file's station blocks: a live block whose key is in doc is never removed. doc nil = no removals.
 -- have   = { ITEM = n, ... }  unit + player stock. Shortfall is reported; the caller decides (creative skips it).
 -- ids    = { primary=, player=, editing= }  inventory ids (primary = unit, player = player inventory; editing defaults 0)
--- native = factory_native (add_block, pending). Both return ok, err.
+-- native = factory_native (add_block, remove_block, pending). Each returns ok, err.
 
 local B = {}
 
@@ -32,6 +34,7 @@ B.TEXT = {
     no_ids = "inventory ids missing, nothing sent",
     reset_fail = "reset failed: ",
     add_fail = "add_block failed: ",
+    remove_fail = "remove_block failed: ",
     apply_fail = "apply failed: ",
 }
 
@@ -64,8 +67,22 @@ function B.diff(doc, live)
     return { missing = missing, extra = extra }
 end
 
-function B.missing_after(doc, live)
-    return B.diff(doc, live).missing
+-- key + rotation: what remove_block matches (class, X, Y, Height, Rotation)
+local function rkey(b)
+    return B.key(b) .. "|" .. tostring(ik(b.rot or 0))
+end
+
+-- done = empty. Missing doc blocks, plus removed blocks still present (same class, cell and rotation as a live block).
+-- ponytail: a live duplicate of a JSON block at a removed cell reads as still present; the game does not make such duplicates.
+function B.missing_after(doc, live, removes)
+    local miss = B.diff(doc, live).missing
+    local cnt = {}
+    for _, b in ipairs(live or {}) do local k = rkey(b); cnt[k] = (cnt[k] or 0) + 1 end
+    for _, r in ipairs(removes or {}) do
+        local k = rkey(r)
+        if cnt[k] and cnt[k] > 0 then cnt[k] = cnt[k] - 1; miss[#miss + 1] = r end
+    end
+    return miss
 end
 
 -- rotate bounds by r (0..3), then move by block origin. z is not rotated.
@@ -98,9 +115,9 @@ function B.overlap(a, b)
         and a.z0 <= b.z1 and b.z0 <= a.z1
 end
 
--- box for a live block with no info: one cell
+-- box for a live block: real bounds when its class info is known (path), else one cell
 local function live_box(b, info_of)
-    local info = info_of(b.class)
+    local info = info_of(b.class, b.path)
     if info and info.bounds then return B.box(info, b) end
     local gx, gy, h = ik(b.gx), ik(b.gy), ik(b.h)
     return { x0 = gx, x1 = gx, y0 = gy, y1 = gy, z0 = h, z1 = h }
@@ -125,11 +142,17 @@ local function at(b)
 end
 
 -- missing: blocks to place (diff(doc, live).missing). Skip order: no class, not station, locked, unknown,
--- overlap with live or earlier accepted. Cost and shortfall over accepted blocks only.
-function B.classify(missing, live, info_of, have)
-    local res = { accept = {}, notes = {}, locked = {}, cost = {}, shortfall = {} }
+-- live block in the file (never removed), overlap with an earlier accepted block. A live block that overlaps an
+-- accepted missing block (and is not in the file) is removed; a removed live block no longer occupies its cell.
+-- Cost: added blocks (cost) and removed blocks (refund); shortfall on net = cost - refund > have.
+function B.classify(missing, live, info_of, have, doc)
+    local res = { accept = {}, notes = {}, locked = {}, cost = {}, refund = {}, shortfall = {}, remove = {} }
+    local in_doc = {}
+    for _, d in ipairs(doc or {}) do in_doc[B.key(d)] = true end
+    local keep_all = doc == nil   -- no file given: nothing is removable
     local live_boxes = {}
-    for _, b in ipairs(live or {}) do live_boxes[#live_boxes + 1] = live_box(b, info_of) end
+    for i, b in ipairs(live or {}) do live_boxes[i] = live_box(b, info_of) end
+    local gone = {}   -- live index -> removed by an accepted block
     local locked_seen = {}
     for _, b in ipairs(missing or {}) do
         local info = info_of(b.class)
@@ -144,11 +167,14 @@ function B.classify(missing, live, info_of, have)
         elseif info.unlocked == nil then
             reason = B.TEXT.unknown
         end
-        local box
+        local box, hits = nil, {}
         if not reason then
             box = B.box(info, b)
-            for _, lb in ipairs(live_boxes) do
-                if B.overlap(box, lb) then reason = B.TEXT.occupied; break end
+            for i, lb in ipairs(live_boxes) do
+                if not gone[i] and B.overlap(box, lb) then hits[#hits + 1] = i end
+            end
+            for _, i in ipairs(hits) do
+                if keep_all or in_doc[B.key(live[i])] then reason = B.TEXT.occupied; break end
             end
         end
         if not reason then
@@ -161,33 +187,53 @@ function B.classify(missing, live, info_of, have)
         else
             res.accept[#res.accept + 1] = { block = b, info = info, box = box }
             for item, n in pairs(info.cost or {}) do res.cost[item] = (res.cost[item] or 0) + n end
+            for _, i in ipairs(hits) do
+                local r = live[i]
+                gone[i] = true
+                res.remove[#res.remove + 1] = r
+                local rinfo = info_of(r.class, r.path)
+                for item, n in pairs(rinfo and rinfo.cost or {}) do res.refund[item] = (res.refund[item] or 0) + n end
+                res.notes[#res.notes + 1] = "removing " .. at(r) .. " (overlaps " .. at(b) .. ")"
+            end
         end
     end
     table.sort(res.locked)
-    local items = {}
-    for item in pairs(res.cost) do items[#items + 1] = item end
+    local items, seen = {}, {}
+    for item in pairs(res.cost) do seen[item] = true end
+    for item in pairs(res.refund) do seen[item] = true end
+    for item in pairs(seen) do items[#items + 1] = item end
     table.sort(items)
     for _, item in ipairs(items) do
+        local net = (res.cost[item] or 0) - (res.refund[item] or 0)
         local h = (have and have[item]) or 0
-        if h < res.cost[item] then
-            res.shortfall[#res.shortfall + 1] = { item = item, need = res.cost[item], have = h }
+        if net > h then
+            res.shortfall[#res.shortfall + 1] = { item = item, need = net, have = h }
         end
     end
     return res
 end
 
--- order: pending(reset), add_block each, pending(apply). Any failure after reset -> best-effort reset
--- (clears a half-filled Pending). No blocks -> true, nothing sent. ids <= 0 (or station <= 0) -> false before any call.
-function B.send(native, station, blocks, ids)
+-- order: pending(reset), remove_block each, add_block each, pending(apply) (one apply). Any failure after reset ->
+-- best-effort reset (clears a half-filled Pending). No blocks and no removes -> true, nothing sent.
+-- ids <= 0 (or station <= 0) -> false before any call.
+function B.send(native, station, blocks, ids, removes)
     ids = ids or {}
+    removes = removes or {}
     if (station or 0) <= 0 or (ids.primary or 0) <= 0 or (ids.player or 0) <= 0 then
         return false, B.TEXT.no_ids
     end
-    if not blocks or #blocks == 0 then return true end
+    if #(blocks or {}) == 0 and #removes == 0 then return true end
     local p, pl, ed = ids.primary, ids.player, ids.editing or 0
     local ok, err = native.pending(station, false, true, p, pl, ed)
     if not ok then return false, B.TEXT.reset_fail .. tostring(err) end
-    for _, b in ipairs(blocks) do
+    for _, r in ipairs(removes) do
+        ok, err = native.remove_block(station, r.class, ik(r.gx), ik(r.gy), ik(r.h), r.rot or 0)
+        if not ok then
+            native.pending(station, false, true, p, pl, ed)  -- best effort
+            return false, B.TEXT.remove_fail .. at(r) .. ": " .. tostring(err)
+        end
+    end
+    for _, b in ipairs(blocks or {}) do
         ok, err = native.add_block(station, b.class, ik(b.gx), ik(b.gy), ik(b.h), b.rot or 0)
         if not ok then
             native.pending(station, false, true, p, pl, ed)  -- best effort

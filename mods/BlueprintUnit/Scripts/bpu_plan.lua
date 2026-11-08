@@ -388,9 +388,10 @@ local function plan_blocks(doc, blocks, live, opts)
     local path_of = {}
     for _, b in ipairs(blocks) do path_of[b.class] = path_of[b.class] or b.path end
     for _, jb in ipairs(doc.blocks) do path_of[jb.class] = path_of[jb.class] or jb.path end
-    local function info_of(cls) return live.block_info(cls, path_of[cls]) end
+    -- live blocks carry their own path (MSCore 7th column): real bounds for removal; missing blocks use the file's path
+    local function info_of(cls, path) return live.block_info(cls, path or path_of[cls]) end
     local missing = B.missing_after(doc.blocks, blocks)
-    local res = B.classify(missing, blocks, info_of, live.have or {})
+    local res = B.classify(missing, blocks, info_of, live.have or {}, doc.blocks)
     local bl = {}
     for i, a in ipairs(res.accept) do bl[i] = a.block end
     -- every station class checked has unknown research state: say so once (the per-block notes say which)
@@ -405,11 +406,11 @@ local function plan_blocks(doc, blocks, live, opts)
     if checked > 0 and unknown == checked then
         res.notes[#res.notes + 1] = "research state unreadable for all classes: Station Build placed nothing"
     end
-    local out = { blocks = bl, need = res.cost, count = #bl, notes = res.notes }
+    local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes }
     if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
     if type(opts.trace) == "function" then
-        opts.trace(("station blocks: doc %d, missing %d, accept %d, skipped %d, locked %s"):format(#doc.blocks, #missing, #bl,
-            #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
+        opts.trace(("station blocks: doc %d, missing %d, accept %d, remove %d, skipped %d, locked %s"):format(#doc.blocks, #missing,
+            #bl, #res.remove, #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
         for _, n in ipairs(res.notes) do opts.trace("  " .. n) end
         for _, s in ipairs(res.shortfall) do opts.trace(("  short %s need %d have %d"):format(s.item, s.need, s.have)) end
         opts.trace("station blocks self overlaps: " .. #B.self_overlaps(doc.blocks, info_of))
@@ -722,9 +723,11 @@ local function build(text, live, F, opts)
     for _, c in ipairs(cells) do if placed[cell_of[c]] then placed[c] = true end end
     -- floor/parity via F for placed only (floor failures are placed anyway); overlap pairwise (same layer), pair skipped when neither side is placed
     local floor_src = blocks
-    if bplan and #bplan.blocks > 0 then   -- added station blocks carry floors too
+    if bplan and (#bplan.blocks > 0 or #bplan.remove > 0) then   -- added station blocks carry floors too, removed ones do not
+        local gone = {}
+        for _, r in ipairs(bplan.remove) do gone[r] = true end
         floor_src = {}
-        for _, b in ipairs(blocks) do floor_src[#floor_src + 1] = b end
+        for _, b in ipairs(blocks) do if not gone[b] then floor_src[#floor_src + 1] = b end end
         for _, b in ipairs(bplan.blocks) do floor_src[#floor_src + 1] = b end
     end
     local floors = F.floor_rects(floor_src, F.block_floor)
@@ -938,12 +941,14 @@ local function build(text, live, F, opts)
         refund = refund_all,
         skipped_ug = skipped_ug,
         notes = notes,
-        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN },
+        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN, block_remove = bplan and #bplan.remove or nil },
         removes = removes,
         fp = P.fingerprint(existing),
         valid = true,
-        -- Station Build only (nil when off): accepted block records, their cost, count, refusal list
+        -- Station Build only (nil when off): accepted block records, their cost, removed live blocks and their refund, count, refusal list
         blocks = bplan and bplan.blocks,
+        block_remove = bplan and bplan.remove,
+        block_refund = bplan and bplan.refund,
         block_need = bplan and bplan.need,
         block_count = bplan and bplan.count,
         block_refuse = bplan and bplan.refuse,
@@ -985,6 +990,7 @@ function P.summary(plan)
     end
     s = s .. ", recipe changes " .. c.recipe
     if plan.block_count then s = s .. ", blocks " .. plan.block_count end
+    if plan.block_remove and #plan.block_remove > 0 then s = s .. ", removed " .. #plan.block_remove end
     return s
 end
 
@@ -1027,12 +1033,15 @@ function P.cost_rows(plan)
     local need = {}
     for name, n in pairs(plan.need or {}) do need[name] = n end
     for name, n in pairs(plan.restore or {}) do need[name] = (need[name] or 0) + n end
+    local refund = {}
+    for name, n in pairs(plan.refund or {}) do refund[name] = n end
     for name, n in pairs(plan.block_need or {}) do need[name] = (need[name] or 0) + n end
+    for name, n in pairs(plan.block_refund or {}) do refund[name] = (refund[name] or 0) + n end
     local seen, rows = {}, {}
     for name in pairs(need) do seen[name] = true end
-    for name in pairs(plan.refund or {}) do seen[name] = true end
+    for name in pairs(refund) do seen[name] = true end
     for _, name in ipairs(sorted_keys(seen)) do
-        local nd, rf = need[name] or 0, (plan.refund or {})[name] or 0
+        local nd, rf = need[name] or 0, refund[name] or 0
         if nd > 0 or rf > 0 then
             rows[#rows + 1] = { name = name, need = nd, refund = rf, net = nd - rf }
         end

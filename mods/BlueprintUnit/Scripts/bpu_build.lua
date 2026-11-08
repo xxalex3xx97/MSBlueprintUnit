@@ -1445,13 +1445,13 @@ function B.new(io)
     -- Station Build: ONE send (pending reset, add_block each, pending apply; bpu_blocks). A failed send is not retried.
     local function blocks_send(now, ids)
         local P = R.plan
-        local ok, err = io.send_blocks(P.station, P.blocks, { primary = ids.unit_id, player = ids.player_id, editing = 0 })
+        local ok, err = io.send_blocks(P.station, P.blocks, { primary = ids.unit_id, player = ids.player_id, editing = 0 }, P.remove)
         if not ok then
             trace("station blocks: send failed: " .. tostring(err))
             return fail("station blocks not placed: " .. tostring(err) .. " (nothing was resent)")
         end
         R.stage, R.t_blocks, R.t_next = 18, now, now + POLL_MS
-        set_status("working", ("placing %d station block(s)"):format(#P.blocks))
+        set_status("working", ("placing %d station block(s), removing %d"):format(#P.blocks, #P.remove))
     end
 
     -- stage 18: poll the live station until every block shows (POLL_MS). BLOCKS_MS from the send -> STALL, no resend.
@@ -1463,10 +1463,10 @@ function B.new(io)
             trace("station blocks: station read failed: " .. tostring(err))
             miss = #P.blocks
         else
-            local left = Blk.missing_after(P.blocks, ex)
+            local left = Blk.missing_after(P.blocks, ex, P.remove)
             miss = #left
             if miss == 0 then
-                trace(("station blocks: all %d in place after %d ms"):format(#P.blocks, now - R.t_blocks))
+                trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, now - R.t_blocks))
                 first_step(now)
                 return
             end
@@ -1506,13 +1506,18 @@ function B.new(io)
         local need = {}
         for k, v in pairs(plan.need or {}) do need[k] = v end
         for k, v in pairs(plan.block_need or {}) do need[k] = (need[k] or 0) + v end
+        -- station blocks removed for the file: their cost comes back to the unit on the same apply (refund)
+        local refund_cost = {}
+        for k, v in pairs(plan.refund_cost or plan.refund or {}) do refund_cost[k] = v end
+        for k, v in pairs(plan.block_refund or {}) do refund_cost[k] = (refund_cost[k] or 0) + v end
         local P = {
             station = plan.station, fp = plan.fp,
             place = plan.place or {}, kept = plan.kept or {}, chg = plan.chg or {},
             removed = plan.removed or {}, need = need, refund = plan.refund or {},
-            refund_cost = plan.refund_cost or plan.refund or {},   -- total check: machine refund only (contents are not counted)
+            refund_cost = refund_cost,   -- total check: machine refund (contents are not counted) + removed station blocks
             recChanged = plan.recChanged or 0,
             blocks = plan.blocks or {},   -- station blocks to add (one send, stage 18)
+            remove = plan.block_remove or {},   -- live station blocks in the way (removed in the same send)
         }
         R.plan = P
         R.state = "working"

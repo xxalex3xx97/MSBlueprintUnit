@@ -119,5 +119,97 @@ check("probe bounds: diagonal neighbour does not overlap", not B.overlap(ba, B.b
 check("probe bounds: next level (h+2) does not overlap", not B.overlap(ba, B.box(s01, { gx = 0, gy = 0, h = 2, rot = 0 })))
 check("probe bounds: 3 apart overlaps", B.overlap(ba, B.box(s01, { gx = 3, gy = 0, h = 0, rot = 0 })))
 
+-- ===== removal: live blocks in the way of a missing JSON block =====
+-- probe sizes (2026-11-08): ShipyardSide x -1.99924..0.25, y +-1.99924, z -2..5; Station_01 +-1.99924 xy, z 0..1.99847
+local rinfos = {
+    Station_01 = { station = true, unlocked = true, bounds = { x0 = -1.99924, x1 = 1.99924, y0 = -1.99924, y1 = 1.99924, z0 = 0, z1 = 1.99847 }, cost = { ITEM_Plate = 2 } },
+    Station_02A = { station = true, unlocked = true, bounds = { x0 = -3.99848, x1 = 3.99848, y0 = -3.99848, y1 = 3.99848, z0 = 0, z1 = 1.99847 }, cost = { ITEM_Plate = 6 } },
+    ShipyardSide = { station = true, unlocked = true, bounds = { x0 = -1.99924, x1 = 0.25, y0 = -1.99924, y1 = 1.99924, z0 = -2, z1 = 5 }, cost = { ITEM_Plate = 4, ITEM_Frame = 1 } },
+    Dock = { station = true, unlocked = true, bounds = { x0 = -1.99924, x1 = 1.99924, y0 = -1.99924, y1 = 1.99924, z0 = 0, z1 = 1.99847 }, cost = {} },
+}
+local function rinfo_of(c) return rinfos[c] end
+local SIDE = { class = "ShipyardSide", gx = 0, gy = 0, h = 0, rot = 0, path = "/Game/ShipyardSide" }
+local S1 = { class = "Station_01", gx = 0, gy = 0, h = 0, rot = 0, path = "/Game/Station_01" }
+
+-- the probe case: Station 1x1 where a Shipyard side stands -> side removed, station added
+local rr = B.classify({ S1 }, { SIDE }, rinfo_of, {}, { S1 })
+check("remove: live side in the way is chosen", #rr.accept == 1 and #rr.remove == 1 and rr.remove[1] == SIDE)
+check("remove: note text", rr.notes[1] == "removing ShipyardSide at 0,0,0 (overlaps Station_01 at 0,0,0)")
+check("remove: net cost = added 2 minus refund 4+1", rr.cost.ITEM_Plate == 2 and rr.refund.ITEM_Plate == 4 and rr.refund.ITEM_Frame == 1)
+check("remove: net refund needs nothing", #rr.shortfall == 0)
+
+-- a live block that is itself in the file is never removed: the file overlaps itself, the new block is skipped
+local rk = B.classify({ S1 }, { SIDE }, rinfo_of, {}, { S1, SIDE })
+check("in file: not removed, skipped as occupied", #rk.remove == 0 and #rk.accept == 0 and rk.notes[1] == "Station_01 at 0,0,0: cell occupied or overlaps a block already placed")
+
+-- net cost: 6 Plate for the new block, 4 Plate + 1 Frame refund -> 2 Plate short when holding 1
+local rn = B.classify({ { class = "Station_02A", gx = 0, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, { ITEM_Plate = 1 },
+                      { { class = "Station_02A", gx = 0, gy = 0, h = 0, rot = 0 } })
+check("net: shortfall on net (6-4=2) vs have 1", #rn.shortfall == 1 and rn.shortfall[1].item == "ITEM_Plate" and rn.shortfall[1].need == 2 and rn.shortfall[1].have == 1)
+local rn2 = B.classify({ S1 }, { SIDE }, rinfo_of, { ITEM_Plate = 0 }, { S1 })
+check("net: removal refund covers a 2 Plate block with 0 held", #rn2.shortfall == 0)
+
+-- removed block stops occupying: Station_01 at h=-2 overlaps the side (removed by the first block) but not the first block
+local S1b = { class = "Station_01", gx = 0, gy = 0, h = -2, rot = 0 }
+local rg = B.classify({ S1, S1b }, { SIDE }, rinfo_of, {}, { S1, S1b })
+check("gone: second block accepted after the side is removed", #rg.accept == 2 and #rg.remove == 1)
+check("gone: one note (the removal), no occupied note", #rg.notes == 1 and rg.notes[1]:find("removing", 1, true) ~= nil)
+-- two missing blocks over the same side: removed once
+local rd = B.classify({ S1, { class = "Station_01", gx = 1, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, { S1 })
+check("dedup: side removed once, second block skipped as overlap", #rd.remove == 1 and #rd.accept == 1 and rd.notes[#rd.notes]:find("overlaps another block", 1, true) ~= nil)
+-- probe spacing: a Station 1x1 4 cells away from the side is not in its way; 2 cells away is
+local rp = B.classify({ { class = "Station_01", gx = 4, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, {})
+check("probe: station 4 away from side, no removal", #rp.remove == 0 and #rp.accept == 1)
+local rp2 = B.classify({ { class = "Station_01", gx = 2, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, { { class = "Station_01", gx = 2, gy = 0, h = 0, rot = 0 } })
+check("probe: station 2 away from side overlaps it -> removed", #rp2.remove == 1 and rp2.remove[1] == SIDE)
+-- no path: live block is one cell, nothing removed unless the cell is hit
+local bare = { class = "ShipyardSide", gx = 0, gy = 0, h = 0, rot = 0 }   -- no path: no info, one cell
+local rb = B.classify({ S1 }, { bare }, function(c, p) if p == nil and c == "ShipyardSide" then return nil end return rinfo_of(c) end, {}, { S1 })
+check("no path: one-cell live block, removed when hit", #rb.remove == 1 and rb.refund.ITEM_Plate == nil)
+-- off (no file): old behaviour, no removal
+local ro = B.classify({ S1 }, { SIDE }, rinfo_of, {})
+check("off: no file -> occupied, nothing removed", #ro.remove == 0 and #ro.accept == 0)
+
+-- send: pending reset, remove each, add each, ONE apply, in that order
+local function rfake(fail_at)
+    local n = { calls = {}, applies = 0 }
+    n.pending = function(st, apply, reset)
+        n.calls[#n.calls + 1] = string.format("pending %s %s", tostring(apply), tostring(reset))
+        if apply then n.applies = n.applies + 1 end
+        if fail_at == "reset" and reset and not apply then return false, "boom" end
+        if fail_at == "apply" and apply then return false, "nope" end
+        return true
+    end
+    n.remove_block = function(st, cls, x, y, h, rot)
+        n.calls[#n.calls + 1] = ("remove %s %d,%d,%d r%d"):format(cls, x, y, h, rot)
+        if fail_at == "remove" then return false, "not found" end
+        return true
+    end
+    n.add_block = function(st, cls, x, y, h, rot)
+        n.calls[#n.calls + 1] = "add " .. cls
+        return true
+    end
+    return n
+end
+local rids = { primary = 7, player = 8, editing = 0 }
+local nr = rfake()
+check("send+remove ok", B.send(nr, 3, { S1 }, rids, { SIDE }) == true)
+check("send+remove order: reset, remove, add, one apply", table.concat(nr.calls, ",") == "pending false true,remove ShipyardSide 0,0,0 r0,add Station_01,pending true false"
+    and nr.applies == 1)
+local nf = rfake("remove")
+local okf, ef = B.send(nf, 3, { S1 }, rids, { SIDE })
+check("send remove fail -> false, reset, no add", not okf and ef:find("remove_block failed", 1, true) ~= nil
+    and nf.calls[#nf.calls] == "pending false true" and nf.applies == 0)
+local nno = rfake()
+B.send(nno, 3, { S1 }, rids)
+check("send without removes: no remove_block call", table.concat(nno.calls, ",") == "pending false true,add Station_01,pending true false")
+
+-- wait: added blocks shown but the side still there -> still missing; gone -> done
+local live_side = { SIDE }
+check("wait: side still present -> not done", #B.missing_after({ S1 }, { S1, SIDE }, { SIDE }) == 1)
+check("wait: side gone, block shown -> done", #B.missing_after({ S1 }, { S1 }, { SIDE }) == 0)
+check("wait: side still there and block not shown -> 2 missing", #B.missing_after({ S1 }, live_side, { SIDE }) == 2)
+check("wait: no removes -> old behaviour", #B.missing_after({ S1 }, {}) == 1)
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

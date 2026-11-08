@@ -435,10 +435,21 @@ check("sb: shortfall list", sh and sh.block_refuse and #sh.block_refuse == 1 and
 local cr = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 }, creative = true })
 check("sb: creative skips refusal", cr and cr.block_refuse == nil and cr.block_count == 1)
 
--- occupied cell (BPO_Station_02 overlaps live BPO_Station_01 at 0,0) and unknown class
+-- live BPO_Station_01 at 0,0 is not in the file: removed for BPO_Station_02 at 0,0 (refund 2 ITEM_A, cost 1 ITEM_B)
 local oc = sb_plan(sb_json(sb_block("BPO_Station_02", 0, 0, 0), sb_block("BPO_Gone", 5, 0, 0)))
-check("sb: occupied skipped with note", oc and oc.block_count == 0 and has_note(oc, "BPO_Station_02 at 0,0,0: cell occupied"))
+check("sb: live block in the way removed, file block accepted", oc and oc.block_count == 1 and #oc.block_remove == 1
+    and oc.block_remove[1].class == "BPO_Station_01" and oc.block_refund.ITEM_A == 2)
+check("sb: removal note", has_note(oc, "removing BPO_Station_01 at 0,0,0 (overlaps BPO_Station_02 at 0,0,0)"))
+check("sb: summary adds removed 1", P.summary(oc) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, removed 1")
+check("sb: removed block refund in cost rows, net", P.cost_rows(oc)[1].name == "ITEM_A" and P.cost_rows(oc)[1].refund == 2
+    and P.cost_rows(oc)[1].net == -2 and P.cost_rows(oc)[2].name == "ITEM_B" and P.cost_rows(oc)[2].need == 1)
 check("sb: unknown class note", has_note(oc, "BPO_Gone at 5,0,0: class not in this game"))
+
+-- live block that IS in the file is never removed: file overlaps itself, the second block is skipped as occupied
+local inf = sb_plan(sb_json(sb_block("BPO_Station_01", 0, 0, 0), sb_block("BPO_Station_02", 0, 0, 0)))
+check("sb: in-file live block not removed, overlapping block skipped", inf and inf.block_count == 0 and #inf.block_remove == 0
+    and has_note(inf, "BPO_Station_02 at 0,0,0: cell occupied"))
+check("sb: no removed count in summary when none", inf and P.summary(inf) == "place 0, keep 0, remove 0, recipe changes 0, blocks 0")
 
 -- research state unknown for every class: one note for the run, nothing placed
 local unk = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0), sb_block("BPO_Station_02", 4, 0, 0)),

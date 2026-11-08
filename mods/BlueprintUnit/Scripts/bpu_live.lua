@@ -355,11 +355,12 @@ local function contents_list(inv)
     return out
 end
 
--- Station Build needs the MSCore 0.8.0 natives (add_block, pending, read_block_class). Returns true, or false + reason.
+-- Station Build needs the MSCore 0.8.0 natives (add_block, remove_block, pending, read_block_class). Returns true, or false + reason.
 function L.station_build_capable()
     local M = L.mscore
     local N, FN = M and M.native, M and M.factory_native
-    if N and N.add_block and N.pending and N.read_block_class and FN and FN.add_block and FN.pending and FN.read_block_class then
+    if N and N.add_block and N.remove_block and N.pending and N.read_block_class
+        and FN and FN.add_block and FN.remove_block and FN.pending and FN.read_block_class then
         return true
     end
     return false, "Station Build needs MSCore >= 0.8.0"
@@ -761,16 +762,22 @@ function L.make_io(ctx)
         print(("[BPUnit] config changes: %d ok, %d failed"):format(okc, failc))
         return okc, failc
     end
-    -- Station Build (MSCore 0.8.0): one add sequence through factory_native (bpu_blocks send), every native call traced
+    -- Station Build (MSCore 0.8.0): one remove/add sequence through factory_native (bpu_blocks send), every native call traced
     function io.station_build_capable() return L.station_build_capable() end
-    function io.send_blocks(station, blocks, ids)
+    function io.send_blocks(station, blocks, ids, removes)
         local FN = native
-        if not (FN and FN.add_block and FN.pending) then return false, "MSCore 0.8.0 natives missing" end
+        if not (FN and FN.add_block and FN.remove_block and FN.pending) then return false, "MSCore 0.8.0 natives missing" end
         local traced = {
             pending = function(st, apply, reset, p, pl, ed)
                 local ok, err = FN.pending(st, apply, reset, p, pl, ed)
                 TRACE(("station blocks: pending station=%s apply=%s reset=%s primary=%s player=%s editing=%s -> ok=%s err=%s"):format(
                     tostring(st), tostring(apply), tostring(reset), tostring(p), tostring(pl), tostring(ed), tostring(ok), tostring(err)))
+                return ok, err
+            end,
+            remove_block = function(st, cls, x, y, h, rot)
+                local ok, err = FN.remove_block(st, cls, x, y, h, rot)
+                TRACE(("station blocks: remove_block %s at %s,%s,h%s rot%s -> ok=%s err=%s"):format(tostring(cls), tostring(x),
+                    tostring(y), tostring(h), tostring(rot), tostring(ok), tostring(err)))
                 return ok, err
             end,
             add_block = function(st, cls, x, y, h, rot)
@@ -780,8 +787,9 @@ function L.make_io(ctx)
                 return ok, err
             end,
         }
-        local ok, err = Blk.send(traced, station, blocks, ids)
-        TRACE(("station blocks: send %d block(s) -> ok=%s err=%s"):format(#blocks, tostring(ok), tostring(err)))
+        removes = removes or {}
+        local ok, err = Blk.send(traced, station, blocks, ids, removes)
+        TRACE(("station blocks: send %d add(s), %d remove(s) -> ok=%s err=%s"):format(#blocks, #removes, tostring(ok), tostring(err)))
         return ok, err
     end
     -- live station blocks, fresh native read (no cache): the poll of a Station Build run
