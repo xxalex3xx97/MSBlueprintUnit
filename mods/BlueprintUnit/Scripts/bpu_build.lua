@@ -380,6 +380,13 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
+    -- MSCore redirect is on only while our build runs: every run end calls this. Idempotent, never throws.
+    local function release_redirect()
+        if not R.redirect_ours then return end
+        R.redirect_ours = false
+        local okr, st = pcall(function() return io.redirect_enable and io.redirect_enable(false) end)
+        pcall(trace, ("redirect released: %s"):format(okr and tostring(st) or "error " .. tostring(st)))
+    end
     local nil_traced = false
     nil_hook = function(i, item)   -- totals() saw a nil amount: once per run, with the caller (level 3 = caller of totals)
         if nil_traced then return end
@@ -401,6 +408,7 @@ function B.new(io)
         R.active = false
         R.stage = 0
         mark_changed()
+        release_redirect()
         return false
     end
     local function start_fail(msg)
@@ -442,6 +450,7 @@ function B.new(io)
         R.active = false
         R.stage = 0
         mark_changed()
+        release_redirect()
         return false
     end
 
@@ -493,6 +502,7 @@ function B.new(io)
         R.stage = 0
         R.state = "done"
         R.text = R.base_text
+        release_redirect()
     end
 
     -- Build text of the legacy flow
@@ -1405,6 +1415,7 @@ function B.new(io)
         R.stage = 0
         R.state = "done"
         R.text = text
+        release_redirect()
     end
     local function cfg_wait(now)
         local okr, raw = pcall(io.scan_raw, R.plan.station)
@@ -1485,6 +1496,7 @@ function B.new(io)
     -- opts = { restore = true | false | nil } (Chk_Restore; nil = no checkbox, restore on).
     function builder:start(plan, opts)
         if R.active then return false, "error: busy: another build is running" end
+        release_redirect()   -- leftover from an earlier run (should not happen): never carry the flag into this one
         R = new_run(nil)
         if type(opts) == "table" then R.ui_restore = opts.restore end   -- Chk_Restore: true / false, nil = no checkbox (on)
         if not plan or not plan.valid then return start_fail("import first") end
@@ -1547,6 +1559,11 @@ function B.new(io)
             local terr = total_check(P.need, P.refund_cost, totals(ps), totals(us))
             if terr ~= "" then return start_fail(terr) end
         end
+        -- redirect on for this run only (off again on every end, see release_redirect). Absent io.redirect_enable = off.
+        if io.redirect_enable then
+            R.redirect_ours = true
+            pcall(io.redirect_enable, true)   -- status is read below, the same as before
+        end
         local rs = "off"
         if io.redirect_status then
             local okr, rv = pcall(io.redirect_status)
@@ -1575,6 +1592,7 @@ function B.new(io)
         if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 then
             R.state = "done"
             R.text = "nothing to build"
+            release_redirect()
             return true, "ok nothing to build"
         end
 
@@ -1616,7 +1634,11 @@ function B.new(io)
 
     -- tick(now_ms): one step when t_next has passed. Call every 250-500 ms.
     function builder:tick(now)
-        if not R.active or now < R.t_next then return end
+        if not R.active then
+            release_redirect()   -- safety net: no build running but the redirect is still ours
+            return
+        end
+        if now < R.t_next then return end
         if R.stage < 12 and now - R.t_start > TOTAL_MS then return fail("timeout after 300 s") end
         local s = R.stage
         if s == 11 then send_queue(now)

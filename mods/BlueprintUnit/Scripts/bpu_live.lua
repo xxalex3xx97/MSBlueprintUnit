@@ -644,6 +644,20 @@ function L.make_io(ctx)
         if okc and type(r) == "string" then return r end
         return "off (redirect_status failed)"
     end
+    -- MSCore redirect switch: on only while a Blueprint Unit build runs (bpu_build release_redirect turns it off). Returns the status.
+    function io.redirect_enable(on)
+        local N = L.mscore and L.mscore.native
+        local fn = (N and N.redirect_enable) or rawget(_G, "MSCoreNative_redirect_enable")
+        local st
+        if type(fn) ~= "function" then
+            st = "off (redirect_enable missing)"
+        else
+            local okc, r = pcall(fn, on and true or false)
+            st = (okc and type(r) == "string") and r or "off (redirect_enable failed)"
+        end
+        TRACE(("redirect_enable(%s) -> %s"):format(tostring(on and true or false), st))
+        return st
+    end
     function io.unit_ids()
         return { unit_id = unw(rd(U.unit_inv, "ID")), player_id = unw(rd(rd(player, "Inventory"), "ID")) }
     end
