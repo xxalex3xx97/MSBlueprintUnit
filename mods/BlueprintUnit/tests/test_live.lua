@@ -549,8 +549,8 @@ do
 
     local snap = Live.snapshot(U, F, { station_build = true, player = W.player })
     local info = snap.block_info("BPO_A", "/G/BPO_A.BPO_A_C")
-    check(info and info.station == true and info.unlocked == nil and info.cost.ITEM_A == 3 and info.bounds.x0 == 0 and info.bounds.x1 == 1,
-          "block_info: station, cost map, bounds from raw /65536")
+    check(info and info.station == true and info.unlocked == nil and info.cost.ITEM_A == 3 and info.bounds.x0 == 0 and info.bounds.x1 == 0.25,
+          "block_info: station, cost map, bounds from raw /65536 / 4 (xy)")
     check(snap.block_info("X", "/G/X.X_C") == nil and snap.block_info("BPO_A", nil) == nil, "block_info: unknown path or no path -> nil")
     check(type(snap.have) == "table" and type(snap.creative) == "boolean", "snapshot: have table, creative boolean")
     local plain = Live.snapshot(U, F)

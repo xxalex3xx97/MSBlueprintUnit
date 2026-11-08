@@ -111,5 +111,13 @@ check("send apply fail -> false + reset", not ok3 and n3.calls[#n3.calls] == "pe
 local n4 = fake("reset")
 check("send reset fail -> false, no add", not B.send(n4, 3, blks, ids) and #n4.calls == 1)
 
+-- real probe bounds (2026-11-08, raw/65536 then /4): Station_01 spans +-7.99695 -> +-1.99924 in grid units; neighbours 4 apart must not overlap
+local s01 = { bounds = { x0 = -7.9969482421875 / 4, x1 = 7.9969482421875 / 4, y0 = -7.9969482421875 / 4, y1 = 7.9969482421875 / 4, z0 = 0, z1 = 3.9969482421875 / 2 } }
+local ba = B.box(s01, { gx = 0, gy = 0, h = 0, rot = 0 })
+check("probe bounds: neighbour 4 apart does not overlap", not B.overlap(ba, B.box(s01, { gx = 4, gy = 0, h = 0, rot = 0 })))
+check("probe bounds: diagonal neighbour does not overlap", not B.overlap(ba, B.box(s01, { gx = 4, gy = 4, h = 0, rot = 0 })))
+check("probe bounds: next level (h+2) does not overlap", not B.overlap(ba, B.box(s01, { gx = 0, gy = 0, h = 2, rot = 0 })))
+check("probe bounds: 3 apart overlaps", B.overlap(ba, B.box(s01, { gx = 3, gy = 0, h = 0, rot = 0 })))
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

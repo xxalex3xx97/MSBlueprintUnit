@@ -377,10 +377,12 @@ local function static_info(path)
         if ok and type(info) == "table" and info.min and info.max then
             local cost = {}
             for _, c in ipairs(info.cost or {}) do cost[c.item] = c.amount end
-            local s = 65536
+            -- BlockBounds raw/65536 is 4x the grid unit horizontally and 2x vertically (probe 2026-11-08: Station_01 spans 16 but its blocks sit 4 apart,
+            -- Station_02A spans 32 at 8 apart; heights span 4 per level of 2). The game keeps each box a hair under its size so inclusive compares do not touch.
+            local s, sxy, sz = 65536, 4, 2
             r = { station = info.station == true, cost = cost,
-                  bounds = { x0 = info.min.x / s, x1 = info.max.x / s, y0 = info.min.y / s, y1 = info.max.y / s,
-                             z0 = info.min.z / s, z1 = info.max.z / s } }
+                  bounds = { x0 = info.min.x / s / sxy, x1 = info.max.x / s / sxy, y0 = info.min.y / s / sxy, y1 = info.max.y / s / sxy,
+                             z0 = info.min.z / s / sz, z1 = info.max.z / s / sz } }
         end
         BINFO[path] = r
     end
