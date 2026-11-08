@@ -36,5 +36,38 @@ check(W.pure.checkedOf({ IsChecked = function() return true end }) == true, "res
 check(W.pure.checkedOf(nil) == nil, "restore box: missing widget gives nil")
 check(W.pure.checkedOf({ IsChecked = function() return "yes" end }) == nil, "restore box: non-boolean gives nil")
 
+-- Station Build hint: shown only when ticked on an MSCore without the 0.8.0 natives
+check(W.pure.stationHint(true, false) == "Station Build needs MSCore 0.8.0 or newer.", "station hint: ticked, old MSCore -> hint")
+check(W.pure.stationHint(true, true) == "", "station hint: ticked, 0.8.0 -> no hint")
+check(W.pure.stationHint(false, false) == "", "station hint: not ticked -> no hint")
+
+-- probe fixtures plan through bpu_plan: P1 station block and P2 dock at (0,4), live station has BPO_Station_01 at (0,0)
+local Plan = require("bpu_plan")
+local FX = dofile(dir .. "fixtures/mscore_factory_snapshot.lua")
+local function fixture(name)
+    local f = assert(io.open(dir .. "fixtures/" .. name, "rb"))
+    local s = f:read("a")
+    f:close()
+    return s
+end
+local FX_INFO = {
+    BPO_Station_01 = { station = true, unlocked = true, bounds = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }, cost = { ITEM_A = 2 } },
+    BPO_Dock_2 = { station = true, unlocked = true, bounds = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }, cost = { ITEM_A = 1 } },
+}
+local function fx_live(over)
+    local l = { station = 42, blocks = { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0 } }, existing = {},
+                recipes = {}, buildables = {}, block_info = function(cls) return FX_INFO[cls] end, have = { ITEM_A = 10 } }
+    for k, v in pairs(over or {}) do l[k] = v end
+    return l
+end
+for _, name in ipairs({ "probe_p1_station01.json", "probe_p2_dock.json" }) do
+    local p = Plan.plan(fixture(name), fx_live(), FX, { station_build = true })
+    check(p and p.valid and p.block_count == 1 and p.blocks[1].gy == 4 and p.block_need.ITEM_A >= 1,
+          name .. ": station build plans the one block at (0,4)")
+    check(p and Plan.summary(p):sub(-10) == ", blocks 1", name .. ": summary ends with blocks 1")
+    local off, offerr = Plan.plan(fixture(name), fx_live(), FX, {})
+    check(off == nil and offerr:find("These blocks are not on the station grid", 1, true) ~= nil, name .. ": station build off -> unchanged refusal")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -21,9 +21,11 @@
 -- Mods/BlueprintUnit/restore_off.txt exists or the Chk_Restore checkbox is unchecked (io.restore_mode, opts.restore).
 -- Shortages and full containers are noted; a Build never fails because of contents. Steps are traced in bpu_trace.log.
 
+local Blk = require("bpu_blocks")
 local B = {}
 
 local TOTAL_MS = 300000   -- whole run
+local BLOCKS_MS = 10000   -- Station Build: the station blocks must all show within this after their one send, else STALL (never resent)
 local STAGE_MS = 3000     -- staging round stalls after this
 local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
 local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the player inventory within this, else STALL
@@ -378,6 +380,13 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
+    -- MSCore redirect is on only while our build runs: every run end calls this. Idempotent, never throws.
+    local function release_redirect()
+        if not R.redirect_ours then return end
+        R.redirect_ours = false
+        local okr, st = pcall(function() return io.redirect_enable and io.redirect_enable(false) end)
+        pcall(trace, ("redirect released: %s"):format(okr and tostring(st) or "error " .. tostring(st)))
+    end
     local nil_traced = false
     nil_hook = function(i, item)   -- totals() saw a nil amount: once per run, with the caller (level 3 = caller of totals)
         if nil_traced then return end
@@ -399,6 +408,7 @@ function B.new(io)
         R.active = false
         R.stage = 0
         mark_changed()
+        release_redirect()
         return false
     end
     local function start_fail(msg)
@@ -440,6 +450,7 @@ function B.new(io)
         R.active = false
         R.stage = 0
         mark_changed()
+        release_redirect()
         return false
     end
 
@@ -491,6 +502,7 @@ function B.new(io)
         R.stage = 0
         R.state = "done"
         R.text = R.base_text
+        release_redirect()
     end
 
     -- Build text of the legacy flow
@@ -1403,6 +1415,7 @@ function B.new(io)
         R.stage = 0
         R.state = "done"
         R.text = text
+        release_redirect()
     end
     local function cfg_wait(now)
         local okr, raw = pcall(io.scan_raw, R.plan.station)
@@ -1428,21 +1441,96 @@ function B.new(io)
         R.t_next = now + PIPE_POLL_MS
     end
 
+    -- the factory steps after the station blocks (or at once when there are none): first removal / slice / chunk
+    local function first_step(now)
+        if R.flow == "redirect" then
+            R.stage = 11
+            send_queue(now)   -- first slice sent here (a refusal before any command: start returns false)
+        elseif #R.rem_list > 0 then
+            send_batches(now)   -- first batch sent here (a refusal before any command: start returns false)
+        else
+            chunk_start(now)    -- no removal: the placements go back to back
+        end
+    end
+
+    -- Station Build: ONE send (pending reset, add_block each, pending apply; bpu_blocks). A failed send is not retried.
+    local function blocks_send(now, ids)
+        local P = R.plan
+        local ok, err = io.send_blocks(P.station, P.blocks, { primary = ids.unit_id, player = ids.player_id, editing = 0 }, P.remove)
+        if not ok then
+            trace("station blocks: send failed: " .. tostring(err))
+            return fail(Blk.TEXT.sent_failed)
+        end
+        R.stage, R.t_blocks, R.t_next = 18, now, now + POLL_MS
+        set_status("working", ("placing %d station block(s) and removing %d in the way"):format(#P.blocks, #P.remove))
+    end
+
+    -- stage 18: poll the live station until every block shows (POLL_MS). BLOCKS_MS from the send -> STALL, no resend.
+    local function blocks_wait(now)
+        local P = R.plan
+        local ex, err = io.scan_blocks(P.station)
+        local miss = 0
+        if not ex then
+            trace("station blocks: station read failed: " .. tostring(err))
+            miss = #P.blocks
+        else
+            local left = Blk.missing_after(P.blocks, ex, P.remove)
+            miss = #left
+            if miss == 0 then
+                trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, now - R.t_blocks))
+                first_step(now)
+                return
+            end
+            trace(("station blocks: %d of %d still missing"):format(miss, #P.blocks))
+        end
+        if now - R.t_blocks >= BLOCKS_MS then
+            trace(("station blocks: not placed in %d ms, %d missing"):format(BLOCKS_MS, miss))
+            return fail(Blk.TEXT.stalled:format(BLOCKS_MS // 1000, miss))
+        end
+        R.t_next = now + POLL_MS
+    end
+
     local builder = {}
 
     -- start(plan, opts): checks station, totals, creative; sends the first removal batch. Nothing is sent on a refusal.
     -- opts = { restore = true | false | nil } (Chk_Restore; nil = no checkbox, restore on).
     function builder:start(plan, opts)
         if R.active then return false, "error: busy: another build is running" end
+        release_redirect()   -- leftover from an earlier run (should not happen): never carry the flag into this one
         R = new_run(nil)
         if type(opts) == "table" then R.ui_restore = opts.restore end   -- Chk_Restore: true / false, nil = no checkbox (on)
         if not plan or not plan.valid then return start_fail("import first") end
+        -- Station Build (plan.block_count set): refused before any send when items are short, or when MSCore is too old
+        if plan.block_count then
+            if io.station_build_capable then
+                local okc, why = io.station_build_capable()
+                if not okc then return start_fail(why) end
+            end
+            if plan.block_refuse then
+                local parts = {}
+                for _, s in ipairs(plan.block_refuse) do
+                    local name = s.item:gsub("^ITEM_", "")
+                    parts[#parts + 1] = ("need %d %s, have %d (%d short)"):format(s.need, name, s.have, s.need - s.have)
+                end
+                return start_fail(Blk.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; " .. Blk.TEXT.nothing_built .. ".")
+            end
+        end
+        -- machine need + station block cost: one total check (player + unit + refund)
+        local need = {}
+        for k, v in pairs(plan.need or {}) do need[k] = v end
+        for k, v in pairs(plan.block_need or {}) do need[k] = (need[k] or 0) + v end
+        -- station blocks removed for the file: their cost comes back to the unit on the same apply (refund)
+        local refund_cost = {}
+        for k, v in pairs(plan.refund_cost or plan.refund or {}) do refund_cost[k] = v end
+        for k, v in pairs(plan.block_refund or {}) do refund_cost[k] = (refund_cost[k] or 0) + v end
         local P = {
             station = plan.station, fp = plan.fp,
             place = plan.place or {}, kept = plan.kept or {}, chg = plan.chg or {},
-            removed = plan.removed or {}, need = plan.need or {}, refund = plan.refund or {},
-            refund_cost = plan.refund_cost or plan.refund or {},   -- total check: machine refund only (contents are not counted)
+            removed = plan.removed or {}, need = need, refund = plan.refund or {},
+            refund_cost = refund_cost,   -- total check: machine refund (contents are not counted) + removed station blocks
             recChanged = plan.recChanged or 0,
+            blocks = plan.blocks or {},   -- station blocks to add (one send, stage 18)
+            remove = plan.block_remove or {},   -- live station blocks in the way (removed in the same send)
         }
         R.plan = P
         R.state = "working"
@@ -1471,6 +1559,14 @@ function B.new(io)
             local terr = total_check(P.need, P.refund_cost, totals(ps), totals(us))
             if terr ~= "" then return start_fail(terr) end
         end
+        -- redirect on for this run only (off again on every end, see release_redirect). Absent io.redirect_enable = off.
+        if io.redirect_enable then
+            -- already on (opt-in file refund_redirect_on.txt, another mod): leave it on afterwards, only switch off what we switched on
+            local oks, prev = false, nil
+            if io.redirect_status then oks, prev = pcall(io.redirect_status) end
+            R.redirect_ours = not (oks and type(prev) == "string" and prev:sub(1, 2) == "on")
+            pcall(io.redirect_enable, true)   -- status is read below, the same as before
+        end
         local rs = "off"
         if io.redirect_status then
             local okr, rv = pcall(io.redirect_status)
@@ -1496,9 +1592,10 @@ function B.new(io)
             if type(m.refund) ~= "table" then return start_fail("refund unknown for " .. tostring(m.bcls) .. ", import again") end
             R.rem_list[#R.rem_list + 1] = { id = m.id, bcls = m.bcls, refund = m.refund }
         end
-        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 then
+        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 then
             R.state = "done"
             R.text = "nothing to build"
+            release_redirect()
             return true, "ok nothing to build"
         end
 
@@ -1529,13 +1626,10 @@ function B.new(io)
 
         R.active = true
         R.overlap = overlaps(P.removed, P.place)
-        if R.flow == "redirect" then
-            R.stage = 11
-            send_queue(now)   -- first slice sent here (a refusal before any command: start returns false)
-        elseif #R.rem_list > 0 then
-            send_batches(now)   -- first batch sent here (a refusal before any command: start returns false)
+        if #P.blocks > 0 then
+            blocks_send(now, ids)   -- stage 18: the blocks go in first, first_step runs once they show
         else
-            chunk_start(now)    -- no removal: the placements go back to back
+            first_step(now)
         end
         if R.state == "error" then return false, "error: " .. R.text end
         return true, "ok build started"
@@ -1543,7 +1637,11 @@ function B.new(io)
 
     -- tick(now_ms): one step when t_next has passed. Call every 250-500 ms.
     function builder:tick(now)
-        if not R.active or now < R.t_next then return end
+        if not R.active then
+            release_redirect()   -- safety net: no build running but the redirect is still ours
+            return
+        end
+        if now < R.t_next then return end
         if R.stage < 12 and now - R.t_start > TOTAL_MS then return fail("timeout after 300 s") end
         local s = R.stage
         if s == 11 then send_queue(now)
@@ -1558,6 +1656,7 @@ function B.new(io)
         elseif s == 6 then charge_wait(now)
         elseif s == 8 then drain_wait(now)
         elseif s == 10 then empty_wait(now)
+        elseif s == 18 then blocks_wait(now)
         else fail("internal: unknown stage " .. s) end
     end
 

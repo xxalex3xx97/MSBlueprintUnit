@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+Station Build needs **MSCore 0.8.0 or newer** (the add_block, pending and read_block_class natives). Without it the rest of the mod works as before.
+
+### Added
+- **Station Build (place station blocks + factory)** checkbox (`Chk_StationBuild`, default unchecked). Ticked: the JSON's station blocks are placed first (one add sequence through MSCore), then the factory as before.
+- Block rules: a class not in this game, a non-station block, a block whose research state is unknown, and a cell already occupied or overlapping another block of the file are skipped with a note. Locked (not researched) classes are listed as locked.
+- Research state is read in Lua (`DMSWorld:GetResearchState():IsBlockUnlocked`); when it cannot be read the block is skipped, and one note says Station Build placed nothing when that holds for every class.
+- Block costs are added to the cost list. If the unit and player together lack items for all blocks, Build is refused with the shortfall list and nothing is sent. Creative mode skips that refusal.
+- Summary adds `blocks N` when the checkbox is ticked.
+- A live block that stands in the way of a missing block of the file (and is not in the file itself) is **removed** first, then the block is placed, in one apply (reset, remove, add, apply). The unit block itself is never removed. The refund of the removed block is netted against the new block cost. Summary adds `removed M`.
+- Notes are plain sentences ("Removed the Shipyard side that was in the way of a Station 1x1."), technical detail goes to `bpu_trace.log`, whose lines now carry the date.
+- A splitter that already exists with different port settings is removed and placed again with the new config ("N splitters replaced").
+- Ticked on an older MSCore: the hint under the box and the status line read "Station Build needs MSCore 0.8.0 or newer"; Import and Build stop.
+- Trace (`bpu_trace.log`): every add, the poll of the station blocks, the research-state read per class.
+
+### Known limits
+- Tested in game (2026-11-08): research read, replace of a Shipyard side by a Station 1x1, the apply. Not tested: blocks of other classes and rotations, machines standing on a removed block (the game refunds as for the factory).
+- Machines of a placed block show up in the game 20-30 s later (the existing overlay covers the wait).
+
 ## [0.2.0] - 2026-11-08
 
 Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes. Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size.

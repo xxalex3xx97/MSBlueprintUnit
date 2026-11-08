@@ -522,6 +522,107 @@ do
     check(oke == false and tostring(msge):find("boom", 1, true) ~= nil, "split: erroring native -> false, error text")
 end
 
+-- Station Build (B3): capability, snapshot extras (lazy block_info), send_blocks / scan_blocks through make_io
+do
+    local saved = Live.mscore
+    local nat_calls = {}
+    local FN = {
+        read_station = saved.factory_native.read_station,
+        read_inventory = saved.factory_native.read_inventory,
+        add_block = function(...) nat_calls[#nat_calls + 1] = { "add_block", ... }; return true end,
+        remove_block = function(...) nat_calls[#nat_calls + 1] = { "remove_block", ... }; return true end,
+        pending = function(...) nat_calls[#nat_calls + 1] = { "pending", ... }; return true end,
+        read_block_class = function(path)
+            if path == "/G/BPO_A.BPO_A_C" then
+                return { station = true, ship = false, machines = 0, min = { x = 0, y = 0, z = 0 }, max = { x = 65536, y = 0, z = 0 },
+                         cost = { { item = "ITEM_A", amount = 3 } } }
+            end
+            return nil, "not found"
+        end,
+    }
+    Live.mscore = { factory_native = FN }
+    local okc, whyc = Live.station_build_capable()
+    check(not okc and whyc == "Station Build needs MSCore 0.8.0 or newer.", "station build: no 0.8.0 natives -> refused")
+    local oks, errs = pcall(Live.snapshot, U, F, { station_build = true })
+    check(not oks and tostring(errs):find("Station Build needs MSCore 0.8.0 or newer.", 1, true) ~= nil, "station build: snapshot refuses without 0.8.0 natives")
+    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    check(Live.station_build_capable() == true, "station build: 0.8.0 natives present")
+    local noRm = { add_block = FN.add_block, pending = FN.pending, read_block_class = FN.read_block_class }
+    Live.mscore = { factory_native = FN, native = noRm }
+    check(Live.station_build_capable() == false, "station build: no remove_block -> refused")
+    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+
+    local snap = Live.snapshot(U, F, { station_build = true, player = W.player })
+    local info = snap.block_info("BPO_A", "/G/BPO_A.BPO_A_C")
+    check(info and info.station == true and info.unlocked == nil and info.cost.ITEM_A == 3 and info.bounds.x0 == 0 and info.bounds.x1 == 0.25,
+          "block_info: station, cost map, bounds from raw /65536 / 4 (xy)")
+    check(snap.block_info("X", "/G/X.X_C") == nil and snap.block_info("BPO_A", nil) == nil, "block_info: unknown path or no path -> nil")
+    check(type(snap.have) == "table" and type(snap.creative) == "boolean", "snapshot: have table, creative boolean")
+    local plain = Live.snapshot(U, F)
+    check(plain.block_info == nil and plain.have == nil and plain.creative == nil, "snapshot: no Station Build fields when off")
+
+    local ioB = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = FN, plan_mod = P })
+    local okb = ioB.send_blocks(42, { { class = "BPO_A", gx = 1, gy = 0, h = 0, rot = 1 } }, { primary = 8, player = 7, editing = 0 })
+    check(okb and #nat_calls == 3 and nat_calls[1][2] == 42 and nat_calls[1][3] == false and nat_calls[1][4] == true
+          and nat_calls[1][5] == 8 and nat_calls[1][6] == 7 and nat_calls[1][7] == 0
+          and nat_calls[2][1] == "add_block" and nat_calls[2][3] == "BPO_A" and nat_calls[2][4] == 1 and nat_calls[2][7] == 1
+          and nat_calls[3][3] == true and nat_calls[3][4] == false, "send_blocks: pending reset, add_block, pending apply")
+    -- with a removal: pending reset, remove_block, add_block, pending apply (one apply), removes passed as 4th arg
+    nat_calls = {}
+    local okr = ioB.send_blocks(42, { { class = "BPO_A", gx = 1, gy = 0, h = 0, rot = 1 } }, { primary = 8, player = 7, editing = 0 },
+        { { class = "BPO_Old", gx = 3, gy = 0, h = 2, rot = 3 } })
+    local seq = {}
+    for _, c in ipairs(nat_calls) do seq[#seq + 1] = c[1] .. (c[1] == "pending" and (c[3] and "A" or "R") or "") end   -- c[3] apply, c[4] reset
+    check(okr and table.concat(seq, ",") == "pending" .. "R,remove_block,add_block,pendingA", "send_blocks removes: reset, remove, add, one apply (" .. table.concat(seq, ",") .. ")")
+    check(nat_calls[2][3] == "BPO_Old" and nat_calls[2][4] == 3 and nat_calls[2][5] == 0 and nat_calls[2][6] == 2 and nat_calls[2][7] == 3,
+          "send_blocks removes: remove_block args station, class, x, y, h, rot")
+    local sbk = ioB.scan_blocks(42)
+    check(sbk and #sbk == 1 and sbk[1].class == "BPO_Station_01", "scan_blocks: fresh station block list")
+    local ioNo = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = {}, plan_mod = P })
+    local okn, errn = ioNo.send_blocks(42, { { class = "BPO_A", gx = 1, gy = 0, h = 0, rot = 0 } }, { primary = 8, player = 7, editing = 0 })
+    check(okn == false and errn == "MSCore 0.8.0 natives missing", "send_blocks: no natives -> false, nothing called")
+    Live.mscore = saved
+end
+
+-- Station Build: unlocked read in Lua (DMSWorld:GetResearchState():IsBlockUnlocked(class object)); every failure = nil
+do
+    local saved = Live.mscore
+    local mode = "true"
+    local rsobj = { IsBlockUnlocked = function()
+        if mode == "err" then error("no such method") end
+        if mode == "str" then return "yes" end
+        return mode == "true"
+    end }
+    local worldobj = { IsValid = alive, GetResearchState = function() return rsobj end }
+    local savedWorld, savedSFO = world.DMSWorld, StaticFindObject
+    world.DMSWorld = { worldobj }
+    StaticFindObject = function(p) return { IsValid = alive, path = p } end
+    local FN = { read_station = saved.factory_native.read_station, read_inventory = saved.factory_native.read_inventory,
+        read_block_class = function(p)
+            if p == "/G/BPO_A.BPO_A_C" then
+                return { station = true, ship = false, machines = 0, min = { x = 0, y = 0, z = 0 }, max = { x = 65536, y = 0, z = 0 },
+                         cost = { { item = "ITEM_A", amount = 3 } } }
+            end
+            return nil, "not found"
+        end,
+        add_block = function() return true end, remove_block = function() return true end, pending = function() return true end }
+    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    local function unl(m)
+        mode = m
+        return Live.snapshot(U, F, { station_build = true, player = W.player }).block_info("BPO_A", "/G/BPO_A.BPO_A_C")
+    end
+    check(unl("true").unlocked == true, "unlock: IsBlockUnlocked true -> unlocked true")
+    check(unl("false").unlocked == false, "unlock: false -> unlocked false")
+    check(unl("err").unlocked == nil, "unlock: method error -> nil (unknown)")
+    check(unl("str").unlocked == nil, "unlock: non-boolean -> nil")
+    world.DMSWorld = nil
+    check(unl("true").unlocked == nil, "unlock: no DMSWorld -> nil")
+    world.DMSWorld = { worldobj }
+    worldobj.GetResearchState = function() error("no state") end
+    check(unl("true").unlocked == nil, "unlock: GetResearchState error -> nil")
+    world.DMSWorld, StaticFindObject, Live.mscore = savedWorld, savedSFO, saved
+end
+
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

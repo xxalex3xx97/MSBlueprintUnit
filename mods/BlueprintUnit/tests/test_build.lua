@@ -1,6 +1,7 @@
 -- test_build: plain asserts for Scripts/bpu_build.lua (pure helpers + build flows on a fake io).
 -- Run: lua test_build.lua   (exit 0 = all pass, 1 = failures)
 local dir = (arg and arg[0] or ""):match("^(.*)[/\\]") or "."
+package.path = dir .. "/../Scripts/?.lua;" .. package.path   -- bpu_build requires bpu_blocks (Station Build)
 local B = dofile(dir .. "/../Scripts/bpu_build.lua")
 local P = B.pure
 
@@ -156,7 +157,19 @@ local function fake(spec)
 
     local io = {}
     local redirect = type(spec.redirect) == "string" and spec.redirect:sub(1, 2) == "on"
-    if spec.redirect ~= nil then io.redirect_status = function() return spec.redirect end end
+    f.rd_log = {}   -- redirect switch calls in order: "enable:true", "status", "enable:false"
+    -- the switch has a state: it starts as spec.rd_initial (default off; without redirect_enable it is simply spec.redirect), enable(true) turns it
+    -- into spec.redirect, enable(false) into off. redirect_status reads the state.
+    f.rd_state = spec.no_enable and spec.redirect or spec.rd_initial or "off"
+    if spec.redirect ~= nil then io.redirect_status = function() f.rd_log[#f.rd_log + 1] = "status"; return f.rd_state end end
+    if not spec.no_enable then
+        io.redirect_enable = function(on)
+            f.rd_log[#f.rd_log + 1] = "enable:" .. tostring(on)
+            if spec.enable_error then error("enable boom") end
+            f.rd_state = on and (spec.redirect or "off") or "off"
+            return f.rd_state
+        end
+    end
     f.order = {}   -- sent commands in order: "rm:<id>" / "pl:<x>"
     -- containers (restore): id -> { slots }. A placed container gets id next_id + 500 (never a player/unit id)
     f.containers = spec.containers or {}
@@ -1970,6 +1983,270 @@ do
     local st3, waited = cfg_run({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true })
     check(st3.state == "done" and not st3.text:find("config", 1, true) and waited >= 120000 and waited < 130000,
           "config check: machine never shows -> no note after 120 s (" .. st3.text .. ")")
+end
+
+-- ===== Station Build: station blocks go in first (one send, polled), then the factory; refusals before any send =====
+local BLK = { class = "BPO_Station_02", gx = 2, gy = 0, h = 0, rot = 0 }
+local function blocks_fake(spec)
+    local f = fake(spec)
+    f.sent_blocks, f.blocks_out, f.shown_at = 0, nil, 0
+    f.io.station_build_capable = function() return spec.capable ~= false, "Station Build needs MSCore 0.8.0 or newer." end
+    f.io.send_blocks = function(_, blocks, ids)
+        f.sent_blocks = f.sent_blocks + 1
+        f.block_ids = ids
+        if spec.block_send_fail then return false, "add_block failed" end
+        f.blocks_out, f.shown_at = blocks, f.clock + (spec.block_delay or 0)
+        return true
+    end
+    f.io.scan_blocks = function()
+        local out = {}
+        if f.blocks_out and not spec.block_never and f.clock >= f.shown_at then
+            for i, b in ipairs(f.blocks_out) do out[i] = { class = b.class, gx = b.gx, gy = b.gy, h = b.h, rot = b.rot } end
+        end
+        return out
+    end
+    return f
+end
+local function with_blocks(f, need_blocks, need_cost, refuse)
+    local p = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p.blocks, p.block_need, p.block_count, p.block_refuse = need_blocks, need_cost, #need_blocks, refuse
+    return p
+end
+
+-- placed after one send: machines wait for the blocks, then go; exactly one send
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), block_delay = 1000 })
+    local b = B.new(f.io)
+    local ok = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    check(ok and f.sent_blocks == 1 and f.calls.pl == 0 and b:status().state == "working", "station blocks: one send at start, no machine placed yet")
+    local st = run(b, f)
+    check(st.state == "done" and f.sent_blocks == 1 and f.calls.pl == 1, "station blocks: shown, then factory placed, still one send (" .. st.text .. ")")
+    check(f.block_ids.primary == 202 and f.block_ids.player == 101 and f.block_ids.editing == 0, "station blocks: ids unit=primary, player, editing 0")
+end
+
+-- shortfall in the plan: refused before any send
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }, { { item = "ITEM_Plate", need = 2, have = 0 } }), {})
+    check(not ok and f.sent_blocks == 0 and f.calls.pl == 0 and msg:find("Not enough items for the station blocks: need 2 Plate, have 0 (2 short); nothing was built.", 1, true),
+          "station blocks: shortfall refused, nothing sent (" .. msg .. ")")
+end
+
+-- total check at start counts machines + blocks: 3 + 2 needed, 4 held
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 4) }, 2) })
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.need = { ITEM_Plate = 3 }
+    local ok, msg = b:start(p, {})
+    check(not ok and msg == "error: not enough items: Plate x1" and f.sent_blocks == 0 and f.calls.pl == 0, "station blocks: total check includes block cost (" .. msg .. ")")
+end
+
+-- blocks never show: STALL after 10 s, not sent again
+do
+    local f = blocks_fake({ block_never = true, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    local st, waited = run(b, f)
+    check(st.state == "error" and st.text:find("The station blocks did not all appear within 10 s (1 still missing); nothing was resent.", 1, true)
+          and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: never shown -> stall after 10 s, no resend (" .. st.text .. ")")
+end
+
+-- send fails: start refuses, no resend, no machine placed
+do
+    local f = blocks_fake({ block_send_fail = true, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    check(not ok and f.sent_blocks == 1 and f.calls.pl == 0 and msg:find("The station blocks could not be sent; nothing was resent.", 1, true),
+          "station blocks: send failure -> error, not resent (" .. msg .. ")")
+end
+
+-- creative: no total check, blocks still sent
+do
+    local f = blocks_fake({ creative = true, player = inv({}, 2), unit = inv({}, 2) })
+    local b = B.new(f.io)
+    local ok = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 100 }), {})
+    check(ok and f.sent_blocks == 1, "station blocks: creative skips the total check, blocks sent")
+end
+
+-- removal: the send gets the removes, the poll waits until the removed block is gone as well as the added one shows
+do
+    local f = blocks_fake({ block_delay = 1000, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local removed_gone_at = 3000
+    local live_old = { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 }
+    f.io.send_blocks = function(_, blocks, ids, removes)
+        f.sent_blocks = f.sent_blocks + 1
+        f.sent_removes = removes
+        f.blocks_out, f.shown_at = blocks, f.clock + 1000
+        return true
+    end
+    local base_scan = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base_scan()
+        if f.clock < removed_gone_at then out[#out + 1] = { class = live_old.class, gx = 9, gy = 0, h = 0, rot = 0 } end
+        return out
+    end
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.block_remove = { live_old }
+    local ok = b:start(p, {})
+    local st = run(b, f)
+    check(ok and f.sent_removes and #f.sent_removes == 1 and f.sent_removes[1] == live_old, "station removes: passed to the one send")
+    check(st.state == "done" and f.sent_blocks == 1 and f.calls.pl == 1 and f.clock >= removed_gone_at,
+          "station removes: waits until the removed block is gone, then factory (" .. st.text .. ")")
+end
+
+-- removal never goes away: STALL after 10 s, not sent again, message as before
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f.io.send_blocks = function(_, blocks, ids, removes) f.sent_blocks = f.sent_blocks + 1; f.blocks_out, f.shown_at = blocks, f.clock; return true end
+    local base_scan = f.io.scan_blocks
+    f.io.scan_blocks = function() local out = base_scan(); out[#out + 1] = { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 }; return out end
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.block_remove = { { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 } }
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "error" and st.text:find("The station blocks did not all appear within 10 s (1 still missing); nothing was resent.", 1, true)
+          and f.sent_blocks == 1 and f.calls.pl == 0, "station removes: removed block never gone -> stall, no resend (" .. st.text .. ")")
+end
+
+-- MSCore without the 0.8.0 natives: refused before any send
+do
+    local f = blocks_fake({ capable = false, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
+    check(not ok and f.sent_blocks == 0 and msg == "error: Station Build needs MSCore 0.8.0 or newer.", "station blocks: old MSCore refused (" .. msg .. ")")
+end
+
+-- ===== redirect switch: on only while our build runs (enable(true) before the status read, enable(false) once per end) =====
+local function count(t, v) local n = 0; for _, x in ipairs(t) do if x == v then n = n + 1 end end; return n end
+local RON2 = "on: redirect=on probe_log=off groups=yes"
+local function removed_one(id) return { { id = id, bcls = "BP_OLD", x = 100, y = 0 } } end
+-- the R table of a builder: upvalue of builder:tick (test only)
+local function run_of(b)
+    for i = 1, 40 do
+        local name, v = debug.getupvalue(b.tick, i)
+        if name == nil then break end
+        if name == "R" then return v end
+    end
+end
+
+-- finish, redirect flow: enable(true) before the status, enable(false) exactly once at the end
+do
+    local f = fake({ redirect = RON2, player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    local st = run(b, f)
+    check(ok and st.flow == "redirect" and f.rd_log[1] == "status" and f.rd_log[2] == "enable:true" and f.rd_log[3] == "status",
+          "redirect switch: enable(true) before status, flow redirect (" .. table.concat(f.rd_log, ",") .. ")")
+    check(st.state == "done" and count(f.rd_log, "enable:false") == 1 and f.rd_log[#f.rd_log] == "enable:false",
+          "redirect switch: enable(false) once on finish")
+end
+
+-- finish, legacy flow (status off): still enabled first, then released once
+do
+    local f = fake({ redirect = "off", player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    local st = run(b, f)
+    check(st.flow == "legacy" and f.rd_log[2] == "enable:true" and count(f.rd_log, "enable:false") == 1,
+          "redirect switch: legacy flow enabled then released once (" .. table.concat(f.rd_log, ",") .. ")")
+end
+
+-- start_fail after the enable (legacy refund unknown): released
+do
+    local f = fake({ redirect = "off", player = inv({}, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local p = plan_for(f, { removed = removed_one(1), need = {} })
+    p.removed[1].refund = nil
+    local ok, msg = b:start(p, {})
+    check(not ok and msg:find("refund unknown", 1, true) and count(f.rd_log, "enable:true") == 1 and count(f.rd_log, "enable:false") == 1
+          and f.rd_log[#f.rd_log] == "enable:false", "redirect switch: start_fail after enable released once (" .. tostring(msg) .. ")")
+end
+
+-- mid-run fail (whole-run timeout): released once
+do
+    local f = fake({ redirect = "off", player = inv({ S("ITEM_Plate", 1) }, 10), unit = inv({ S("ITEM_Plate", 4) }, 2), noop_moves = true })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }), M("BP_B", 5, 0, { ITEM_Plate = 2 }) }, need = { ITEM_Plate = 5 } }), {})
+    b:tick(1250)
+    b:tick(1000 + 300001)
+    check(b:status().state == "error" and count(f.rd_log, "enable:false") == 1, "redirect switch: fail mid-run releases once (" .. b:status().text .. ")")
+end
+
+-- cancel: released once, a second cancel and later ticks release nothing more
+do
+    local f = fake({ redirect = "off", player = inv({ S("ITEM_Plate", 1) }, 10), unit = inv({ S("ITEM_Plate", 4) }, 2), noop_moves = true })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }), M("BP_B", 5, 0, { ITEM_Plate = 2 }) }, need = { ITEM_Plate = 5 } }), {})
+    b:tick(1250)
+    b:cancel()
+    b:cancel()
+    b:tick(9000)
+    check(count(f.rd_log, "enable:false") == 1, "redirect switch: cancel releases once (" .. table.concat(f.rd_log, ",") .. ")")
+end
+
+-- nothing to build: enabled by the start, released before it returns
+do
+    local f = fake({ redirect = RON2, player = inv({}, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(plan_for(f, {}), {})
+    check(ok and msg == "ok nothing to build" and f.rd_log[#f.rd_log] == "enable:false" and count(f.rd_log, "enable:false") == 1,
+          "redirect switch: nothing to build leaves it off (" .. table.concat(f.rd_log, ",") .. ")")
+end
+
+-- refused before anything is enabled (no plan): no enable call at all
+do
+    local f = fake({ redirect = RON2, player = inv({}, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok, msg = b:start(nil, {})
+    check(not ok and msg == "error: import first" and #f.rd_log == 0, "redirect switch: refused before enable -> no enable call")
+end
+
+-- redirect already on before the build (opt-in file, another mod): the build leaves it on, it never switches off what it did not switch on
+do
+    local f = fake({ redirect = RON2, rd_initial = RON2, player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and count(f.rd_log, "enable:false") == 0 and f.rd_state == RON2,
+          "redirect switch: already on before the build -> never switched off (" .. table.concat(f.rd_log, ",") .. ")")
+end
+
+-- io without redirect_enable (old MSCore): treated as off, no error, flow still from the status
+do
+    local f = fake({ no_enable = true, redirect = RON2, player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and st.flow == "redirect" and count(f.rd_log, "enable:true") == 0 and count(f.rd_log, "enable:false") == 0,
+          "redirect switch: no redirect_enable in io = off, no error, no enable calls")
+end
+
+-- enable raises: the build still runs, release never throws
+do
+    local f = fake({ redirect = "off", enable_error = true, player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    local okr = pcall(run, b, f)
+    local st = b:status()
+    check(ok and okr and st.state == "done" and count(f.rd_log, "enable:false") == 1, "redirect switch: enable raises -> build goes on, release does not throw")
+end
+
+-- safety net: the flag is still ours while no build runs -> the next tick turns it off, once
+do
+    local f = fake({ redirect = "off", player = inv({ S("ITEM_Plate", 5) }, 3), unit = inv({}, 3) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } }), {})
+    run(b, f)
+    local R = run_of(b)
+    check(R and R.redirect_ours == false and count(f.rd_log, "enable:false") == 1, "safety net: finished run already released")
+    R.redirect_ours = true   -- as if a terminal path had missed the release
+    b:tick(f.clock + 1000)
+    b:tick(f.clock + 2000)
+    check(R.redirect_ours == false and count(f.rd_log, "enable:false") == 2, "safety net: idle tick releases the leftover flag once")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

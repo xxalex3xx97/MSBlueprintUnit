@@ -125,7 +125,7 @@ check("stale: removes text", p and P.removes_text(p) == "removes: 1 belt")
 -- blocks not on the grid: whole paste refused
 p, err = P.plan(read("block_off_grid.json"), live(), F)
 check("blocks: refused", p == nil)
-check("blocks: message", err == "Blocks are not on the grid: BPO_Station_01@(2,0,h0);")
+check("blocks: message", err == "These blocks are not on the station grid: Station 1x1 at (2, 0), level 0. Fix them in the blueprint or tick Station Build.")
 
 -- hidden Teleporter never placed (skipped with note)
 p = plan_of("teleporter.json")
@@ -396,6 +396,76 @@ check("kept splitter: no live cfg counts as different", has_note(ps3, OLD_SPLIT_
 local ps4 = split_kept("\1\2")
 check("kept splitter: same bytes -> still kept, no note", ps4 ~= nil and ps4.counts.keep == 1 and ps4.counts.place == 0 and ps4.counts.remove == 0
     and not has_note(ps4, NEW_SPLIT_NOTE) and not has_note(ps4, OLD_SPLIT_NOTE))
+
+-- Station Build (opts.station_build): missing station blocks are classified, not refused
+local SB_BOUNDS = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }
+local SB_INFO = {
+    BPO_Station_01 = { station = true, unlocked = true, bounds = SB_BOUNDS, cost = { ITEM_A = 2 } },
+    BPO_Station_02 = { station = true, unlocked = true, bounds = SB_BOUNDS, cost = { ITEM_B = 1 } },
+}
+local function sb_info(cls) return SB_INFO[cls] end
+local function sb_json(...)
+    local parts = { ... }
+    return '{"Version":2,"Blocks":[' .. table.concat(parts, ",") .. '],"DefaultMachines":[]}'
+end
+local function sb_block(cls, x, y, h)
+    return '{"Class":"/Game/B/' .. cls .. '.' .. cls .. '_C","GridLocation":{"X":' .. x .. ',"Y":' .. y .. '},"Height":' .. h .. ',"GridRotation":0}'
+end
+local function sb_plan(text, over, trace)
+    local l = live({ block_info = sb_info, have = { ITEM_A = 10, ITEM_B = 10 } })
+    for k, v in pairs(over or {}) do l[k] = v end
+    return P.plan(text, l, F, { station_build = true, trace = trace })
+end
+local function has_note(p, s)
+    for _, n in ipairs(p and p.notes or {}) do if n:find(s, 1, true) then return true end end
+    return false
+end
+
+local trace_lines = {}
+local sp = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), nil, function(t) trace_lines[#trace_lines + 1] = t end)
+check("sb: valid plan, one block accepted", sp and sp.valid and sp.block_count == 1 and sp.blocks[1].gx == 2)
+check("sb: block cost in need rows", sp and sp.block_need.ITEM_A == 2 and #P.cost_rows(sp) == 1 and P.cost_rows(sp)[1].need == 2)
+check("sb: summary adds blocks N", sp and P.summary(sp) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1")
+check("sb: no refusal when enough", sp and sp.block_refuse == nil)
+local self_line = false
+for _, t in ipairs(trace_lines) do if t == "station blocks self overlaps: 0" then self_line = true end end
+check("sb: trace self overlaps 0", self_line)
+
+-- shortfall: refused only when not creative
+local sh = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 } })
+check("sb: shortfall list", sh and sh.block_refuse and #sh.block_refuse == 1 and sh.block_refuse[1].item == "ITEM_A"
+    and sh.block_refuse[1].need == 2 and sh.block_refuse[1].have == 1)
+local cr = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 }, creative = true })
+check("sb: creative skips refusal", cr and cr.block_refuse == nil and cr.block_count == 1)
+
+-- live BPO_Station_01 at 0,0 is not in the file: removed for BPO_Station_02 at 0,0 (refund 2 ITEM_A, cost 1 ITEM_B)
+local oc = sb_plan(sb_json(sb_block("BPO_Station_02", 0, 0, 0), sb_block("BPO_Gone", 5, 0, 0)))
+check("sb: live block in the way removed, file block accepted", oc and oc.block_count == 1 and #oc.block_remove == 1
+    and oc.block_remove[1].class == "BPO_Station_01" and oc.block_refund.ITEM_A == 2)
+check("sb: removal note", has_note(oc, "Removed the Station 1x1 that was in the way of a Station 02."))
+check("sb: summary adds removed 1", P.summary(oc) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, removed 1")
+check("sb: removed block refund in cost rows, net", P.cost_rows(oc)[1].name == "ITEM_A" and P.cost_rows(oc)[1].refund == 2
+    and P.cost_rows(oc)[1].net == -2 and P.cost_rows(oc)[2].name == "ITEM_B" and P.cost_rows(oc)[2].need == 1)
+check("sb: unknown class note", has_note(oc, "Skipped Gone: this block type is not in this game."))
+
+-- live block that IS in the file is never removed: file overlaps itself, the second block is skipped as occupied
+local inf = sb_plan(sb_json(sb_block("BPO_Station_01", 0, 0, 0), sb_block("BPO_Station_02", 0, 0, 0)))
+check("sb: in-file live block not removed, overlapping block skipped", inf and inf.block_count == 0 and #inf.block_remove == 0
+    and has_note(inf, "Skipped Station 02: another block of the blueprint already occupies that spot."))
+check("sb: no removed count in summary when none", inf and P.summary(inf) == "place 0, keep 0, remove 0, recipe changes 0, blocks 0")
+
+-- research state unknown for every class: one note for the run, nothing placed
+local unk = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0), sb_block("BPO_Station_02", 4, 0, 0)),
+    { block_info = function(cls) return { station = true, unlocked = nil, bounds = SB_BOUNDS, cost = {} } end })
+check("sb: unknown research for all -> one run note, nothing placed", unk and unk.block_count == 0 and has_note(unk, "Could not read the research state of any station block, so Station Build placed nothing."))
+
+check("sb: unknown research -> per-block note", unk and has_note(unk, "Skipped Station 1x1: its research state could not be read."))
+
+-- off: same file refused as before, nothing added
+local off, off_err = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F, { station_build = false })
+check("sb off: still refused", off == nil and off_err:find("These blocks are not on the station grid", 1, true) ~= nil)
+local off2 = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F)
+check("sb default (no opts): refused", off2 == nil)
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

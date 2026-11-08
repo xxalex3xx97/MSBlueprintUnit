@@ -8,6 +8,9 @@
 --       P.cost_rows(plan) -> sorted { {name=ITEM_raw, need=, refund=, net=}, ... } (need>0 or refund>0)
 --       P.fingerprint(existing) -> FNV-1a 32-bit over id,bcls,x,y,h,rot (plan staleness check)
 --       opts (optional) = { trace = fn(text) }: called with diagnostics (missing blocks, keep split, placed-validation failure); never changes the plan
+--       opts.station_build = true: missing station blocks classified by bpu_blocks (no "not on the grid" refusal). Needs
+--       live.block_info(class, path) -> info|nil, live.have = {ITEM=n}, live.creative = bool. Adds plan.blocks, block_need,
+--       block_count (summary ", blocks N"), block_refuse (shortfall list when short and not creative)
 -- F = MSCore factory module (mscore_factory.lua), injected: F.tables, F.block_floor, F.floor_rects, F.validate_place,
 --     F.footprint, F.encode_cfg, F.decode_cfg, F.encode_ug. Tests pass a snapshot copy (tests/fixtures).
 -- live (injected by bpu_live, this file never touches the game):
@@ -19,6 +22,7 @@
 
 local JSON = require("bpu_json")
 local PT = require("bpu_ports")
+local B = require("bpu_blocks")
 
 local P = {}
 
@@ -283,7 +287,7 @@ local function parse_doc(text)
         local c = type(e) == "table" and e.Class or nil
         if type(c) ~= "string" then bail("bad JSON: block without Class") end
         local x, y, h, rot = grid(e, "block")
-        doc.blocks[#doc.blocks + 1] = { class = short(c), gx = x, gy = y, h = h, rot = rot }
+        doc.blocks[#doc.blocks + 1] = { class = short(c), gx = x, gy = y, h = h, rot = rot, path = c }
     end
     local dm = root.DefaultMachines
     if dm ~= nil and (type(dm) ~= "table" or not is_array(dm)) then bail("bad JSON: DefaultMachines not an array") end
@@ -375,6 +379,49 @@ local function diag_fail(lines, m, existing)
     for _, e in ipairs(at_xy) do lines[#lines + 1] = "  same xy" .. desc(e) end
 end
 
+---------------------------------------------------------------- station blocks (Station Build)
+-- Classifies the file's station blocks missing from the live station (bpu_blocks). live.block_info(class, path) -> info|nil.
+-- Returns { blocks = accepted block records, need = cost, count = #accepted, notes = {...}, refuse = shortfall list or nil }.
+-- refuse only when items are short and not creative. Nothing is sent here.
+local function plan_blocks(doc, blocks, live, opts)
+    if type(live.block_info) ~= "function" then bail("plan: station build needs live.block_info") end
+    local path_of = {}
+    for _, b in ipairs(blocks) do path_of[b.class] = path_of[b.class] or b.path end
+    for _, jb in ipairs(doc.blocks) do path_of[jb.class] = path_of[jb.class] or jb.path end
+    -- live blocks carry their own path (MSCore 7th column): real bounds for removal; missing blocks use the file's path
+    local function info_of(cls, path) return live.block_info(cls, path or path_of[cls]) end
+    local missing = B.missing_after(doc.blocks, blocks)
+    local res = B.classify(missing, blocks, info_of, live.have or {}, doc.blocks)
+    local bl = {}
+    for i, a in ipairs(res.accept) do bl[i] = a.block end
+    -- every station class checked has unknown research state: say so once (the per-block notes say which)
+    local checked, unknown = 0, 0
+    for _, b in ipairs(missing) do
+        local info = info_of(b.class)
+        if info and info.station then
+            checked = checked + 1
+            if info.unlocked == nil then unknown = unknown + 1 end
+        end
+    end
+    if checked > 0 and unknown == checked then
+        res.notes[#res.notes + 1] = B.TEXT.research_all
+        res.raw[#res.raw + 1] = "research state unreadable for all classes: Station Build placed nothing"
+    end
+    -- the natives need the FULL class path: fill it in from the known class paths when a record only has the short name
+    for _, r in ipairs(res.remove) do r.path = r.path or path_of[r.class] end
+    for _, a in ipairs(bl) do a.path = a.path or path_of[a.class] end
+    local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes }
+    if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
+    if type(opts.trace) == "function" then
+        opts.trace(("station blocks: doc %d, missing %d, accept %d, remove %d, skipped %d, locked %s"):format(#doc.blocks, #missing,
+            #bl, #res.remove, #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
+        for _, n in ipairs(res.raw) do opts.trace("  " .. n) end
+        for _, s in ipairs(res.shortfall) do opts.trace(("  short %s need %d have %d"):format(s.item, s.need, s.have)) end
+        opts.trace("station blocks self overlaps: " .. #B.self_overlaps(doc.blocks, info_of))
+    end
+    return out
+end
+
 ---------------------------------------------------------------- the plan
 local function build(text, live, F, opts)
     if type(text) ~= "string" then bail("plan: no blueprint text") end
@@ -417,25 +464,36 @@ local function build(text, live, F, opts)
         end
     end
 
-    -- Blocks must be on the live station Blueprint
-    local blockset = {}
-    for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = true end
-    local missing, missing_jb = {}, {}
-    for _, jb in ipairs(doc.blocks) do
-        if not blockset[jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h] then
-            missing[#missing + 1] = jb.class .. "@(" .. jb.gx .. "," .. jb.gy .. ",h" .. jb.h .. ")"
-            missing_jb[#missing_jb + 1] = jb
+    -- Blocks must be on the live station Blueprint. Station Build (opts.station_build): missing blocks are classified and
+    -- placed by plan_blocks instead of refused here
+    local bplan
+    if opts and opts.station_build then
+        bplan = plan_blocks(doc, blocks, live, opts)
+        for _, n in ipairs(bplan.notes) do notes[#notes + 1] = n end
+    else
+        local blockset = {}
+        for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = true end
+        local missing, missing_jb = {}, {}
+        for _, jb in ipairs(doc.blocks) do
+            if not blockset[jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h] then
+                missing[#missing + 1] = jb.class .. "@(" .. jb.gx .. "," .. jb.gy .. ",h" .. jb.h .. ")"
+                missing_jb[#missing_jb + 1] = jb
+            end
         end
-    end
-    if #missing > 0 then
-        if opts and type(opts.trace) == "function" then
-            local lines = {}
-            for _, jb in ipairs(missing_jb) do diag_missing(lines, jb, blocks) end
-            opts.trace(table.concat(lines, "\n"))
+        if #missing > 0 then
+            if opts and type(opts.trace) == "function" then
+                local lines = {}
+                for _, jb in ipairs(missing_jb) do diag_missing(lines, jb, blocks) end
+                opts.trace(table.concat(lines, "\n"))
+            end
+            local raw = "Blocks are not on the grid:"
+            for i = 1, math.min(#missing, 5) do raw = raw .. " " .. missing[i] .. ";" end
+            if opts and type(opts.trace) == "function" then opts.trace(raw) end
+            local places = {}
+            for i = 1, math.min(#missing_jb, 5) do places[i] = B.place_text(missing_jb[i]) end
+            bail(("These blocks are not on the station grid: %s. Fix them in the blueprint or tick Station Build."):format(
+                B.listing(places, #missing_jb)))
         end
-        local msg = "Blocks are not on the grid:"
-        for i = 1, math.min(#missing, 5) do msg = msg .. " " .. missing[i] .. ";" end
-        bail(msg)
     end
 
     -- resolve DAT (by class when absent), footprint, bcls; machines with no Buildable are skipped (block-built)
@@ -681,7 +739,15 @@ local function build(text, live, F, opts)
     for _, m in ipairs(rest) do placed[m] = true end
     for _, c in ipairs(cells) do if placed[cell_of[c]] then placed[c] = true end end
     -- floor/parity via F for placed only (floor failures are placed anyway); overlap pairwise (same layer), pair skipped when neither side is placed
-    local floors = F.floor_rects(blocks, F.block_floor)
+    local floor_src = blocks
+    if bplan and (#bplan.blocks > 0 or #bplan.remove > 0) then   -- added station blocks carry floors too, removed ones do not
+        local gone = {}
+        for _, r in ipairs(bplan.remove) do gone[r] = true end
+        floor_src = {}
+        for _, b in ipairs(blocks) do if not gone[b] then floor_src[#floor_src + 1] = b end end
+        for _, b in ipairs(bplan.blocks) do floor_src[#floor_src + 1] = b end
+    end
+    local floors = F.floor_rects(floor_src, F.block_floor)
     local off, n_off = {}, 0   -- off-floor machines are placed anyway (the game does not check floors)
     for _, m in ipairs(all) do
         if placed[m] then
@@ -892,10 +958,17 @@ local function build(text, live, F, opts)
         refund = refund_all,
         skipped_ug = skipped_ug,
         notes = notes,
-        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN },
+        counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN, block_remove = bplan and #bplan.remove or nil },
         removes = removes,
         fp = P.fingerprint(existing),
         valid = true,
+        -- Station Build only (nil when off): accepted block records, their cost, removed live blocks and their refund, count, refusal list
+        blocks = bplan and bplan.blocks,
+        block_remove = bplan and bplan.remove,
+        block_refund = bplan and bplan.refund,
+        block_need = bplan and bplan.need,
+        block_count = bplan and bplan.count,
+        block_refuse = bplan and bplan.refuse,
     }
 end
 
@@ -932,7 +1005,10 @@ function P.summary(plan)
         if more > 0 then r = r .. ", +" .. more .. " more" end
         s = s .. " (refund " .. (r == "" and "none" or r) .. ")"
     end
-    return s .. ", recipe changes " .. c.recipe
+    s = s .. ", recipe changes " .. c.recipe
+    if plan.block_count then s = s .. ", blocks " .. plan.block_count end
+    if plan.block_remove and #plan.block_remove > 0 then s = s .. ", removed " .. #plan.block_remove end
+    return s
 end
 
 -- display name of a removed class: BP_ prefix, _C and Object removed; ConveyorBelt -> belt, Container_2 -> large container
@@ -974,11 +1050,15 @@ function P.cost_rows(plan)
     local need = {}
     for name, n in pairs(plan.need or {}) do need[name] = n end
     for name, n in pairs(plan.restore or {}) do need[name] = (need[name] or 0) + n end
+    local refund = {}
+    for name, n in pairs(plan.refund or {}) do refund[name] = n end
+    for name, n in pairs(plan.block_need or {}) do need[name] = (need[name] or 0) + n end
+    for name, n in pairs(plan.block_refund or {}) do refund[name] = (refund[name] or 0) + n end
     local seen, rows = {}, {}
     for name in pairs(need) do seen[name] = true end
-    for name in pairs(plan.refund or {}) do seen[name] = true end
+    for name in pairs(refund) do seen[name] = true end
     for _, name in ipairs(sorted_keys(seen)) do
-        local nd, rf = need[name] or 0, (plan.refund or {})[name] or 0
+        local nd, rf = need[name] or 0, refund[name] or 0
         if nd > 0 or rf > 0 then
             rows[#rows + 1] = { name = name, need = nd, refund = rf, net = nd - rf }
         end

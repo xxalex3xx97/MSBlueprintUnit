@@ -4,6 +4,7 @@
 -- Never call ForEach on a TrivialObject: each() checks for it first (P0 R1d).
 
 local L = {}
+local Blk = require("bpu_blocks")
 L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
 -- Trace trail for native crashes: print + append to <mod dir>bpu_trace.log (open/append/flush/close per call).
@@ -23,7 +24,7 @@ local function TRACE(m)
     pcall(function()
         local f = io.open(TRACE_PATH, "a")
         if f then
-            f:write(os.date("%H:%M:%S ") .. m .. "\n")
+            f:write(os.date("%Y-%m-%d %H:%M:%S ") .. m .. "\n")
             f:flush()
             f:close()
         end
@@ -37,7 +38,7 @@ local function TRACE_MANY(lines)
     pcall(function()
         local f = io.open(TRACE_PATH, "a")
         if f then
-            local ts = os.date("%H:%M:%S ")
+            local ts = os.date("%Y-%m-%d %H:%M:%S ")
             for _, m in ipairs(lines) do f:write(ts .. m .. "\n") end
             f:flush()
             f:close()
@@ -354,9 +355,97 @@ local function contents_list(inv)
     return out
 end
 
-function L.snapshot(U, F)
+-- Station Build needs the MSCore 0.8.0 natives (add_block, remove_block, pending, read_block_class). Returns true, or false + reason.
+function L.station_build_capable()
+    local M = L.mscore
+    local N, FN = M and M.native, M and M.factory_native
+    if N and N.add_block and N.remove_block and N.pending and N.read_block_class
+        and FN and FN.add_block and FN.remove_block and FN.pending and FN.read_block_class then
+        return true
+    end
+    return false, "Station Build needs MSCore 0.8.0 or newer."
+end
+
+-- class defaults per class path (read once, cached): {station, bounds, cost={ITEM=n}} | nil.
+-- BlockBounds comes raw (65536 = 1.0). MSCore native read_block_class (0.8.0).
+local BINFO = {}
+local function static_info(path)
+    if BINFO[path] == nil then
+        local FN = L.mscore and L.mscore.factory_native
+        local ok, info = false, nil
+        if FN and FN.read_block_class then ok, info = pcall(FN.read_block_class, path) end
+        local r = false
+        if ok and type(info) == "table" and info.min and info.max then
+            local cost = {}
+            for _, c in ipairs(info.cost or {}) do cost[c.item] = c.amount end
+            -- BlockBounds raw/65536 is 4x the grid unit horizontally and 2x vertically (probe 2026-11-08: Station_01 spans 16 but its blocks sit 4 apart,
+            -- Station_02A spans 32 at 8 apart; heights span 4 per level of 2). The game keeps each box a hair under its size so inclusive compares do not touch.
+            local s, sxy, sz = 65536, 4, 2
+            r = { station = info.station == true, cost = cost,
+                  bounds = { x0 = info.min.x / s / sxy, x1 = info.max.x / s / sxy, y0 = info.min.y / s / sxy, y1 = info.max.y / s / sxy,
+                             z0 = info.min.z / s / sz, z1 = info.max.z / s / sz } }
+        end
+        BINFO[path] = r
+    end
+    return BINFO[path] or nil
+end
+
+-- research state of one block class, Lua only: DMSWorld:GetResearchState():IsBlockUnlocked(class object).
+-- Returns true | false | nil (unknown: bpu_blocks skips it), plus a detail text for the trace. Every step is pcall-guarded.
+local function unlock_state(path)
+    local okw, world = pcall(FindFirstOf, "DMSWorld")
+    if not okw or not valid(world) then return nil, "world=no (" .. (okw and "not valid" or tostring(world)) .. ")" end
+    local okr, rs = pcall(function() return world:GetResearchState() end)
+    if not okr or rs == nil then return nil, "world=yes state=failed: " .. tostring(rs) end
+    local oko, obj = pcall(StaticFindObject, path)
+    if not oko or not valid(obj) then return nil, "world=yes state=yes obj=no (" .. (oko and "not valid" or tostring(obj)) .. ")" end
+    local oku, r = pcall(function() return rs:IsBlockUnlocked(obj) end)
+    if not oku then return nil, "world=yes state=yes obj=yes IsBlockUnlocked failed: " .. tostring(r) end
+    r = unw(r)
+    if type(r) ~= "boolean" then return nil, "world=yes state=yes obj=yes IsBlockUnlocked returned " .. type(r) end
+    return r, "world=yes state=yes obj=yes"
+end
+
+-- block_info for one snapshot: static info (cached) + unlocked read once per class path per snapshot, traced
+local function block_info_for(unl)
+    return function(cls, path)
+        local info = path and static_info(path)
+        if not info then return nil end
+        if unl[path] == nil then
+            local v, detail = unlock_state(path)
+            unl[path] = { v = v }
+            TRACE(("block unlock %s (%s): %s -> unlocked=%s"):format(tostring(cls), tostring(path), detail, tostring(v)))
+            local bb = info.bounds   -- probe: raw box in /65536 units, to settle units and the touching-edge rule
+            if bb then TRACE(("block bounds %s: x %s..%s y %s..%s z %s..%s station=%s"):format(tostring(cls), bb.x0, bb.x1, bb.y0, bb.y1, bb.z0, bb.z1, tostring(info.station))) end
+        end
+        return { station = info.station, unlocked = unl[path].v, cost = info.cost, bounds = info.bounds }
+    end
+end
+
+-- player + unit stock: {ITEM_X = n}
+local function have_totals(U, player)
+    local have = {}
+    local function add(inv)
+        if not inv then return end
+        local r = L.read_inv(inv)
+        if not (r and r.ok) then return end
+        for _, s in ipairs(r.slots) do
+            if s.item ~= "" and s.amount > 0 then have[s.item] = (have[s.item] or 0) + s.amount end
+        end
+    end
+    add(U.unit_inv)
+    add(rd(player, "Inventory"))
+    return have
+end
+
+-- opts (Station Build only): { station_build = true, player = <player object> } adds block_info (lazy per class), have, creative.
+function L.snapshot(U, F, opts)
     cache = nil
     local st = U.station_obj
+    if opts and opts.station_build then
+        local okc, why = L.station_build_capable()
+        if not okc then error(why, 0) end
+    end
     TRACE("snapshot start station=" .. tostring(U.station))
     local blocks = L.read_blocks(st)
     TRACE("snapshot blocks=" .. #blocks)
@@ -383,8 +472,16 @@ function L.snapshot(U, F)
     TRACE("snapshot recipes=" .. count(recipes))
     local buildables = L.read_buildables(F)
     TRACE("snapshot buildables=" .. count(buildables))
-    return { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables,
-             items = L.item_names(), memory = L.memory() }
+    local snap = { station = U.station, blocks = blocks, existing = existing, recipes = recipes, buildables = buildables,
+                   items = L.item_names(), memory = L.memory() }
+    if opts and opts.station_build then
+        local player = opts.player or L.player()
+        snap.block_info = block_info_for({})
+        snap.have = have_totals(U, player)
+        snap.creative = L.creative(player, nil)
+        TRACE("snapshot station build: have items=" .. count(snap.have))
+    end
+    return snap
 end
 
 -- raw MaxStackSize of an Item UObject (cached per name; false when unreadable). nil = unknown.
@@ -502,6 +599,7 @@ function L.reset()
     BUILDABLES = nil
     ITEMS = nil
     RAW, TRACED = {}, {}
+    BINFO = {}
     L._recobj = {}
 end
 
@@ -545,6 +643,20 @@ function L.make_io(ctx)
         local okc, r = pcall(fn)
         if okc and type(r) == "string" then return r end
         return "off (redirect_status failed)"
+    end
+    -- MSCore redirect switch: on only while a Blueprint Unit build runs (bpu_build release_redirect turns it off). Returns the status.
+    function io.redirect_enable(on)
+        local N = L.mscore and L.mscore.native
+        local fn = (N and N.redirect_enable) or rawget(_G, "MSCoreNative_redirect_enable")
+        local st
+        if type(fn) ~= "function" then
+            st = "off (redirect_enable missing)"
+        else
+            local okc, r = pcall(fn, on and true or false)
+            st = (okc and type(r) == "string") and r or "off (redirect_enable failed)"
+        end
+        TRACE(("redirect_enable(%s) -> %s"):format(tostring(on and true or false), st))
+        return st
     end
     function io.unit_ids()
         return { unit_id = unw(rd(U.unit_inv, "ID")), player_id = unw(rd(rd(player, "Inventory"), "ID")) }
@@ -663,6 +775,44 @@ function L.make_io(ctx)
         end
         print(("[BPUnit] config changes: %d ok, %d failed"):format(okc, failc))
         return okc, failc
+    end
+    -- Station Build (MSCore 0.8.0): one remove/add sequence through factory_native (bpu_blocks send), every native call traced
+    function io.station_build_capable() return L.station_build_capable() end
+    function io.send_blocks(station, blocks, ids, removes)
+        local FN = native
+        if not (FN and FN.add_block and FN.remove_block and FN.pending) then return false, "MSCore 0.8.0 natives missing" end
+        local traced = {
+            pending = function(st, apply, reset, p, pl, ed)
+                local ok, err = FN.pending(st, apply, reset, p, pl, ed)
+                TRACE(("station blocks: pending station=%s apply=%s reset=%s primary=%s player=%s editing=%s -> ok=%s err=%s"):format(
+                    tostring(st), tostring(apply), tostring(reset), tostring(p), tostring(pl), tostring(ed), tostring(ok), tostring(err)))
+                return ok, err
+            end,
+            remove_block = function(st, cls, x, y, h, rot)
+                local ok, err = FN.remove_block(st, cls, x, y, h, rot)
+                TRACE(("station blocks: remove_block %s at %s,%s,h%s rot%s -> ok=%s err=%s"):format(tostring(cls), tostring(x),
+                    tostring(y), tostring(h), tostring(rot), tostring(ok), tostring(err)))
+                return ok, err
+            end,
+            add_block = function(st, cls, x, y, h, rot)
+                local ok, err = FN.add_block(st, cls, x, y, h, rot)
+                TRACE(("station blocks: add_block %s at %s,%s,h%s rot%s -> ok=%s err=%s"):format(tostring(cls), tostring(x),
+                    tostring(y), tostring(h), tostring(rot), tostring(ok), tostring(err)))
+                return ok, err
+            end,
+        }
+        removes = removes or {}
+        local ok, err = Blk.send(traced, station, blocks, ids, removes)
+        TRACE(("station blocks: send %d add(s), %d remove(s) -> ok=%s err=%s"):format(#blocks, #removes, tostring(ok), tostring(err)))
+        return ok, err
+    end
+    -- live station blocks, fresh native read (no cache): the poll of a Station Build run
+    function io.scan_blocks(station)
+        local st = find_by_id(station)
+        if not st then return nil, "station not found" end
+        local ok, res = pcall(function() cache = nil; return L.read_blocks(st) end)
+        if not ok then return nil, tostring(res) end
+        return res
     end
     function io.now() return L.now() end
     function io.note_build(placed, removed) L.note_build(placed, removed) end
