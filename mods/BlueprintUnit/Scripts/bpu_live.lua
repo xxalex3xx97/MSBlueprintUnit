@@ -412,6 +412,8 @@ local function block_info_for(unl)
             local v, detail = unlock_state(path)
             unl[path] = { v = v }
             TRACE(("block unlock %s (%s): %s -> unlocked=%s"):format(tostring(cls), tostring(path), detail, tostring(v)))
+            local bb = info.bounds   -- probe: raw box in /65536 units, to settle units and the touching-edge rule
+            if bb then TRACE(("block bounds %s: x %s..%s y %s..%s z %s..%s station=%s"):format(tostring(cls), bb.x0, bb.x1, bb.y0, bb.y1, bb.z0, bb.z1, tostring(info.station))) end
         end
         return { station = info.station, unlocked = unl[path].v, cost = info.cost, bounds = info.bounds }
     end
