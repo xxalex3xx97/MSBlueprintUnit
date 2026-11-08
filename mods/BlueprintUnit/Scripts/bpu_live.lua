@@ -6,7 +6,7 @@
 local L = {}
 L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
--- Trace trail for native crashes: print + append to <mod dir>pu_trace.log (open/append/flush/close per call).
+-- Trace trail for native crashes: print + append to <mod dir>bpu_trace.log (open/append/flush/close per call).
 local MOD_DIR = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../"   -- Mods/BlueprintUnit/, not the process cwd
 local TRACE_PATH = MOD_DIR .. "bpu_trace.log"
 -- ponytail: cap bpu_trace.log: truncate at start when over 2 MB

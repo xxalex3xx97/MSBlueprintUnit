@@ -9,8 +9,8 @@ Requires **MSCore 0.7.6 or newer** (the split native). Place a NEW unit for the 
 ### Changed
 - Window: **Enable container item restoration** checkbox (`Chk_Restore`, checked by default) with a hint line (`Txt_Restore`, `Txt_RestoreHint`). Unchecked = Build does no container restoration.
 - Restore sorts the unit inventory first, then splits the exact missing amount into a free unit slot and moves it with one TRANSFER (needs the MSCore 0.7.6 split native; older MSCore keeps the whole-stack rounding). The split step edits the inventory locally (not a game command; in co-op it may desync until the next refresh).
-- Container contents restore is on by default. The **Enable container item restoration** checkbox (`Chk_Restore`) turns it off; `Mods\BlueprintUnit\restore_off.txt` also disables it. `restore_on.txt` is no longer needed.
-- Rounding is only the fallback (MSCore older than 0.7.6, or no split). The normal route is sort, split the exact amount, then TRANSFER. Fallback: whole unit stacks only (one TRANSFER per stack, no cursor, no put-back). A stack is moved when the missing amount is at least half of it (the container can get up to half a stack more than the blueprint count), and a smaller remainder is left out with a note ("left out (under half a unit stack)").
+- `Mods\BlueprintUnit\restore_off.txt` also disables container restore. `restore_on.txt` is no longer needed.
+- Rounding (whole unit stacks, a smaller remainder left out with a note) is kept in code for tests only. MSCore 0.7.6 is required, so the normal route is sort, split the exact missing amount, then TRANSFER.
 - A container's stack room is respected: a partial move leaves the rest in the unit, and a full container is noted ("container id N full").
 - A refused send is retried on the next tick (up to 5 times), then skipped and counted in the note ("N command(s) skipped (refused)"). The restore never aborts for it.
 - Restore sends up to 1000 commands per tick. It stops only when nothing changes in the restored items for 8 s after the last send (no fixed wait).
