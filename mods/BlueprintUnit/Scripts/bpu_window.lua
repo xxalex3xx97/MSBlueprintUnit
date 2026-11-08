@@ -27,7 +27,7 @@ local CONTRACT = { "Panel", "Txt_Title", "Btn_Close", "Txt_Close", "Txt_Status",
   "Pnl_ImportModal", "Txt_ImportTitle", "Btn_ImportClose", "Txt_ImportClose", "Edt_ImportJson", "Txt_ImportHint",
   "Btn_ImportOk", "Txt_ImportOk", "Btn_ImportCancel", "Txt_ImportCancel" }
 -- optional, never logged if missing: Btn_CostPin, Txt_CostPin, Chk_StationBuild (CheckBox), Txt_StationBuildHint, Chk_Restore (CheckBox:
--- unchecked = restore off; missing or checked = restore on, read on every Build press).
+-- unchecked = restore off; missing or checked = restore on, read on every Build press). Txt_Restore, Txt_RestoreHint: label + hint.
 
 -- S.w = WBP instance (names resolve here). S.h = MSCore.wbp handle (nil = closed). S.p = controller. S.tc = last text per name.
 -- S.imp = import modal shown. S.U = unit (Live.find_unit). S.plan / S.text = last import. S.run = token of the running build.
@@ -323,13 +323,19 @@ local function buildLoop(run)
   end
 end
 
+-- IsChecked of a CheckBox-like object: true / false, nil when missing or unreadable
+local function checkedOf(c)
+  if c == nil then return nil end
+  local s, v = pcall(function() return c:IsChecked() end)
+  if s and type(v) == "boolean" then return v end
+  return nil
+end
+
 -- Chk_Restore (optional CheckBox, read on every Build press): true / false, nil when the widget is missing (restore on)
 local function readRestoreBox()
   local c = w("Chk_Restore")
   if not ok(c) then return nil end
-  local s, v = pcall(function() return c:IsChecked() end)
-  if s and type(v) == "boolean" then return v end
-  return nil
+  return checkedOf(c)
 end
 
 -- Btn_Build: re-plan from the saved text (station may have changed), start the builder, poll it.
@@ -546,7 +552,7 @@ function M.open(block, player, ctl)
 end
 
 -- pure helpers for the tests (no game objects)
-M.pure = { hiddenNote = hiddenNote, fReason = fReason }
+M.pure = { hiddenNote = hiddenNote, fReason = fReason, checkedOf = checkedOf }
 -- label and enabled state of the build buttons while a run goes (running = true)
 function M.btnState(running)
   if running then return { build = "Abort", build_on = true, import_on = false } end

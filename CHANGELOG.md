@@ -5,6 +5,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ## [Unreleased]
 
 ### Changed
+- Window: **Enable container item restoration** checkbox (`Chk_Restore`, checked by default) with a hint line (`Txt_Restore`, `Txt_RestoreHint`). Unchecked = Build does no container restoration.
 - Restore sorts the unit inventory first, then splits the exact missing amount into a free unit slot and moves it with one TRANSFER (needs the MSCore 0.7.6 split native; older MSCore keeps the whole-stack rounding). The split step edits the inventory locally (not a game command; in co-op it may desync until the next refresh).
 - Container contents restore is on by default. An optional `Chk_Restore` checkbox turns it off (unchecked = off). `Mods\BlueprintUnit\restore_off.txt` forces it off; `restore_probe.txt` runs the 5-item probe. `restore_on.txt` is no longer needed.
 - Restore moves whole unit stacks only (one TRANSFER per stack, no cursor, no put-back). Amounts are rounded to whole stacks: a stack is moved when the missing amount is at least half of it (the container can get up to half a stack more than the blueprint count), and a smaller remainder is left out with a note ("left out (under half a unit stack)").

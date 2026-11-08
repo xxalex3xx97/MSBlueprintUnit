@@ -30,5 +30,11 @@ check(W.pure.fReason(false, true, 9, focus("Edt_X class=EditableTextBox outer=Wi
 check(W.pure.fReason(false, true, 9, focus("Edt_Chat class=EditableTextBox outer=Foo", false)) == nil, "F: foreign focused box does not block close")
 check(W.pure.fReason(false, true, 9, none) == nil, "F: nothing focused closes")
 
+-- Chk_Restore read: unchecked -> false (restore off), checked -> true, missing or unreadable -> nil (restore on)
+check(W.pure.checkedOf({ IsChecked = function() return false end }) == false, "restore box: unchecked gives false")
+check(W.pure.checkedOf({ IsChecked = function() return true end }) == true, "restore box: checked gives true")
+check(W.pure.checkedOf(nil) == nil, "restore box: missing widget gives nil")
+check(W.pure.checkedOf({ IsChecked = function() return "yes" end }) == nil, "restore box: non-boolean gives nil")
+
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)
