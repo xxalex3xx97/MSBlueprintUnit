@@ -20,5 +20,15 @@ local run = W.btnState(true)
 check(idle.build == "Build" and idle.build_on and idle.import_on, "button idle: Build enabled, Import enabled")
 check(run.build == "Abort" and run.build_on and not run.import_on, "button running: Abort enabled, Import disabled")
 
+-- F decision (fake io): reason string when ignored, nil = close
+local function focus(desc, mine) return function() return desc, mine end end
+local none = focus(nil, nil)
+check(W.pure.fReason(true, true, 9, none) == "import modal open", "F: import modal open ignored")
+check(W.pure.fReason(false, false, 9, none) == "window not open", "F: window closed ignored")
+check((W.pure.fReason(false, true, 0.2, none)):find("age") ~= nil, "F: within 0.5s ignored")
+check(W.pure.fReason(false, true, 9, focus("Edt_X class=EditableTextBox outer=WidgetTree", true)):find("typing in our box") ~= nil, "F: own box focused ignored")
+check(W.pure.fReason(false, true, 9, focus("Edt_Chat class=EditableTextBox outer=Foo", false)) == nil, "F: foreign focused box does not block close")
+check(W.pure.fReason(false, true, 9, none) == nil, "F: nothing focused closes")
+
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

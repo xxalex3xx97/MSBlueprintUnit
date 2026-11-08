@@ -140,12 +140,44 @@ local function readStationBuild()
   if ok(h) then txt("Txt_StationBuildHint", S.stationBuild and "station blocks: not implemented yet" or "") end
 end
 
--- typing in an edit box: F does not close the window then
-local function typing()
-  for _, e in ipairs(FindAllOf("EditableTextBox") or {}) do
-    if ok(e) then local s, v = pcall(function() return e:HasKeyboardFocus() end); if s and v then return true end end
+-- outer chain of a widget reaches our window (UserWidget): WidgetTree -> UserWidget
+local function owned(e)
+  local s0, want = pcall(function() return S.w:GetFullName() end)
+  if not s0 then return false end
+  local o = e
+  for _ = 1, 12 do
+    local s1, nxt = pcall(function() return o:GetOuter() end)
+    if not s1 or not ok(nxt) then return false end
+    local s2, fn = pcall(function() return nxt:GetFullName() end)
+    if s2 and fn == want then return true end
+    o = nxt
   end
   return false
+end
+
+-- first focused EditableTextBox in the game: desc (name, class, outer class), ours (owned by S.w). nil when none
+local function focusedBox()
+  for _, e in ipairs(FindAllOf("EditableTextBox") or {}) do
+    if ok(e) then
+      local s, v = pcall(function() return e:HasKeyboardFocus() end)
+      if s and v then
+        local s3, outer = pcall(function() return e:GetOuter() end)
+        local oc = (s3 and ok(outer)) and cn(outer) or "?"
+        return nm(e) .. " class=" .. cn(e) .. " outer=" .. oc, owned(e)
+      end
+    end
+  end
+  return nil
+end
+
+-- F decision (pure): nil = close, else the reason it is ignored. box() -> desc, ours (only our own focused box blocks F)
+local function fReason(imp, open, age, box)
+  if imp then return "import modal open" end
+  if not open then return "window not open" end
+  if age <= 0.5 then return ("age %.2fs <= 0.5s"):format(age) end
+  local desc, mine = box()
+  if desc and mine then return "typing in our box " .. desc end
+  return nil, desc and ("foreign focus ignored: " .. desc) or nil
 end
 
 function M.isOpen() return S.h ~= nil and ok(S.w) end
@@ -411,10 +443,12 @@ function M.close()
   pcall(ExecuteWithDelay, 100, function() pcall(ExecuteInGameThread, MSCore.ui.clearClicks) end)
 end
 
--- F: closes the window, except while the import modal is open (typing) or an edit box has focus
+-- F: closes the window, except while the import modal is open or our own edit box has focus. Traces every press.
 function M.fKey()
-  if M.impOpen() then return end
-  if M.isOpen() and os.clock() - S.t0 > 0.5 and not typing() then M.close() end
+  local why, note = fReason(M.impOpen(), M.isOpen(), os.clock() - S.t0, focusedBox)
+  if why then Live.trace("F ignored: " .. why); return end
+  Live.trace("F closes window" .. (note and (" (" .. note .. ")") or ""))
+  M.close()
 end
 
 -- Pin (Btn_CostPin): sends the game's SetPinnedCostInput with the net-need stacks (net > 0, amount = net). Pressed again = empty array = unpin.
@@ -508,7 +542,7 @@ function M.open(block, player, ctl)
 end
 
 -- pure helpers for the tests (no game objects)
-M.pure = { hiddenNote = hiddenNote }
+M.pure = { hiddenNote = hiddenNote, fReason = fReason }
 -- label and enabled state of the build buttons while a run goes (running = true)
 function M.btnState(running)
   if running then return { build = "Abort", build_on = true, import_on = false } end

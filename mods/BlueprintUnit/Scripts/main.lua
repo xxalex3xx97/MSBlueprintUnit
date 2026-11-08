@@ -225,6 +225,7 @@ end
 pcall(function()
   RegisterKeyBind(Key.ESCAPE, function()
     pcall(function()
+      require("bpu_live").trace("ESC: " .. (BPU.impOpen() and "import modal" or BPU.isOpen() and "window" or "nothing open"))
       if BPU.impOpen() then schedulePausePoll(); pcall(ExecuteInGameThread, BPU.impClose)
       elseif BPU.isOpen() then schedulePausePoll(); pcall(ExecuteInGameThread, BPU.close) end
     end)
@@ -232,7 +233,10 @@ pcall(function()
 end)
 pcall(function()
   RegisterKeyBind(Key.F, function()
-    pcall(function() if BPU.isOpen() then pcall(ExecuteInGameThread, BPU.fKey) end end)
+    pcall(function()
+      if BPU.isOpen() then pcall(ExecuteInGameThread, BPU.fKey)
+      else require("bpu_live").trace("F ignored: window not open") end
+    end)
   end)
 end)
 -- crate hide, world scan: every 3 s. Only crate sims (BP_BPUnitStoreObj_01_C) cost anything; done ones are cached.
