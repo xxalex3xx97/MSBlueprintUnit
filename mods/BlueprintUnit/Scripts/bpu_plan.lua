@@ -621,8 +621,8 @@ local function build(text, live, F, opts)
     end
     local splitN = 0
     local function split_differs(m, e)
-        -- live cfg "" or nil = unknown: treat as same (keep)
-        return (m.dat or ""):find("^DAT_Splitter") ~= nil and type(e.cfg) == "string" and #e.cfg > 0 and e.cfg ~= (m.cfg or "")
+        -- live cfg "" or nil = unknown, blueprint cfg nil = no settings specified: treat as same (keep)
+        return (m.dat or ""):find("^DAT_Splitter") ~= nil and m.cfg ~= nil and type(e.cfg) == "string" and #e.cfg > 0 and e.cfg ~= (m.cfg or "")
     end
     for _, m in ipairs(machines) do
         local found, rej
