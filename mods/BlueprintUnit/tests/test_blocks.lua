@@ -198,7 +198,7 @@ end
 local rids = { primary = 7, player = 8, editing = 0 }
 local nr = rfake()
 check("send+remove ok", B.send(nr, 3, { S1 }, rids, { SIDE }) == true)
-check("send+remove order: reset, remove, add, one apply", table.concat(nr.calls, ",") == "pending false true,remove ShipyardSide 0,0,0 r0,add Station_01,pending true false"
+check("send+remove order: reset, remove, add, one apply", table.concat(nr.calls, ",") == "pending false true,remove /Game/ShipyardSide 0,0,0 r0,add /Game/Station_01,pending true false"
     and nr.applies == 1)
 local nf = rfake("remove")
 local okf, ef = B.send(nf, 3, { S1 }, rids, { SIDE })
@@ -206,7 +206,7 @@ check("send remove fail -> false, reset, no add", not okf and ef:find("remove_bl
     and nf.calls[#nf.calls] == "pending false true" and nf.applies == 0)
 local nno = rfake()
 B.send(nno, 3, { S1 }, rids)
-check("send without removes: no remove_block call", table.concat(nno.calls, ",") == "pending false true,add Station_01,pending true false")
+check("send without removes: no remove_block call", table.concat(nno.calls, ",") == "pending false true,add /Game/Station_01,pending true false")
 
 -- wait: added blocks shown but the side still there -> still missing; gone -> done
 local live_side = { SIDE }
@@ -221,6 +221,17 @@ check("name: fallback strips BPO_ and underscores", B.name("BPO_Thing_Two") == "
 check("place_text", B.place_text({ class = "BPO_ShipyardCore_02", gx = -8, gy = 0, h = -4 }) == "Shipyard core 2 at (-8, 0), level -4")
 check("listing 1/2/3 and more", B.listing({ "a" }) == "a" and B.listing({ "a", "b" }) == "a and b"
     and B.listing({ "a", "b", "c" }) == "a, b and c" and B.listing({ "a", "b" }, 4) == "a and b and 2 more")
+
+-- the natives need the FULL class path: send must pass b.path when present (probe 2026-11-08: the short name was refused)
+do
+    local seen = {}
+    local nn = { pending = function() return true end,
+                 remove_block = function(st, cls) seen[#seen + 1] = "rm " .. cls return true end,
+                 add_block = function(st, cls) seen[#seen + 1] = "add " .. cls return true end }
+    B.send(nn, 3, { { class = "Station_01", path = "/Game/X/Station_01.Station_01_C", gx = 0, gy = 0, h = 0, rot = 0 } }, { primary = 1, player = 2 },
+           { { class = "ShipyardSide", path = "/Game/X/ShipyardSide.ShipyardSide_C", gx = 0, gy = 0, h = 0, rot = 2 } })
+    check("send passes full class paths", seen[1] == "rm /Game/X/ShipyardSide.ShipyardSide_C" and seen[2] == "add /Game/X/Station_01.Station_01_C")
+end
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

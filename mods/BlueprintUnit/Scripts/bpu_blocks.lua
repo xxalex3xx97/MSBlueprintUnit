@@ -301,14 +301,14 @@ function B.send(native, station, blocks, ids, removes)
     local ok, err = native.pending(station, false, true, p, pl, ed)
     if not ok then return false, B.RAW.reset_fail .. tostring(err) end
     for _, r in ipairs(removes) do
-        ok, err = native.remove_block(station, r.class, ik(r.gx), ik(r.gy), ik(r.h), r.rot or 0)
+        ok, err = native.remove_block(station, r.path or r.class, ik(r.gx), ik(r.gy), ik(r.h), r.rot or 0)
         if not ok then
             native.pending(station, false, true, p, pl, ed)  -- best effort
             return false, B.RAW.remove_fail .. at(r) .. ": " .. tostring(err)
         end
     end
     for _, b in ipairs(blocks or {}) do
-        ok, err = native.add_block(station, b.class, ik(b.gx), ik(b.gy), ik(b.h), b.rot or 0)
+        ok, err = native.add_block(station, b.path or b.class, ik(b.gx), ik(b.gy), ik(b.h), b.rot or 0)
         if not ok then
             native.pending(station, false, true, p, pl, ed)  -- best effort
             return false, B.RAW.add_fail .. at(b) .. ": " .. tostring(err)

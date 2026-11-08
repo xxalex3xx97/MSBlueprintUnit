@@ -407,6 +407,9 @@ local function plan_blocks(doc, blocks, live, opts)
         res.notes[#res.notes + 1] = B.TEXT.research_all
         res.raw[#res.raw + 1] = "research state unreadable for all classes: Station Build placed nothing"
     end
+    -- the natives need the FULL class path: fill it in from the known class paths when a record only has the short name
+    for _, r in ipairs(res.remove) do r.path = r.path or path_of[r.class] end
+    for _, a in ipairs(bl) do a.path = a.path or path_of[a.class] end
     local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes }
     if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
     if type(opts.trace) == "function" then
