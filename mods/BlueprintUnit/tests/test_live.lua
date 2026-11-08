@@ -253,7 +253,8 @@ do
     local fw = assert(io.open(dir .. "../Scripts/bpu_window.lua", "rb"))
     local src = fw:read("a")
     fw:close()
-    check(src:find("okT, errT = pcall(", 1, true) ~= nil and src:find("build tick ERROR", 1, true) ~= nil,
+    check(src:find("okT, errT = xpcall(", 1, true) ~= nil and src:find("build tick ERROR", 1, true) ~= nil
+          and src:find("build tick traceback", 1, true) ~= nil,
           "window: tick error is caught, traced, and ends the run")
     check(src:find("finishBuild replan failed", 1, true) ~= nil and src:find("buildClick replan failed", 1, true) ~= nil,
           "window: replan failures traced")

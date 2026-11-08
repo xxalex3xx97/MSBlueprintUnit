@@ -32,6 +32,7 @@ local SETTLE_MS = 500        -- last removal before a placement on its cell, not
 local POLL_MS = 250
 local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
 local RESTORE_CMD_PER_TICK = 1000 -- restore pipeline: TRANSFER commands sent per tick (FIFO, no waits between them)
+local PIPE_POLL_MS = 2000    -- restore pipeline: verify poll (unit read + unconfirmed containers only), not every 250 ms
 local RETRY_MAX = 5          -- restore: a refused send is retried on the next tick this many times, then the restore stops
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
@@ -52,10 +53,15 @@ local function sorted_keys(m)
 end
 
 -- slot = { item = "ITEM_X" | "", amount = n, max = stack size }. Empty slot: item "".
+-- nil amount counts as 0; the first one per run is traced (nil_hook, set by B.new) with the caller, so the source shows.
+local nil_hook = nil
 local function totals(slots)
     local t = {}
-    for _, s in ipairs(slots) do
-        if s.item ~= "" and s.amount > 0 then t[s.item] = get(t, s.item) + s.amount end
+    for i, s in ipairs(slots) do
+        local item, amount = s.item or "", s.amount
+        if amount == nil and item ~= "" and nil_hook then nil_hook(i, item) end
+        amount = amount or 0
+        if item ~= "" and amount > 0 then t[item] = get(t, item) + amount end
     end
     return t
 end
@@ -369,6 +375,14 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
+    local nil_traced = false
+    nil_hook = function(i, item)   -- totals() saw a nil amount: once per run, with the caller (level 3 = caller of totals)
+        if nil_traced then return end
+        nil_traced = true
+        local info = debug.getinfo(3, "Sl")
+        trace(("totals: nil amount at slot %d item %s, caller %s:%s"):format(i, item,
+            info and info.short_src or "?", info and tostring(info.currentline) or "?"))
+    end
     -- any end (done, error, cancel) with placed or removed machines: io.note_build keeps them as a live overlay
     local function mark_changed()
         if #R.placed_list + #R.removed_list > 0 and io.note_build then io.note_build(R.placed_list, R.removed_list) end
@@ -1073,6 +1087,9 @@ function B.new(io)
                             end
                             pq[#pq + 1] = { kind = "transfer", prim = R.unit_inv, sec = cid, slot0 = dst - 1, action = 2,
                                 pair = (dst ~= i) and npair or nil, job = job.id, item = it.name, moved = take }
+                            -- the TRANSFER empties dst only when the game ticks, but io.split acts at once: a slot a queued
+                            -- TRANSFER touches is never a split destination in this pass (else "split into a non-empty slot")
+                            used[dst] = true
                             sim_apply(cn, it.name, sim_put(cn, it.name, take, cap))
                             s.amount = s.amount - take   -- the staged part left the slot (split), or the whole slot went (TRANSFER)
                             if s.amount <= 0 then s.item, s.amount = "", 0 end
@@ -1177,16 +1194,28 @@ function B.new(io)
         local eU = totals(R.pm.unit)
         for k, v in pairs(R.skip_u or {}) do eU[k] = get(eU, k) + v end   -- skipped moves never left the unit
         if not same_totals(uT, only(eU)) then why = "unit" end
+        -- a container that matched its model once is not read again (jm.confirmed); its last read is kept for the sig
+        R.last_reads, R.last_slow, R.last_confirmed = 0, 0, 0
         for _, jm in ipairs(R.pm.jobs) do
-            local map = contents_of(jm)
+            if jm.confirmed then R.last_confirmed = R.last_confirmed + 1 end
+            local map = jm.map
+            if not jm.confirmed then
+                local t0 = io.now()
+                map = contents_of(jm)
+                R.last_reads, R.last_slow = R.last_reads + 1, math.max(R.last_slow, io.now() - t0)
+                jm.map = map
+            end
             if not map then
                 why = why or ("container " .. tostring(jm.id) .. " unreadable")
             else
                 local cT = only(map)
                 for _, k in ipairs(names) do parts[#parts + 1] = k .. "=" .. cT[k] end
-                local eC = totals(jm.slots)
-                for k, v in pairs((R.skip_c or {})[jm.id] or {}) do eC[k] = get(eC, k) - v end
-                if not same_totals(cT, only(eC)) then why = why or ("container " .. tostring(jm.id)) end
+                if not jm.confirmed then
+                    local eC = totals(jm.slots)
+                    for k, v in pairs((R.skip_c or {})[jm.id] or {}) do eC[k] = get(eC, k) - v end
+                    if same_totals(cT, only(eC)) then jm.confirmed = true
+                    else why = why or ("container " .. tostring(jm.id)) end
+                end
             end
         end
         -- split route, nothing skipped: the unit slots must match the model too (slot layout after the sort and the splits)
@@ -1228,7 +1257,10 @@ function B.new(io)
             local c = R.pq[R.qpos]
             local ok, err
             if c.kind == "split" then
+                local t0 = io.now()
+                trace(("restore split: before src0=%s amount=%s dst0=%s at %s ms"):format(tostring(c.src), tostring(c.amount), tostring(c.dst), tostring(t0)))
                 ok, err = io.split(R.unit_inv, c.src, c.amount, c.dst)
+                trace(("restore split: after sent=%s err=%s, %s ms"):format(tostring(ok), tostring(err), tostring(io.now() - t0)))
             elseif c.pair and R.dead and R.dead[c.pair] then
                 ok = true   -- its split was skipped: nothing is staged, so this TRANSFER is passed (not sent, not counted)
             else
@@ -1271,9 +1303,9 @@ function B.new(io)
         end
         trace(("restore pipeline: sent %s, %s of %s"):format(tostring(sent), tostring(R.qpos - 1), tostring(#R.pq)))
         if R.qpos > #R.pq then
-            R.t_progress, R.stage = now, 16
+            R.t_progress, R.t_sent, R.stage = now, now, 16
             trace("restore pipeline: all commands sent, waiting for the game to show them")
-            R.t_next = now + POLL_MS
+            R.t_next = now + POLL_MS   -- first verify soon (usually already shown), then every PIPE_POLL_MS
         else
             set_status("working", progress(R.qpos - 1, #R.pq))
             R.t_next = now   -- next slice on the next tick, no wait
@@ -1287,9 +1319,14 @@ function B.new(io)
             rs_note("restore stalled: timeout after 300 s")
             return restore_end()
         end
+        local tr0 = io.now()
         local ps, us, err = read_both()
         if not ps then return fail(err) end
+        local unit_ms = io.now() - tr0
         local good, why, sig = pipe_state(us)
+        trace(("restore poll: %s ms since the last send, unit read %s ms, containers read %s (slowest %s ms, %s of %s confirmed), mismatch %s"):format(
+            tostring(now - R.t_sent), tostring(unit_ms), tostring(R.last_reads), tostring(R.last_slow),
+            tostring(R.last_confirmed), tostring(#R.pm.jobs), tostring(why)))
         if R.pipe_sig == nil then R.pipe_sig = sig   -- baseline: the stall clock runs from the last send
         elseif sig ~= R.pipe_sig then R.pipe_sig, R.t_progress = sig, now end
         if good then
@@ -1303,7 +1340,7 @@ function B.new(io)
             return restore_end()
         end
         set_status("working", progress(#R.pq, #R.pq, ", waiting for the game"))
-        R.t_next = now + POLL_MS
+        R.t_next = now + PIPE_POLL_MS
     end
 
     local builder = {}

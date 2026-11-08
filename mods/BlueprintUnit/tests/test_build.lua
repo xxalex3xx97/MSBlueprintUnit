@@ -1858,5 +1858,35 @@ do
           and st.text:find("restore stalled at pipeline (2 of 2 commands sent)", 1, true) ~= nil, "split no-op: STALL, nothing more sent (" .. st.text .. ")")
 end
 
+-- split vs queued TRANSFER: the game applies a TRANSFER late (delay), io.split at once. Container 5 takes the whole first
+-- stack (TRANSFER queued), container 7 needs 20 of the 30 stack -> the split must not pick slot 1 (emptied in the model only)
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 30, 100) }, 4), delay = 500 })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 100 } }), cont_at(7, { { name = "ITEM_Plate", count = 20 } }) },
+                         need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local ids = f.io.container_ids()
+    check(st.state == "done" and #ids == 2 and cont_plate(f, ids[1]) == 100 and cont_plate(f, ids[2]) == 20
+          and tot(f.inv.unit.slots, "ITEM_Plate") == 10 and #f.violations == 0 and #f.splits == 1 and f.splits[1][4] == 2,
+          "split race: split goes to the empty slot 3, not the slot a queued TRANSFER empties (" .. st.text .. ")")
+end
+
+-- verify poll: game applies 3 s late, 2 containers. Polls every 2 s after the first 250 ms, confirmed containers not read again
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 4), delay = 3000 })
+    local reads = {}
+    local base = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id) reads[id] = (reads[id] or 0) + 1; return base(id) end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 100 } }), cont_at(7, { { name = "ITEM_Plate", count = 100 } }) },
+                         need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local ids = f.io.container_ids()
+    local worst = math.max(reads[ids[1]] or 0, reads[ids[2]] or 0)
+    check(st.state == "done" and #ids == 2 and cont_plate(f, ids[1]) == 100 and cont_plate(f, ids[2]) == 100 and #f.violations == 0
+          and worst <= 8, "verify poll: container reads per container " .. worst .. " max over a 3 s wait (" .. st.text .. ")")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)

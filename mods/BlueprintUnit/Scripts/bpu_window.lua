@@ -301,12 +301,16 @@ local function buildLoop(run)
   return function()
     if S.run ~= run then return true end
     pcall(ExecuteInGameThread, function()
-      local okT, errT = pcall(function()
+      local okT, errT = xpcall(function()
         if S.run ~= run then return end
         S.builder:tick(S.io.now())
         local st = S.builder:status()
         setStatus(st.text)
         if st.state == "done" or st.state == "error" then finishBuild(run) end
+      end, function(e)
+        -- full traceback to bpu_trace.log; the short error (returned) still goes to the Notes panel
+        Live.trace("build tick traceback: " .. (debug.traceback(tostring(e), 2):gsub("\n", " ; ")))
+        return tostring(e)
       end)
       if not okT then
         Live.trace("build tick ERROR " .. tostring(errT))
