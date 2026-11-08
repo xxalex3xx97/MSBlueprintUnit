@@ -393,6 +393,18 @@ local function plan_blocks(doc, blocks, live, opts)
     local res = B.classify(missing, blocks, info_of, live.have or {})
     local bl = {}
     for i, a in ipairs(res.accept) do bl[i] = a.block end
+    -- every station class checked has unknown research state: say so once (the per-block notes say which)
+    local checked, unknown = 0, 0
+    for _, b in ipairs(missing) do
+        local info = info_of(b.class)
+        if info and info.station then
+            checked = checked + 1
+            if info.unlocked == nil then unknown = unknown + 1 end
+        end
+    end
+    if checked > 0 and unknown == checked then
+        res.notes[#res.notes + 1] = "research state unreadable for all classes: Station Build placed nothing"
+    end
     local out = { blocks = bl, need = res.cost, count = #bl, notes = res.notes }
     if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
     if type(opts.trace) == "function" then

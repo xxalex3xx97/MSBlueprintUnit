@@ -440,6 +440,13 @@ local oc = sb_plan(sb_json(sb_block("BPO_Station_02", 0, 0, 0), sb_block("BPO_Go
 check("sb: occupied skipped with note", oc and oc.block_count == 0 and has_note(oc, "BPO_Station_02 at 0,0,0: cell occupied"))
 check("sb: unknown class note", has_note(oc, "BPO_Gone at 5,0,0: class not in this game"))
 
+-- research state unknown for every class: one note for the run, nothing placed
+local unk = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0), sb_block("BPO_Station_02", 4, 0, 0)),
+    { block_info = function(cls) return { station = true, unlocked = nil, bounds = SB_BOUNDS, cost = {} } end })
+check("sb: unknown research for all -> one run note, nothing placed", unk and unk.block_count == 0 and has_note(unk, "research state unreadable for all classes: Station Build placed nothing"))
+
+check("sb: unknown research -> per-block note", unk and has_note(unk, "research state unknown, skipped"))
+
 -- off: same file refused as before, nothing added
 local off, off_err = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F, { station_build = false })
 check("sb off: still refused", off == nil and off_err:find("Blocks are not on the grid", 1, true) ~= nil)

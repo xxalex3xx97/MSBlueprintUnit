@@ -365,11 +365,10 @@ function L.station_build_capable()
     return false, "Station Build needs MSCore >= 0.8.0"
 end
 
--- class defaults per class path (read once, cached): {station, unlocked, bounds, cost={ITEM=n}} | nil.
--- BlockBounds comes raw (65536 = 1.0). unlocked is nil: no research-state native in MSCore 0.8.0 (every block is skipped as unknown).
+-- class defaults per class path (read once, cached): {station, bounds, cost={ITEM=n}} | nil.
+-- BlockBounds comes raw (65536 = 1.0). MSCore native read_block_class (0.8.0).
 local BINFO = {}
-local function block_info(cls, path)
-    if not path then return nil end
+local function static_info(path)
     if BINFO[path] == nil then
         local FN = L.mscore and L.mscore.factory_native
         local ok, info = false, nil
@@ -379,13 +378,43 @@ local function block_info(cls, path)
             local cost = {}
             for _, c in ipairs(info.cost or {}) do cost[c.item] = c.amount end
             local s = 65536
-            r = { station = info.station == true, unlocked = nil, cost = cost,
+            r = { station = info.station == true, cost = cost,
                   bounds = { x0 = info.min.x / s, x1 = info.max.x / s, y0 = info.min.y / s, y1 = info.max.y / s,
                              z0 = info.min.z / s, z1 = info.max.z / s } }
         end
         BINFO[path] = r
     end
     return BINFO[path] or nil
+end
+
+-- research state of one block class, Lua only: DMSWorld:GetResearchState():IsBlockUnlocked(class object).
+-- Returns true | false | nil (unknown: bpu_blocks skips it), plus a detail text for the trace. Every step is pcall-guarded.
+local function unlock_state(path)
+    local okw, world = pcall(FindFirstOf, "DMSWorld")
+    if not okw or not valid(world) then return nil, "world=no (" .. (okw and "not valid" or tostring(world)) .. ")" end
+    local okr, rs = pcall(function() return world:GetResearchState() end)
+    if not okr or rs == nil then return nil, "world=yes state=failed: " .. tostring(rs) end
+    local oko, obj = pcall(StaticFindObject, path)
+    if not oko or not valid(obj) then return nil, "world=yes state=yes obj=no (" .. (oko and "not valid" or tostring(obj)) .. ")" end
+    local oku, r = pcall(function() return rs:IsBlockUnlocked(obj) end)
+    if not oku then return nil, "world=yes state=yes obj=yes IsBlockUnlocked failed: " .. tostring(r) end
+    r = unw(r)
+    if type(r) ~= "boolean" then return nil, "world=yes state=yes obj=yes IsBlockUnlocked returned " .. type(r) end
+    return r, "world=yes state=yes obj=yes"
+end
+
+-- block_info for one snapshot: static info (cached) + unlocked read once per class path per snapshot, traced
+local function block_info_for(unl)
+    return function(cls, path)
+        local info = path and static_info(path)
+        if not info then return nil end
+        if unl[path] == nil then
+            local v, detail = unlock_state(path)
+            unl[path] = { v = v }
+            TRACE(("block unlock %s (%s): %s -> unlocked=%s"):format(tostring(cls), tostring(path), detail, tostring(v)))
+        end
+        return { station = info.station, unlocked = unl[path].v, cost = info.cost, bounds = info.bounds }
+    end
 end
 
 -- player + unit stock: {ITEM_X = n}
@@ -442,7 +471,7 @@ function L.snapshot(U, F, opts)
                    items = L.item_names(), memory = L.memory() }
     if opts and opts.station_build then
         local player = opts.player or L.player()
-        snap.block_info = block_info
+        snap.block_info = block_info_for({})
         snap.have = have_totals(U, player)
         snap.creative = L.creative(player, nil)
         TRACE("snapshot station build: have items=" .. count(snap.have))

@@ -570,6 +570,45 @@ do
     Live.mscore = saved
 end
 
+-- Station Build: unlocked read in Lua (DMSWorld:GetResearchState():IsBlockUnlocked(class object)); every failure = nil
+do
+    local saved = Live.mscore
+    local mode = "true"
+    local rsobj = { IsBlockUnlocked = function()
+        if mode == "err" then error("no such method") end
+        if mode == "str" then return "yes" end
+        return mode == "true"
+    end }
+    local worldobj = { IsValid = alive, GetResearchState = function() return rsobj end }
+    local savedWorld, savedSFO = world.DMSWorld, StaticFindObject
+    world.DMSWorld = { worldobj }
+    StaticFindObject = function(p) return { IsValid = alive, path = p } end
+    local FN = { read_station = saved.factory_native.read_station, read_inventory = saved.factory_native.read_inventory,
+        read_block_class = function(p)
+            if p == "/G/BPO_A.BPO_A_C" then
+                return { station = true, ship = false, machines = 0, min = { x = 0, y = 0, z = 0 }, max = { x = 65536, y = 0, z = 0 },
+                         cost = { { item = "ITEM_A", amount = 3 } } }
+            end
+            return nil, "not found"
+        end,
+        add_block = function() return true end, pending = function() return true end }
+    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    local function unl(m)
+        mode = m
+        return Live.snapshot(U, F, { station_build = true, player = W.player }).block_info("BPO_A", "/G/BPO_A.BPO_A_C")
+    end
+    check(unl("true").unlocked == true, "unlock: IsBlockUnlocked true -> unlocked true")
+    check(unl("false").unlocked == false, "unlock: false -> unlocked false")
+    check(unl("err").unlocked == nil, "unlock: method error -> nil (unknown)")
+    check(unl("str").unlocked == nil, "unlock: non-boolean -> nil")
+    world.DMSWorld = nil
+    check(unl("true").unlocked == nil, "unlock: no DMSWorld -> nil")
+    world.DMSWorld = { worldobj }
+    worldobj.GetResearchState = function() error("no state") end
+    check(unl("true").unlocked == nil, "unlock: GetResearchState error -> nil")
+    world.DMSWorld, StaticFindObject, Live.mscore = savedWorld, savedSFO, saved
+end
+
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)
