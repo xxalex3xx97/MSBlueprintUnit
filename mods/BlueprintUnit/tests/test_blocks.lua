@@ -60,9 +60,11 @@ local missing = {
 local live = { { class = "Ok", gx = 9, gy = 9, h = 0, rot = 0 } }
 local r = B.classify(missing, live, info_of, { ITEM_A = 2, ITEM_B = 2 })
 check("classify accepted count", #r.accept == 3)
-check("classify notes count", #r.notes == 7)
-check("classify notes text", r.notes[1] == "Gone at 1,0,0: class not in this game")
-check("classify skip occupied", r.notes[6] == "Ok at 9,9,0: cell occupied or overlaps a block already placed")
+check("classify notes count", #r.notes == 6)
+check("classify notes text", r.notes[1] == "Skipped Gone: this block type is not in this game.")
+check("classify raw keeps technical text", r.raw[1] == "Gone at 1,0,0: class not in this game")
+check("classify skip occupied", r.notes[4] == "Skipped Ok: another block of the blueprint already occupies that spot.")
+check("classify locked: one aggregated note", r.notes[6] == "Skipped 2 blocks locked by research: Locked x2.")
 check("classify locked listed once", #r.locked == 1 and r.locked[1] == "Locked")
 check("classify cost sum", r.cost.ITEM_A == 2 + 2 + 1 and r.cost.ITEM_B == 3)
 check("classify shortfall", #r.shortfall == 2 and r.shortfall[1].item == "ITEM_A" and r.shortfall[1].need == 5
@@ -134,13 +136,15 @@ local S1 = { class = "Station_01", gx = 0, gy = 0, h = 0, rot = 0, path = "/Game
 -- the probe case: Station 1x1 where a Shipyard side stands -> side removed, station added
 local rr = B.classify({ S1 }, { SIDE }, rinfo_of, {}, { S1 })
 check("remove: live side in the way is chosen", #rr.accept == 1 and #rr.remove == 1 and rr.remove[1] == SIDE)
-check("remove: note text", rr.notes[1] == "removing ShipyardSide at 0,0,0 (overlaps Station_01 at 0,0,0)")
+-- fixtures use short names without BPO_: the fallback name applies (real plans carry BPO_ classes, see test_plan)
+check("remove: note text", rr.notes[1] == "Removed the ShipyardSide that was in the way of a Station 01.")
+check("remove: raw trace text", rr.raw[1] == "removing ShipyardSide at 0,0,0 (overlaps Station_01 at 0,0,0)")
 check("remove: net cost = added 2 minus refund 4+1", rr.cost.ITEM_Plate == 2 and rr.refund.ITEM_Plate == 4 and rr.refund.ITEM_Frame == 1)
 check("remove: net refund needs nothing", #rr.shortfall == 0)
 
 -- a live block that is itself in the file is never removed: the file overlaps itself, the new block is skipped
 local rk = B.classify({ S1 }, { SIDE }, rinfo_of, {}, { S1, SIDE })
-check("in file: not removed, skipped as occupied", #rk.remove == 0 and #rk.accept == 0 and rk.notes[1] == "Station_01 at 0,0,0: cell occupied or overlaps a block already placed")
+check("in file: not removed, skipped as occupied", #rk.remove == 0 and #rk.accept == 0 and rk.notes[1] == "Skipped Station 01: another block of the blueprint already occupies that spot.")
 
 -- net cost: 6 Plate for the new block, 4 Plate + 1 Frame refund -> 2 Plate short when holding 1
 local rn = B.classify({ { class = "Station_02A", gx = 0, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, { ITEM_Plate = 1 },
@@ -153,10 +157,10 @@ check("net: removal refund covers a 2 Plate block with 0 held", #rn2.shortfall =
 local S1b = { class = "Station_01", gx = 0, gy = 0, h = -2, rot = 0 }
 local rg = B.classify({ S1, S1b }, { SIDE }, rinfo_of, {}, { S1, S1b })
 check("gone: second block accepted after the side is removed", #rg.accept == 2 and #rg.remove == 1)
-check("gone: one note (the removal), no occupied note", #rg.notes == 1 and rg.notes[1]:find("removing", 1, true) ~= nil)
+check("gone: one note (the removal), no occupied note", #rg.notes == 1 and rg.notes[1]:find("Removed the", 1, true) ~= nil)
 -- two missing blocks over the same side: removed once
 local rd = B.classify({ S1, { class = "Station_01", gx = 1, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, { S1 })
-check("dedup: side removed once, second block skipped as overlap", #rd.remove == 1 and #rd.accept == 1 and rd.notes[#rd.notes]:find("overlaps another block", 1, true) ~= nil)
+check("dedup: side removed once, second block skipped as overlap", #rd.remove == 1 and #rd.accept == 1 and rd.notes[#rd.notes]:find("another block of the blueprint already occupies", 1, true) ~= nil)
 -- probe spacing: a Station 1x1 4 cells away from the side is not in its way; 2 cells away is
 local rp = B.classify({ { class = "Station_01", gx = 4, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, {})
 check("probe: station 4 away from side, no removal", #rp.remove == 0 and #rp.accept == 1)
@@ -210,6 +214,13 @@ check("wait: side still present -> not done", #B.missing_after({ S1 }, { S1, SID
 check("wait: side gone, block shown -> done", #B.missing_after({ S1 }, { S1 }, { SIDE }) == 0)
 check("wait: side still there and block not shown -> 2 missing", #B.missing_after({ S1 }, live_side, { SIDE }) == 2)
 check("wait: no removes -> old behaviour", #B.missing_after({ S1 }, {}) == 1)
+
+-- player names and sentence parts
+check("name: table entry", B.name("BPO_Station_01") == "Station 1x1" and B.name("BPO_ShipyardCore_02") == "Shipyard core 2")
+check("name: fallback strips BPO_ and underscores", B.name("BPO_Thing_Two") == "Thing Two" and B.name("Gone") == "Gone")
+check("place_text", B.place_text({ class = "BPO_ShipyardCore_02", gx = -8, gy = 0, h = -4 }) == "Shipyard core 2 at (-8, 0), level -4")
+check("listing 1/2/3 and more", B.listing({ "a" }) == "a" and B.listing({ "a", "b" }) == "a and b"
+    and B.listing({ "a", "b", "c" }) == "a, b and c" and B.listing({ "a", "b" }, 4) == "a and b and 2 more")
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -37,7 +37,7 @@ check(W.pure.checkedOf(nil) == nil, "restore box: missing widget gives nil")
 check(W.pure.checkedOf({ IsChecked = function() return "yes" end }) == nil, "restore box: non-boolean gives nil")
 
 -- Station Build hint: shown only when ticked on an MSCore without the 0.8.0 natives
-check(W.pure.stationHint(true, false) == "Station Build needs MSCore 0.8.0 or newer", "station hint: ticked, old MSCore -> hint")
+check(W.pure.stationHint(true, false) == "Station Build needs MSCore 0.8.0 or newer.", "station hint: ticked, old MSCore -> hint")
 check(W.pure.stationHint(true, true) == "", "station hint: ticked, 0.8.0 -> no hint")
 check(W.pure.stationHint(false, false) == "", "station hint: not ticked -> no hint")
 
@@ -66,7 +66,7 @@ for _, name in ipairs({ "probe_p1_station01.json", "probe_p2_dock.json" }) do
           name .. ": station build plans the one block at (0,4)")
     check(p and Plan.summary(p):sub(-10) == ", blocks 1", name .. ": summary ends with blocks 1")
     local off, offerr = Plan.plan(fixture(name), fx_live(), FX, {})
-    check(off == nil and offerr:find("Blocks are not on the grid", 1, true) ~= nil, name .. ": station build off -> unchanged refusal")
+    check(off == nil and offerr:find("These blocks are not on the station grid", 1, true) ~= nil, name .. ": station build off -> unchanged refusal")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, fail))

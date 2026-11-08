@@ -125,7 +125,7 @@ check("stale: removes text", p and P.removes_text(p) == "removes: 1 belt")
 -- blocks not on the grid: whole paste refused
 p, err = P.plan(read("block_off_grid.json"), live(), F)
 check("blocks: refused", p == nil)
-check("blocks: message", err == "Blocks are not on the grid: BPO_Station_01@(2,0,h0);")
+check("blocks: message", err == "These blocks are not on the station grid: Station 1x1 at (2, 0), level 0. Fix them in the blueprint or tick Station Build.")
 
 -- hidden Teleporter never placed (skipped with note)
 p = plan_of("teleporter.json")
@@ -439,28 +439,28 @@ check("sb: creative skips refusal", cr and cr.block_refuse == nil and cr.block_c
 local oc = sb_plan(sb_json(sb_block("BPO_Station_02", 0, 0, 0), sb_block("BPO_Gone", 5, 0, 0)))
 check("sb: live block in the way removed, file block accepted", oc and oc.block_count == 1 and #oc.block_remove == 1
     and oc.block_remove[1].class == "BPO_Station_01" and oc.block_refund.ITEM_A == 2)
-check("sb: removal note", has_note(oc, "removing BPO_Station_01 at 0,0,0 (overlaps BPO_Station_02 at 0,0,0)"))
+check("sb: removal note", has_note(oc, "Removed the Station 1x1 that was in the way of a Station 02."))
 check("sb: summary adds removed 1", P.summary(oc) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, removed 1")
 check("sb: removed block refund in cost rows, net", P.cost_rows(oc)[1].name == "ITEM_A" and P.cost_rows(oc)[1].refund == 2
     and P.cost_rows(oc)[1].net == -2 and P.cost_rows(oc)[2].name == "ITEM_B" and P.cost_rows(oc)[2].need == 1)
-check("sb: unknown class note", has_note(oc, "BPO_Gone at 5,0,0: class not in this game"))
+check("sb: unknown class note", has_note(oc, "Skipped Gone: this block type is not in this game."))
 
 -- live block that IS in the file is never removed: file overlaps itself, the second block is skipped as occupied
 local inf = sb_plan(sb_json(sb_block("BPO_Station_01", 0, 0, 0), sb_block("BPO_Station_02", 0, 0, 0)))
 check("sb: in-file live block not removed, overlapping block skipped", inf and inf.block_count == 0 and #inf.block_remove == 0
-    and has_note(inf, "BPO_Station_02 at 0,0,0: cell occupied"))
+    and has_note(inf, "Skipped Station 02: another block of the blueprint already occupies that spot."))
 check("sb: no removed count in summary when none", inf and P.summary(inf) == "place 0, keep 0, remove 0, recipe changes 0, blocks 0")
 
 -- research state unknown for every class: one note for the run, nothing placed
 local unk = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0), sb_block("BPO_Station_02", 4, 0, 0)),
     { block_info = function(cls) return { station = true, unlocked = nil, bounds = SB_BOUNDS, cost = {} } end })
-check("sb: unknown research for all -> one run note, nothing placed", unk and unk.block_count == 0 and has_note(unk, "research state unreadable for all classes: Station Build placed nothing"))
+check("sb: unknown research for all -> one run note, nothing placed", unk and unk.block_count == 0 and has_note(unk, "Could not read the research state of any station block, so Station Build placed nothing."))
 
-check("sb: unknown research -> per-block note", unk and has_note(unk, "research state unknown, skipped"))
+check("sb: unknown research -> per-block note", unk and has_note(unk, "Skipped Station 1x1: its research state could not be read."))
 
 -- off: same file refused as before, nothing added
 local off, off_err = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F, { station_build = false })
-check("sb off: still refused", off == nil and off_err:find("Blocks are not on the grid", 1, true) ~= nil)
+check("sb off: still refused", off == nil and off_err:find("These blocks are not on the station grid", 1, true) ~= nil)
 local off2 = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F)
 check("sb default (no opts): refused", off2 == nil)
 

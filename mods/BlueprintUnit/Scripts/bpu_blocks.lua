@@ -2,16 +2,19 @@
 -- (MSCore native add_block / remove_block / pending) before the factory is built. Game work happens only via the native passed in.
 --
 -- API:  B.key(b) -> "class|gx|gy|h"
+--       B.name(class) -> player name ("Station 1x1"; fallback: BPO_ stripped, _ to space)
+--       B.place_text(b) -> "Station 1x1 at (2, 0), level 0"    B.listing(names, total) -> "a, b and c"
 --       B.diff(doc, live) -> { missing = {doc blocks not in live}, extra = {live blocks not in doc} }  (multiset by key)
 --       B.missing_after(doc, live, removes) -> missing list + removed blocks still present (done = empty)
 --       B.box(info, b) -> {x0,x1,y0,y1,z0,z1} inclusive grid box of block b (info.bounds rotated by b.rot % 4, moved to gx,gy,h)
 --       B.overlap(a, b) -> true when two boxes share a cell (inclusive AABB, 3 axes)
 --       B.self_overlaps(doc, info_of) -> list of {i=, j=} index pairs of doc blocks whose boxes overlap (trace; expect none)
 --       B.classify(missing, live, info_of, have, doc) -> {
---           accept = { {block=, info=, box=}, ... }, notes = {text, ...}, locked = {class, ...},
+--           accept = { {block=, info=, box=}, ... },
+--           notes = {player sentences}, raw = {technical lines for bpu_trace.log}, locked = {class, ...},
 --           remove = { live block, ... } (live blocks in the way of an accepted block, deduped),
 --           cost = {ITEM=n} (added), refund = {ITEM=n} (removed), shortfall = { {item=, need=net, have=}, ... } }
---       B.send(native, station, blocks, ids, removes) -> true | false, err
+--       B.send(native, station, blocks, ids, removes) -> true | false, err (err is technical: trace it)
 --
 -- info_of(class, path) -> info | nil. info = { station = bool, unlocked = true|false|nil, bounds = {x0,x1,y0,y1,z0,z1}, cost = {ITEM=n} }
 --   (nil = class not in this game; unlocked nil = research state unknown; bounds from MSCore read_block_class)
@@ -23,7 +26,38 @@
 
 local B = {}
 
+-- player names of station blocks (by class short name). Others: BPO_ stripped, _ to space.
+local NAMES = {
+    BPO_Station_01 = "Station 1x1", BPO_Station_02A = "Station 2x2", BPO_StationCorner_01 = "Station corner",
+    BPO_CommandModule = "Command module", BPO_ShipyardSide = "Shipyard side", BPO_ShipyardCore = "Shipyard core",
+    BPO_ShipyardCore_02 = "Shipyard core 2", BPO_Dock = "Dock", BPO_Dock_2 = "Dock 2", BPO_SolarPanelBlock = "Solar panel",
+    BPO_ElevatorBlock_03 = "Elevator", BPO_BlueprintUnit = "Blueprint unit",
+}
+
+function B.name(cls)
+    cls = tostring(cls)
+    if NAMES[cls] then return NAMES[cls] end
+    local s = cls:gsub("^BPO_", "")
+    s = s:gsub("_", " ")
+    return s
+end
+
+-- player sentences (shown in the window). Technical wording lives in B.RAW (trace only).
 B.TEXT = {
+    occupied = "another block of the blueprint already occupies that spot",
+    no_class = "this block type is not in this game",
+    not_station = "it is not a station block",
+    unknown = "its research state could not be read",
+    shortfall = "Not enough items for the station blocks",
+    nothing_built = "nothing was built",
+    failed = "The station blocks could not be placed; nothing was resent.",
+    stalled = "The station blocks did not all appear within %d s (%d still missing); nothing was resent.",
+    sent_failed = "The station blocks could not be sent; nothing was resent.",
+    research_all = "Could not read the research state of any station block, so Station Build placed nothing.",
+}
+
+-- technical wording (bpu_trace.log, and the old raw note text)
+B.RAW = {
     no_class = "class not in this game",
     not_station = "not a station block",
     unknown = "research state unknown, skipped",
@@ -44,6 +78,23 @@ end
 
 function B.key(b)
     return string.format("%s|%s|%s|%s", tostring(b.class), tostring(ik(b.gx)), tostring(ik(b.gy)), tostring(ik(b.h)))
+end
+
+-- "Station 1x1 at (2, 0), level 0"
+function B.place_text(b)
+    return string.format("%s at (%d, %d), level %d", B.name(b.class), ik(b.gx), ik(b.gy), ik(b.h))
+end
+
+-- "a", "a and b", "a, b and c"; total > #names adds "and N more"
+function B.listing(names, total)
+    local n = #names
+    if n == 0 then return "" end
+    local s
+    if n == 1 then s = names[1]
+    elseif n == 2 then s = names[1] .. " and " .. names[2]
+    else s = table.concat(names, ", ", 1, n - 1) .. " and " .. names[n] end
+    if total and total > n then s = s .. " and " .. (total - n) .. " more" end
+    return s
 end
 
 -- multiset diff by key: doc entries not matched by live (missing), live entries not matched by doc (extra)
@@ -141,31 +192,41 @@ local function at(b)
     return string.format("%s at %s,%s,%s", tostring(b.class), tostring(ik(b.gx)), tostring(ik(b.gy)), tostring(ik(b.h)))
 end
 
+-- reason key -> player sentence
+local FRIENDLY = { no_class = B.TEXT.no_class, not_station = B.TEXT.not_station, unknown = B.TEXT.unknown,
+                   occupied = B.TEXT.occupied, overlap_doc = B.TEXT.occupied }
+
 -- missing: blocks to place (diff(doc, live).missing). Skip order: no class, not station, locked, unknown,
 -- live block in the file (never removed), overlap with an earlier accepted block. A live block that overlaps an
 -- accepted missing block (and is not in the file) is removed; a removed live block no longer occupies its cell.
 -- Cost: added blocks (cost) and removed blocks (refund); shortfall on net = cost - refund > have.
 function B.classify(missing, live, info_of, have, doc)
-    local res = { accept = {}, notes = {}, locked = {}, cost = {}, refund = {}, shortfall = {}, remove = {} }
+    local res = { accept = {}, notes = {}, raw = {}, locked = {}, cost = {}, refund = {}, shortfall = {}, remove = {} }
     local in_doc = {}
     for _, d in ipairs(doc or {}) do in_doc[B.key(d)] = true end
     local keep_all = doc == nil   -- no file given: nothing is removable
     local live_boxes = {}
     for i, b in ipairs(live or {}) do live_boxes[i] = live_box(b, info_of) end
     local gone = {}   -- live index -> removed by an accepted block
-    local locked_seen = {}
+    local locked_n = {}   -- class -> count of blocks skipped as locked (one player note)
+    local function skip(b, key)
+        res.raw[#res.raw + 1] = at(b) .. ": " .. B.RAW[key]
+        if FRIENDLY[key] then res.notes[#res.notes + 1] = "Skipped " .. B.name(b.class) .. ": " .. FRIENDLY[key] .. "." end
+    end
     for _, b in ipairs(missing or {}) do
         local info = info_of(b.class)
         local reason
         if not info then
-            reason = B.TEXT.no_class
+            reason = "no_class"
         elseif not info.station then
-            reason = B.TEXT.not_station
+            reason = "not_station"
         elseif info.unlocked == false then
-            reason = B.TEXT.locked
-            if not locked_seen[b.class] then locked_seen[b.class] = true; res.locked[#res.locked + 1] = b.class end
+            reason = "locked"
+            if not locked_n[b.class] then res.locked[#res.locked + 1] = b.class end
+            locked_n[b.class] = (locked_n[b.class] or 0) + 1
+            res.raw[#res.raw + 1] = at(b) .. ": " .. B.RAW.locked
         elseif info.unlocked == nil then
-            reason = B.TEXT.unknown
+            reason = "unknown"
         end
         local box, hits = nil, {}
         if not reason then
@@ -174,16 +235,18 @@ function B.classify(missing, live, info_of, have, doc)
                 if not gone[i] and B.overlap(box, lb) then hits[#hits + 1] = i end
             end
             for _, i in ipairs(hits) do
-                if keep_all or in_doc[B.key(live[i])] then reason = B.TEXT.occupied; break end
+                if keep_all or in_doc[B.key(live[i])] then reason = "occupied"; break end
             end
         end
         if not reason then
             for _, a in ipairs(res.accept) do
-                if B.overlap(box, a.box) then reason = B.TEXT.overlap_doc; break end
+                if B.overlap(box, a.box) then reason = "overlap_doc"; break end
             end
         end
-        if reason then
-            res.notes[#res.notes + 1] = at(b) .. ": " .. reason
+        if reason == "locked" then
+            -- counted above, one note per class at the end
+        elseif reason then
+            skip(b, reason)
         else
             res.accept[#res.accept + 1] = { block = b, info = info, box = box }
             for item, n in pairs(info.cost or {}) do res.cost[item] = (res.cost[item] or 0) + n end
@@ -193,11 +256,22 @@ function B.classify(missing, live, info_of, have, doc)
                 res.remove[#res.remove + 1] = r
                 local rinfo = info_of(r.class, r.path)
                 for item, n in pairs(rinfo and rinfo.cost or {}) do res.refund[item] = (res.refund[item] or 0) + n end
-                res.notes[#res.notes + 1] = "removing " .. at(r) .. " (overlaps " .. at(b) .. ")"
+                res.notes[#res.notes + 1] = "Removed the " .. B.name(r.class) .. " that was in the way of a " .. B.name(b.class) .. "."
+                res.raw[#res.raw + 1] = "removing " .. at(r) .. " (overlaps " .. at(b) .. ")"
             end
         end
     end
-    table.sort(res.locked)
+    if #res.locked > 0 then
+        table.sort(res.locked)
+        local parts, total = {}, 0
+        for _, c in ipairs(res.locked) do
+            local n = locked_n[c]
+            total = total + n
+            parts[#parts + 1] = B.name(c) .. (n > 1 and (" x" .. n) or "")
+        end
+        res.notes[#res.notes + 1] = ("Skipped %d %s locked by research: %s."):format(total, total == 1 and "block" or "blocks",
+            B.listing(parts))
+    end
     local items, seen = {}, {}
     for item in pairs(res.cost) do seen[item] = true end
     for item in pairs(res.refund) do seen[item] = true end
@@ -220,30 +294,30 @@ function B.send(native, station, blocks, ids, removes)
     ids = ids or {}
     removes = removes or {}
     if (station or 0) <= 0 or (ids.primary or 0) <= 0 or (ids.player or 0) <= 0 then
-        return false, B.TEXT.no_ids
+        return false, B.RAW.no_ids
     end
     if #(blocks or {}) == 0 and #removes == 0 then return true end
     local p, pl, ed = ids.primary, ids.player, ids.editing or 0
     local ok, err = native.pending(station, false, true, p, pl, ed)
-    if not ok then return false, B.TEXT.reset_fail .. tostring(err) end
+    if not ok then return false, B.RAW.reset_fail .. tostring(err) end
     for _, r in ipairs(removes) do
         ok, err = native.remove_block(station, r.class, ik(r.gx), ik(r.gy), ik(r.h), r.rot or 0)
         if not ok then
             native.pending(station, false, true, p, pl, ed)  -- best effort
-            return false, B.TEXT.remove_fail .. at(r) .. ": " .. tostring(err)
+            return false, B.RAW.remove_fail .. at(r) .. ": " .. tostring(err)
         end
     end
     for _, b in ipairs(blocks or {}) do
         ok, err = native.add_block(station, b.class, ik(b.gx), ik(b.gy), ik(b.h), b.rot or 0)
         if not ok then
             native.pending(station, false, true, p, pl, ed)  -- best effort
-            return false, B.TEXT.add_fail .. at(b) .. ": " .. tostring(err)
+            return false, B.RAW.add_fail .. at(b) .. ": " .. tostring(err)
         end
     end
     ok, err = native.pending(station, true, false, p, pl, ed)
     if not ok then
         native.pending(station, false, true, p, pl, ed)  -- best effort
-        return false, B.TEXT.apply_fail .. tostring(err)
+        return false, B.RAW.apply_fail .. tostring(err)
     end
     return true
 end

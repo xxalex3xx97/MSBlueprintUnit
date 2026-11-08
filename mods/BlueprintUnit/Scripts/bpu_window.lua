@@ -129,7 +129,7 @@ end
 
 -- Station Build: optional Chk_StationBuild (CheckBox, default unchecked = off), read on open, Import and Build press.
 -- Ticked on an MSCore without the 0.8.0 natives: the hint under the box and the status line say so; Import/Build stop.
-local STATION_OLD = "Station Build needs MSCore 0.8.0 or newer"
+local STATION_OLD = "Station Build needs MSCore 0.8.0 or newer."
 local function stationHint(ticked, cap)
   if ticked and not cap then return STATION_OLD end
   return ""

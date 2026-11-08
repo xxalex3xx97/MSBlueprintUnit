@@ -1978,7 +1978,7 @@ local BLK = { class = "BPO_Station_02", gx = 2, gy = 0, h = 0, rot = 0 }
 local function blocks_fake(spec)
     local f = fake(spec)
     f.sent_blocks, f.blocks_out, f.shown_at = 0, nil, 0
-    f.io.station_build_capable = function() return spec.capable ~= false, "Station Build needs MSCore >= 0.8.0" end
+    f.io.station_build_capable = function() return spec.capable ~= false, "Station Build needs MSCore 0.8.0 or newer." end
     f.io.send_blocks = function(_, blocks, ids)
         f.sent_blocks = f.sent_blocks + 1
         f.block_ids = ids
@@ -2017,7 +2017,7 @@ do
     local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local b = B.new(f.io)
     local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }, { { item = "ITEM_Plate", need = 2, have = 0 } }), {})
-    check(not ok and f.sent_blocks == 0 and f.calls.pl == 0 and msg:find("not enough items for all station blocks, nothing was built: Plate need 2 have 0", 1, true),
+    check(not ok and f.sent_blocks == 0 and f.calls.pl == 0 and msg:find("Not enough items for the station blocks: need 2 Plate, have 0 (2 short); nothing was built.", 1, true),
           "station blocks: shortfall refused, nothing sent (" .. msg .. ")")
 end
 
@@ -2037,7 +2037,7 @@ do
     local b = B.new(f.io)
     b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
     local st, waited = run(b, f)
-    check(st.state == "error" and st.text:find("station blocks not placed in 10 s (1 missing), nothing was resent", 1, true)
+    check(st.state == "error" and st.text:find("The station blocks did not all appear within 10 s (1 still missing); nothing was resent.", 1, true)
           and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: never shown -> stall after 10 s, no resend (" .. st.text .. ")")
 end
 
@@ -2046,7 +2046,7 @@ do
     local f = blocks_fake({ block_send_fail = true, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local b = B.new(f.io)
     local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
-    check(not ok and f.sent_blocks == 1 and f.calls.pl == 0 and msg:find("station blocks not placed: add_block failed (nothing was resent)", 1, true),
+    check(not ok and f.sent_blocks == 1 and f.calls.pl == 0 and msg:find("The station blocks could not be sent; nothing was resent.", 1, true),
           "station blocks: send failure -> error, not resent (" .. msg .. ")")
 end
 
@@ -2096,7 +2096,7 @@ do
     p.block_remove = { { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 } }
     b:start(p, {})
     local st = run(b, f)
-    check(st.state == "error" and st.text:find("station blocks not placed in 10 s (1 missing), nothing was resent", 1, true)
+    check(st.state == "error" and st.text:find("The station blocks did not all appear within 10 s (1 still missing); nothing was resent.", 1, true)
           and f.sent_blocks == 1 and f.calls.pl == 0, "station removes: removed block never gone -> stall, no resend (" .. st.text .. ")")
 end
 
@@ -2105,7 +2105,7 @@ do
     local f = blocks_fake({ capable = false, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local b = B.new(f.io)
     local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
-    check(not ok and f.sent_blocks == 0 and msg == "error: Station Build needs MSCore >= 0.8.0", "station blocks: old MSCore refused (" .. msg .. ")")
+    check(not ok and f.sent_blocks == 0 and msg == "error: Station Build needs MSCore 0.8.0 or newer.", "station blocks: old MSCore refused (" .. msg .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

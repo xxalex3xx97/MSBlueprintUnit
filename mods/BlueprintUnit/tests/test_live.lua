@@ -542,9 +542,9 @@ do
     }
     Live.mscore = { factory_native = FN }
     local okc, whyc = Live.station_build_capable()
-    check(not okc and whyc == "Station Build needs MSCore >= 0.8.0", "station build: no 0.8.0 natives -> refused")
+    check(not okc and whyc == "Station Build needs MSCore 0.8.0 or newer.", "station build: no 0.8.0 natives -> refused")
     local oks, errs = pcall(Live.snapshot, U, F, { station_build = true })
-    check(not oks and tostring(errs):find("Station Build needs MSCore >= 0.8.0", 1, true) ~= nil, "station build: snapshot refuses without 0.8.0 natives")
+    check(not oks and tostring(errs):find("Station Build needs MSCore 0.8.0 or newer.", 1, true) ~= nil, "station build: snapshot refuses without 0.8.0 natives")
     Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
     check(Live.station_build_capable() == true, "station build: 0.8.0 natives present")
     local noRm = { add_block = FN.add_block, pending = FN.pending, read_block_class = FN.read_block_class }

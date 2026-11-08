@@ -404,14 +404,15 @@ local function plan_blocks(doc, blocks, live, opts)
         end
     end
     if checked > 0 and unknown == checked then
-        res.notes[#res.notes + 1] = "research state unreadable for all classes: Station Build placed nothing"
+        res.notes[#res.notes + 1] = B.TEXT.research_all
+        res.raw[#res.raw + 1] = "research state unreadable for all classes: Station Build placed nothing"
     end
     local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes }
     if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
     if type(opts.trace) == "function" then
         opts.trace(("station blocks: doc %d, missing %d, accept %d, remove %d, skipped %d, locked %s"):format(#doc.blocks, #missing,
             #bl, #res.remove, #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
-        for _, n in ipairs(res.notes) do opts.trace("  " .. n) end
+        for _, n in ipairs(res.raw) do opts.trace("  " .. n) end
         for _, s in ipairs(res.shortfall) do opts.trace(("  short %s need %d have %d"):format(s.item, s.need, s.have)) end
         opts.trace("station blocks self overlaps: " .. #B.self_overlaps(doc.blocks, info_of))
     end
@@ -482,9 +483,13 @@ local function build(text, live, F, opts)
                 for _, jb in ipairs(missing_jb) do diag_missing(lines, jb, blocks) end
                 opts.trace(table.concat(lines, "\n"))
             end
-            local msg = "Blocks are not on the grid:"
-            for i = 1, math.min(#missing, 5) do msg = msg .. " " .. missing[i] .. ";" end
-            bail(msg)
+            local raw = "Blocks are not on the grid:"
+            for i = 1, math.min(#missing, 5) do raw = raw .. " " .. missing[i] .. ";" end
+            if opts and type(opts.trace) == "function" then opts.trace(raw) end
+            local places = {}
+            for i = 1, math.min(#missing_jb, 5) do places[i] = B.place_text(missing_jb[i]) end
+            bail(("These blocks are not on the station grid: %s. Fix them in the blueprint or tick Station Build."):format(
+                B.listing(places, #missing_jb)))
         end
     end
 

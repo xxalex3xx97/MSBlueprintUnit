@@ -24,7 +24,7 @@ local function TRACE(m)
     pcall(function()
         local f = io.open(TRACE_PATH, "a")
         if f then
-            f:write(os.date("%H:%M:%S ") .. m .. "\n")
+            f:write(os.date("%Y-%m-%d %H:%M:%S ") .. m .. "\n")
             f:flush()
             f:close()
         end
@@ -38,7 +38,7 @@ local function TRACE_MANY(lines)
     pcall(function()
         local f = io.open(TRACE_PATH, "a")
         if f then
-            local ts = os.date("%H:%M:%S ")
+            local ts = os.date("%Y-%m-%d %H:%M:%S ")
             for _, m in ipairs(lines) do f:write(ts .. m .. "\n") end
             f:flush()
             f:close()
@@ -363,7 +363,7 @@ function L.station_build_capable()
         and FN and FN.add_block and FN.remove_block and FN.pending and FN.read_block_class then
         return true
     end
-    return false, "Station Build needs MSCore >= 0.8.0"
+    return false, "Station Build needs MSCore 0.8.0 or newer."
 end
 
 -- class defaults per class path (read once, cached): {station, bounds, cost={ITEM=n}} | nil.

@@ -1448,10 +1448,10 @@ function B.new(io)
         local ok, err = io.send_blocks(P.station, P.blocks, { primary = ids.unit_id, player = ids.player_id, editing = 0 }, P.remove)
         if not ok then
             trace("station blocks: send failed: " .. tostring(err))
-            return fail("station blocks not placed: " .. tostring(err) .. " (nothing was resent)")
+            return fail(Blk.TEXT.sent_failed)
         end
         R.stage, R.t_blocks, R.t_next = 18, now, now + POLL_MS
-        set_status("working", ("placing %d station block(s), removing %d"):format(#P.blocks, #P.remove))
+        set_status("working", ("placing %d station block(s) and removing %d in the way"):format(#P.blocks, #P.remove))
     end
 
     -- stage 18: poll the live station until every block shows (POLL_MS). BLOCKS_MS from the send -> STALL, no resend.
@@ -1474,7 +1474,7 @@ function B.new(io)
         end
         if now - R.t_blocks >= BLOCKS_MS then
             trace(("station blocks: not placed in %d ms, %d missing"):format(BLOCKS_MS, miss))
-            return fail(("station blocks not placed in %d s (%d missing), nothing was resent"):format(BLOCKS_MS // 1000, miss))
+            return fail(Blk.TEXT.stalled:format(BLOCKS_MS // 1000, miss))
         end
         R.t_next = now + POLL_MS
     end
@@ -1497,9 +1497,10 @@ function B.new(io)
             if plan.block_refuse then
                 local parts = {}
                 for _, s in ipairs(plan.block_refuse) do
-                    parts[#parts + 1] = ("%s need %d have %d"):format((s.item:gsub("^ITEM_", "")), s.need, s.have)
+                    local name = s.item:gsub("^ITEM_", "")
+                    parts[#parts + 1] = ("need %d %s, have %d (%d short)"):format(s.need, name, s.have, s.need - s.have)
                 end
-                return start_fail(Blk.TEXT.shortfall .. ": " .. table.concat(parts, ", "))
+                return start_fail(Blk.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; " .. Blk.TEXT.nothing_built .. ".")
             end
         end
         -- machine need + station block cost: one total check (player + unit + refund)
