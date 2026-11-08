@@ -239,6 +239,16 @@ except Exception as e:
 txt('Txt_Restore', 'Row_Restore', 'Enable container item restoration', 14, WHITE, fill=1.0, h='Fill', v='Center')
 txt('Txt_RestoreHint', 'Row_Stack', 'When enabled (default), the unit takes items from its inventory and fills the containers with the contents set in the JSON.',
     12, DIM, wrap=True, h='Fill', pad=(32, 0, 0, 12))
+# Chk_StationBuild: place the JSON's station blocks before the factory, DEFAULT UNCHECKED (off = factory only, as before)
+box(U.HorizontalBox, 'Row_StationBuild', 'Row_Stack', h='Fill', pad=(0, 0, 0, 4))
+cb3 = add(wbp, U.CheckBox, 'Chk_StationBuild', 'Row_StationBuild')
+slot(cb3, v='Center', pad=(0, 0, 10, 0))
+try:
+    cb_style(cb3)
+except Exception as e:
+    print('CHECKBOX-STYLE-NOTSET Chk_StationBuild (default style kept)', e)
+txt('Txt_StationBuild', 'Row_StationBuild', 'Station Build (place station blocks + factory)', 14, WHITE, fill=1.0, h='Fill', v='Center')
+txt('Txt_StationBuildHint', 'Row_Stack', '', 12, DIM, wrap=True, h='Fill', pad=(32, 0, 0, 12))  # text set by Lua (MSCore too old hint)
 txt('Txt_UnitInvTitle', 'Row_Stack', 'Block inventory', 16, GOLD, pad=(0, 0, 0, 8))
 # inventory hosts: auto-size (Fill=0) Left/Top wrappers so WBP_Inventory_C's UniformGridPanel gets its natural width (no cell stretch);
 # vertical Fill weights (unit 0.5 / player 0.35) wrap them. ScrollBox desired width = content width, so Scr_UnitInv hugs the 8 columns.
