@@ -373,26 +373,29 @@ end
 -- kept splitter: live cfg bytes vs the blueprint ConfigHex. Different (or empty/missing live cfg) = counted; equal = not
 local function split_json(hex)
     return '{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"BP_Splitter","DefaultName":"DAT_Splitter","ConfigHex":"' .. hex ..
-        '","Transform":{"GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}}]}'
+        '","Transform":{"GridLocation":{"X":1,"Y":1},"Height":0,"GridRotation":0}}]}'
 end
-local function split_note(pp)
+local OLD_SPLIT_NOTE = "1 kept splitters have different port settings than the blueprint (not changed)"
+local NEW_SPLIT_NOTE = "1 splitters replaced (config differed)"
+local function has_note(pp, text)
     for _, n in ipairs(pp and pp.notes or {}) do
-        if n == "1 kept splitters have different port settings than the blueprint (not changed)" then return true end
+        if n == text then return true end
     end
     return false
 end
 local function split_kept(live_cfg)
-    return P.plan(split_json("0102"), live({ existing = { ex(7, "BP_Splitter", "DAT_Splitter", 0, 0, live_cfg) } }), F)
+    return P.plan(split_json("0102"), live({ existing = { ex(7, "BP_Splitter", "DAT_Splitter", 1, 1, live_cfg) } }), F)
 end
 local ps1, pe1 = split_kept("\1\3")
-check("kept splitter: plan ok, kept", ps1 ~= nil and pe1 == nil and ps1.counts.keep == 1 and ps1.counts.place == 0)
-check("kept splitter: different live cfg -> note", split_note(ps1))
+check("kept splitter: differing live cfg -> removed and placed again", ps1 ~= nil and pe1 == nil and ps1.counts.keep == 0 and ps1.counts.place == 1 and ps1.counts.remove == 1)
+check("kept splitter: differing live cfg -> replaced note", has_note(ps1, NEW_SPLIT_NOTE))
 local ps2 = split_kept("")
-check("kept splitter: empty live cfg counts as different", split_note(ps2))
+check("kept splitter: empty live cfg counts as different", has_note(ps2, OLD_SPLIT_NOTE))
 local ps3 = split_kept(nil)
-check("kept splitter: no live cfg counts as different", split_note(ps3))
+check("kept splitter: no live cfg counts as different", has_note(ps3, OLD_SPLIT_NOTE))
 local ps4 = split_kept("\1\2")
-check("kept splitter: same bytes -> no note", ps4 ~= nil and not split_note(ps4))
+check("kept splitter: same bytes -> still kept, no note", ps4 ~= nil and ps4.counts.keep == 1 and ps4.counts.place == 0 and ps4.counts.remove == 0
+    and not has_note(ps4, NEW_SPLIT_NOTE) and not has_note(ps4, OLD_SPLIT_NOTE))
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

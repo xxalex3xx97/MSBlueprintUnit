@@ -619,13 +619,20 @@ local function build(text, live, F, opts)
             opts.trace("live ug first: none in live list")
         end
     end
+    local splitN = 0
+    local function split_differs(m, e)
+        -- live cfg "" or nil = unknown, blueprint cfg nil = no settings specified: treat as same (keep)
+        return (m.dat or ""):find("^DAT_Splitter") ~= nil and m.cfg ~= nil and type(e.cfg) == "string" and #e.cfg > 0 and e.cfg ~= (m.cfg or "")
+    end
     for _, m in ipairs(machines) do
-        local found
+        local found, rej
         for k, e in ipairs(existing) do
             if not used[k] and e.bcls == m.bcls and e.x == m.x and e.y == m.y and e.h == m.h and e.rot == m.rot then
                 -- live cfg = the station Blueprint snapshot; for undergrounds it is EMPTY in game (trace 2026-11-07), so the Length is unknown:
                 -- same class + cell + rotation counts as identical. Compared only when the live cfg really holds a 6-byte Length.
-                if not (is_ug(m) and type(e.cfg) == "string" and #e.cfg == 6 and cfg_len(e.cfg) ~= cfg_len(m.cfg or "")) then
+                if split_differs(m, e) then
+                    rej = true
+                elseif not (is_ug(m) and type(e.cfg) == "string" and #e.cfg == 6 and cfg_len(e.cfg) ~= cfg_len(m.cfg or "")) then
                     found = k
                     break
                 end
@@ -644,10 +651,12 @@ local function build(text, live, F, opts)
             k2.live = existing[found].cfg
             kept[#kept + 1] = k2
         else
+            if rej and not found then splitN = splitN + 1 end
             rest[#rest + 1] = m
         end
     end
     machines = rest
+    if splitN > 0 then notes[#notes + 1] = splitN .. " splitters replaced (config differed)" end
     if opts and type(opts.trace) == "function" then
         opts.trace(("keep split: json machines %d, kept %d, rest %d, live machines %d"):format(#json_ms, #kept, #rest, #existing))
         local jb, lb = {}, {}
