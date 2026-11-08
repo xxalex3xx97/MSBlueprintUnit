@@ -2,7 +2,10 @@
 -- Run: lua test_live.lua (from any dir). Exit code 1 when a check fails.
 local dir = (arg and arg[0] or ""):match("^(.*[/\\])") or "./"
 package.path = dir .. "../Scripts/?.lua;" .. package.path
+do local f = io.open(dir .. "../bpu_trace.log", "wb"); f:write(("x"):rep(2200000)); f:close() end  -- over 2 MB: bpu_live truncates it at load
 local Live = require("bpu_live")
+local sz0 = -1  -- trace log size right after load (earlier checks write to it, so measure now)
+do local f = io.open(dir .. "../bpu_trace.log", "rb"); if f then sz0 = f:seek("end"); f:close() end end
 local P = require("bpu_plan")
 local F = dofile(dir .. "fixtures/mscore_factory_snapshot.lua")
 
@@ -132,6 +135,21 @@ check(U4 ~= nil and U4.station == 163811 and U4.cont.ID == 77 and U4.station_obj
 -- no GetFrame, no ParentID: only the block ID is left (no container matches, 2 containers) -> nil, no struct ID scan
 local U5, e5 = Live.find_unit({ ID = 261217, IsValid = alive }, nil)
 check(U5 == nil and type(e5) == "string", "find_unit: no station candidate -> nil, err (Blocks never scanned)")
+make_world({}, { slot() }, { slot(), slot() })
+local function cont(id, invid)
+    return named("C" .. id, { ID = id, ParentID = 163811, Class = named("BP_BPUnitStoreObj_01_C"), Inventory = { ID = invid, IsValid = alive } })
+end
+world.ContainerObject = { cont(261225, 261226), cont(261218, 261219), cont(261221, 261222) }
+world.StationObject[2].ID = 163811
+local function blk(id) return { ID = id, IsValid = alive, GetFrame = function() return { ID = 163811, IsValid = alive } end } end
+local u1 = Live.find_unit(blk(261217), nil)
+local u2 = Live.find_unit(blk(261220), nil)
+local u3 = Live.find_unit(blk(261224), nil)
+check(u1 and u1.cont.ID == 261218 and u1.unit_inv.ID == 261219, "find_unit: 3 units, block 261217 -> container 261218")
+check(u2 and u2.cont.ID == 261221 and u2.unit_inv.ID == 261222, "find_unit: 3 units, block 261220 -> container 261221")
+check(u3 and u3.cont.ID == 261225 and u3.unit_inv.ID == 261226, "find_unit: 3 units, block 261224 -> container 261225")
+local ua, ea = Live.find_unit({ IsValid = alive, GetFrame = function() return { ID = 163811, IsValid = alive } end }, nil)
+check(ua == nil and type(ea) == "string", "find_unit: 3 units, block without id -> nil, err (no first-match guess)")
 world = keepWorld
 fakeMachines = W.machines
 Live.reset()
@@ -141,6 +159,9 @@ check(#ms == 3 and ms[1].id == 10 and ms[2].id == 11 and ms[3].id == 12, "read_m
 check(ms[1].bcls == "BP_ConveyorBeltObject" and ms[1].cls == "BP_ConveyorBeltObject", "read_machines: _C stripped")
 check(ms[1].x == 1 and ms[1].y == 1 and ms[1].h == 0 and ms[1].rot == 0, "read_machines: x,y,h,rot")
 check(ms[1].cfg == "\1\2\255" and ms[2].cfg == "" and ms[3].cfg == nil, "read_machines: cfg bytes, empty, unreadable=nil")
+
+-- trace log cap: the 2.2 MB file written before the require was truncated at load
+check(sz0 == 0, "trace log > 2 MB truncated at load")
 
 -- trace trail: the native read writes "read_station done" to <mod dir>bpu_trace.log
 do
@@ -176,8 +197,8 @@ check(rc.REC_TitaniumPlates == "TitaniumPlates" and Live._recobj.TitaniumPlates 
 
 fakeInv = { [8] = W.uslots, [7] = W.pslots }  -- later make_world calls replace it
 local ui = Live.read_inv(W.unit)
-check(ui.ok and ui.id == 8 and #ui.slots == 2 and ui.slots[1].item == "ITEM_A" and ui.slots[1].amount == 5 and ui.slots[1].max == 50,
-      "read_inv: native read_inventory, item name, amount, max")
+check(ui.ok and ui.id == 8 and #ui.slots == 2 and ui.slots[1].item == "ITEM_A" and ui.slots[1].amount == 5 and ui.slots[1].max == 100,
+      "read_inv: native read_inventory, item name, amount, max (native 50 x unreadable SM 2 = 100)")
 check(ui.slots[2].item == "" and ui.slots[2].amount == 0, "read_inv: empty slot item \"\"")
 local pi = Live.read_inv(W.pinv)
 check(pi.ok and pi.id == 7 and #pi.slots == 2, "read_inv: player inventory by id")
@@ -197,25 +218,31 @@ check(Live.creative(W.player, {}) == false and Live.creative({}, { bCreative = t
       "creative: player, then ctl, then false")
 check(Live.item_by_name("ITEM_A") == world.Item[1] and Live.item_by_name("ITEM_Z") == nil, "item_by_name: found and nil")
 
--- effective max: native max 1 (wrong) -> Item MaxStackSize 200; slot max = 200 * StackMultiplier / 2 (SM 8 -> 800, unit SM 202 -> 20200)
+-- effective max: native max 1 (wrong) -> Item MaxStackSize 200; slot max = 200 * StackMultiplier (SM 8 -> 1600, unit SM 202 -> 40400)
 do
     local frame = named("ITEM_Frame", { MaxStackSize = 200 })
+    local plate = named("ITEM_Plate", { MaxStackSize = 25 })
     world.Item[#world.Item + 1] = frame
+    world.Item[#world.Item + 1] = plate
     local recobj = Live._recobj   -- Live.reset clears it; later checks need it
     Live.reset()
     fakeInv[55] = { { Item = frame, Amount = 190, NativeMax = 1 }, { Amount = 0 } }
+    fakeInv[56] = { { Item = plate, Amount = 300, NativeMax = 1 } }
     local r = Live.read_inv({ ID = 55, IsValid = alive, StackMultiplier = 8 })
-    check(r.ok and r.mult == 4 and r.slots[1].max == 800 and r.slots[2].max == 1 and Live.item_raw("ITEM_Frame") == 200,
-          "read_inv: native max 1 -> Item max 200, SM 8 -> effective 800 (mult 4)")
+    check(r.ok and r.mult == 8 and r.slots[1].max == 1600 and r.slots[2].max == 1 and Live.item_raw("ITEM_Frame") == 200,
+          "read_inv: native max 1 -> Item max 200, SM 8 -> effective 1600 (mult 8)")
+    local p12 = Live.read_inv({ ID = 56, IsValid = alive, StackMultiplier = 12 })
+    check(p12.ok and p12.mult == 12 and p12.slots[1].max == 300, "read_inv: ice raw 25, SM 12 -> slot max 300 (the 32-slot container holds 9600)")
     local u = Live.read_inv({ ID = 55, IsValid = alive, StackMultiplier = 202 })
-    check(u.ok and u.mult == 101 and u.slots[1].max == 20200, "read_inv: unit SM 202 -> effective 20200 (mult 101)")
+    check(u.ok and u.mult == 202 and u.slots[1].max == 40400, "read_inv: unit SM 202 -> effective 40400 (mult 202)")
     local nosm = Live.read_inv({ ID = 55, IsValid = alive })
-    check(nosm.ok and nosm.mult == 1 and nosm.slots[1].max == 200, "read_inv: SM unreadable -> 2 (x1)")
+    check(nosm.ok and nosm.mult == 2 and nosm.slots[1].max == 400, "read_inv: SM unreadable -> 2 (x2 baseline)")
     local tf = io.open(dir .. "../bpu_trace.log", "r")
     local tt = tf and tf:read("a") or ""
     if tf then tf:close() end
-    check(tt:find("maxstack inv=55 item=ITEM_Frame raw=200 (item) sm=8 effective=800", 1, true) ~= nil,
+    check(tt:find("maxstack inv=55 item=ITEM_Frame raw=200 (item) sm=8 effective=1600", 1, true) ~= nil,
           "trace: maxstack line with raw, sm, effective")
+    world.Item[#world.Item] = nil
     world.Item[#world.Item] = nil
     Live.reset()
     Live._recobj = recobj
@@ -238,12 +265,36 @@ do
     local fw = assert(io.open(dir .. "../Scripts/bpu_window.lua", "rb"))
     local src = fw:read("a")
     fw:close()
-    check(src:find("okT, errT = pcall(", 1, true) ~= nil and src:find("build tick ERROR", 1, true) ~= nil,
+    check(src:find("okT, errT = xpcall(", 1, true) ~= nil and src:find("build tick ERROR", 1, true) ~= nil
+          and src:find("build tick traceback", 1, true) ~= nil,
           "window: tick error is caught, traced, and ends the run")
     check(src:find("finishBuild replan failed", 1, true) ~= nil and src:find("buildClick replan failed", 1, true) ~= nil,
           "window: replan failures traced")
     check(src:find('if not S.plan and not S.text then setStatus("import first")', 1, true) ~= nil,
           "window: Build says import first only when S.text is nil")
+end
+
+-- send_pin: SetPinnedCostInput factory on Default__SetPinnedCostInput, AddInputCommand(player.ID, cmd)
+do
+    local created, sent = nil, nil
+    function StaticFindObject(path)
+        return { IsValid = alive, CreateInputSetPinnedCost = function(_, arr) created = { path = path, arr = arr }; return named("SetPinnedCostInput") end }
+    end
+    local pctl = { IsValid = alive, AddInputCommand = function(_, id, cmd) sent = { id = id, cmd = cmd } end }
+    local pplayer = { IsValid = alive, ID = 77 }
+    local okp = Live.send_pin(pctl, pplayer, { { name = "ITEM_A", n = 5 }, { name = "ITEM_Z", n = 1 } })
+    check(okp and created.path == "/Script/MainSequence.Default__SetPinnedCostInput" and #created.arr == 1
+          and created.arr[1].Item == world.Item[1] and created.arr[1].Amount == 5, "send_pin: stacks Item/Amount, unknown item skipped")
+    check(sent and sent.id == 77 and sent.cmd ~= nil, "send_pin: AddInputCommand(player.ID, cmd)")
+    sent = nil
+    local oke = Live.send_pin(pctl, pplayer, {})
+    check(oke and #created.arr == 0 and sent and sent.id == 77, "send_pin: empty array = unpin")
+    local okn, en = Live.send_pin(pctl, nil, {})
+    check(okn == false and en == "no player", "send_pin: no player refused")
+    local fw = assert(io.open(dir .. "../Scripts/bpu_window.lua", "rb"))
+    local src = fw:read("a")
+    fw:close()
+    check(src:find('bind("Btn_CostPin", pinClick)', 1, true) ~= nil and src:find("Live.send_pin(", 1, true) ~= nil, "window: Btn_CostPin bound to pinClick")
 end
 
 -------------------------------------------------------------------- make_io (recording natives)
@@ -453,6 +504,22 @@ do
     Live.note_build({ A }, {})
     check(#Live.overlay({ { bcls = "X", x = 0, y = 0, h = 0, rot = 0 } }) == 2, "overlay: entry without id does not break the merge")
     flush()
+end
+
+-- MSCore 0.7.6 inv_split native: io.split only when the native exists; ok / error passed through
+do
+    local ioN = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, native = {}, plan_mod = P })
+    check(ioN.split == nil, "split: no native -> io.split absent (rounded route)")
+    local sc = {}
+    local ioS = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, plan_mod = P,
+        native = { inv_split = function(...) sc[#sc + 1] = { ... }; return true end } })
+    local oks = ioS.split(202, 0, 5, 3)
+    check(oks == true and sc[1] and sc[1][1] == 202 and sc[1][2] == 0 and sc[1][3] == 5 and sc[1][4] == 3,
+          "split: native inv_split(inv, src0, amount, dst0), true passed through")
+    local ioE = Live.make_io({ unit = U, player = W.player, ctl = ctl1, F = F, plan_mod = P,
+        native = { inv_split = function() error("boom") end } })
+    local oke, msge = ioE.split(202, 0, 5, 3)
+    check(oke == false and tostring(msge):find("boom", 1, true) ~= nil, "split: erroring native -> false, error text")
 end
 
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")

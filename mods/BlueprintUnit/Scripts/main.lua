@@ -1,5 +1,5 @@
 -- BlueprintUnit: Blueprint Unit window (bpu_window.lua) on MSCore. F / ESC = close (ESC closes the import modal first).
--- Needs MSCore >= 0.7.5 (Lua api 3 + native api 4). Opened by post-hooks on WidgetSubsystem:ToggleWindow, WidgetSubsystem:ShowWindow
+-- Needs MSCore >= 0.7.6 (Lua api 3 + native api 4). Opened by post-hooks on WidgetSubsystem:ToggleWindow, WidgetSubsystem:ShowWindow
 -- and DMSPlayerController:ToggleWidget (ONLY when an arg is the block, class BPO_BlueprintUnit_C). Blocks and research come from pak100.
 
 local TAG = "[BPUnit] "
@@ -225,6 +225,7 @@ end
 pcall(function()
   RegisterKeyBind(Key.ESCAPE, function()
     pcall(function()
+      if BPU.impOpen() or BPU.isOpen() then require("bpu_live").trace("ESC: " .. (BPU.impOpen() and "import modal" or "window")) end
       if BPU.impOpen() then schedulePausePoll(); pcall(ExecuteInGameThread, BPU.impClose)
       elseif BPU.isOpen() then schedulePausePoll(); pcall(ExecuteInGameThread, BPU.close) end
     end)
@@ -232,7 +233,9 @@ pcall(function()
 end)
 pcall(function()
   RegisterKeyBind(Key.F, function()
-    pcall(function() if BPU.isOpen() then pcall(ExecuteInGameThread, BPU.fKey) end end)
+    pcall(function()
+      if BPU.isOpen() then pcall(ExecuteInGameThread, BPU.fKey) end
+    end)
   end)
 end)
 -- crate hide, world scan: every 3 s. Only crate sims (BP_BPUnitStoreObj_01_C) cost anything; done ones are cached.

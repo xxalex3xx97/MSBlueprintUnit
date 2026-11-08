@@ -2,7 +2,34 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-08
+
+Requires **MSCore 0.7.6 or newer** (the split native). Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size.
+
+### Changed
+- Window: **Enable container item restoration** checkbox (`Chk_Restore`, checked by default) with a hint line (`Txt_Restore`, `Txt_RestoreHint`). Unchecked = Build does no container restoration.
+- Restore sorts the unit inventory first, then splits the exact missing amount into a free unit slot and moves it with one TRANSFER (needs the MSCore 0.7.6 split native; older MSCore keeps the whole-stack rounding). The split step edits the inventory locally (not a game command; in co-op it may desync until the next refresh).
+- Container contents restore is on by default. The **Enable container item restoration** checkbox (`Chk_Restore`) turns it off; `Mods\BlueprintUnit\restore_off.txt` also disables it. `restore_on.txt` is no longer needed.
+- Rounding is only the fallback (MSCore older than 0.7.6, or no split). The normal route is sort, split the exact amount, then TRANSFER. Fallback: whole unit stacks only (one TRANSFER per stack, no cursor, no put-back). A stack is moved when the missing amount is at least half of it (the container can get up to half a stack more than the blueprint count), and a smaller remainder is left out with a note ("left out (under half a unit stack)").
+- A container's stack room is respected: a partial move leaves the rest in the unit, and a full container is noted ("container id N full").
+- A refused send is retried on the next tick (up to 5 times), then skipped and counted in the note ("N command(s) skipped (refused)"). The restore never aborts for it.
+- Restore sends up to 1000 commands per tick. It stops only when nothing changes in the restored items for 8 s after the last send (no fixed wait).
+- Progress line while building and restoring: "restoring [#####-----] 50%  (1,234 of 2,468 commands)" and "sending commands: n of m (x%)".
+- Build button: while a build or restore runs it reads **Abort** and cancels the run. Closing the window also cancels it.
+- Notes panel hides the "skipped (block-built ...)" and "ConfigHex ignored for paired underground ..." lines. They stay in `bpu_trace.log`.
+- Notes: "plan reduced: unit has X of Y for Item (short Z)" when the unit lacks an item; "items on belts and in machines are not restored" line after restore.
+- The unit stack list (item, count) is traced at restore start and end.
+- Blueprint Unit inventory: 120 slots, +1,000,000% stack size (was +10,000%).
+- `bpu_trace.log` is truncated at start when it is over 2 MB.
+- F and Esc no longer write trace lines while the window is closed.
+- Known limits: single-player oriented; the split step edits the inventory locally (not a game command), so co-op may desync after it; belts and machine contents are not restored.
+
+### Fixed
+- A restore whose verify timed out while the game was still applying commands ended with a short container and no retry. Now the verify waits as long as the restored items keep changing.
+- Shortages inside a full container were dropped without a note. Every shortage now has a note.
+- Removed the inventory-trace diagnostics hooks.
+- Restore verify: a container drained by adjacent belts (all TRANSFERs acked, total not up) counts as confirmed; no false stall.
+- Floor check: Dock_2 floor is 30x30 (no rotation swap); a footprint across two touching floors validates against their union.
 
 ## [0.1.0] - 2026-11-07
 
@@ -15,7 +42,7 @@ Requires **MSCore 0.7.5 or newer** (install or update with MSCoreManager).
 - Notes panel on the right, scrollable. Duplicate notes are folded, at most 8 lines shown.
 - Build: places the factory on your station, keeps identical machines, changes only recipes.
 - Build sends all removals, then all placements, back to back (MSCore 0.7.5 refund/charge redirect). Refunds land in the unit inventory. The charge takes unit items first.
-- Machines outside the modeled floors are skipped with a note instead of refusing the import.
+- Machines outside the modeled floors are placed anyway, with a note ("N placed outside the modeled floors").
 - Esc closes the Blueprint Unit window and the game pause menu with it.
 - Blueprint Unit inventory: 120 slots, +10,000% stack size.
 

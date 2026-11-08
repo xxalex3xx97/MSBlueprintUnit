@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 # Hidden container default machine on BPO_BlueprintUnit (DefaultMachines, unversioned header idx 24). Variants:
 #   none    = no container, 5 packages                    -> out\none
 #   vanilla = container = vanilla BP_ContainerObject_2 (32 slots, bonus 10), 5 packages -> out\vanilla
-#   clone   = container = clone BP_BPUnitStoreObj_01 (120 slots, bonus 200) + actor clone BP_BPUnitSto_2 (invisible, mesh SM2_BPUnitHidden00 from pak97), 7 packages -> out\clone. Install pakchunk97 AND pakchunk100 together.
+#   clone   = container = clone BP_BPUnitStoreObj_01 (120 slots, bonus 20000 = +1,000,000%) + actor clone BP_BPUnitSto_2 (invisible, mesh SM2_BPUnitHidden00 from pak97), 7 packages -> out\clone. Install pakchunk97 AND pakchunk100 together.
 # -Pos X,Y = machine position (block-relative units, default 8,8) -> env BPU_MX/BPU_MY for patch_bpo_machine.py.
 #   Default 8,8 -> out\<variant>\ (also copied to out\). Other positions -> out\<variant>_<X>_<Y>\ (not copied to out\).
 # Each variant writes out\<dir>\pakchunk100-BlueprintUnit_P.{pak,ucas,utoc}.

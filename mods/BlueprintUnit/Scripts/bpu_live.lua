@@ -7,7 +7,16 @@ local L = {}
 L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
 -- Trace trail for native crashes: print + append to <mod dir>pu_trace.log (open/append/flush/close per call).
-local TRACE_PATH = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../bpu_trace.log"
+local MOD_DIR = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../"   -- Mods/BlueprintUnit/, not the process cwd
+local TRACE_PATH = MOD_DIR .. "bpu_trace.log"
+-- ponytail: cap bpu_trace.log: truncate at start when over 2 MB
+pcall(function()
+    local f = io.open(TRACE_PATH, "rb")
+    if f then
+        local n = f:seek("end"); f:close()
+        if n and n > 2 * 1024 * 1024 then local w = io.open(TRACE_PATH, "wb"); if w then w:close() end end
+    end
+end)
 local function TRACE(m)
     m = tostring(m)
     print("[BPUnit] " .. m)
@@ -157,15 +166,33 @@ function L.find_unit(block, player_hint)
     for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
         if valid(c) and clsname(c) == "BP_BPUnitStoreObj_01" then conts[#conts + 1] = c end
     end
-    local cont
+    local tl = { "find_unit block=" .. tostring(idOf(block)) .. " cands=" .. table.concat(cands, ",") .. " nconts=" .. #conts }
+    for _, c in ipairs(conts) do
+        tl[#tl + 1] = "  cont id=" .. tostring(idOf(c)) .. " parent=" .. tostring(unw(rd(c, "ParentID"))) .. " inv=" .. tostring(idOf(rd(c, "Inventory")))
+    end
+    TRACE_MANY(tl)
+    local bid = idOf(block)
+    local pool = {}
     for _, sid in ipairs(cands) do
         for _, c in ipairs(conts) do
-            if unw(rd(c, "ParentID")) == sid then cont = c break end
+            if unw(rd(c, "ParentID")) == sid then pool[#pool + 1] = c end
         end
-        if cont then break end
+        if #pool > 0 then break end
     end
-    if not cont and #conts == 1 then cont = conts[1] end
-    if not cont then return nil, "no Blueprint Unit container on station " .. tostring(cands[1]) end
+    local cont
+    if #pool == 1 then
+        cont = pool[1]
+    elseif #pool > 1 and type(bid) == "number" then
+        -- ponytail: ID order guess (unit container id = smallest container id above its block id); confirm with the trace
+        for _, c in ipairs(pool) do
+            local cid = idOf(c)
+            if type(cid) == "number" and cid > bid and (not cont or cid < idOf(cont)) then cont = c end
+        end
+    elseif #pool == 0 and #conts == 1 then
+        cont = conts[1]
+    end
+    if not cont then return nil, "no Blueprint Unit container for block " .. tostring(bid) .. " on station " .. tostring(cands[1]) end
+    TRACE("find_unit chosen cont=" .. tostring(idOf(cont)) .. " pool=" .. #pool)
     local station_id = unw(rd(cont, "ParentID"))
     local unit_inv = rd(cont, "Inventory")
     if unit_inv == nil then return nil, "unit inventory unreadable" end
@@ -374,8 +401,8 @@ end
 
 -- MSCore 0.7.3 native read: factory_native.read_inventory(id) -> slots {item="ITEM_X" | "", amount, max}, or nil, err.
 -- ok=false when the inventory is invalid, MSCore is older than 0.7.3, or the native read fails (err says why).
--- Slot max = effective max in this inventory: raw MaxStackSize (native, or the Item UObject when native <= 1) * StackMultiplier / 2.
--- mult = StackMultiplier / 2 (SM 2 = x1, SM 8 = x4, unit SM 202 = x101). SM unreadable -> 2.
+-- Slot max = effective max in this inventory: raw MaxStackSize (native, or the Item UObject when native <= 1) * StackMultiplier.
+-- mult = StackMultiplier (SM 2 = x2, SM 8 = x8, unit SM 202 = x202). SM unreadable -> 2 (x2, the game baseline).
 function L.read_inv(inv)
     if not valid(inv) then return { ok = false, slots = {} } end
     local id = unw(rd(inv, "ID"))
@@ -394,7 +421,7 @@ function L.read_inv(inv)
                 raw, src = L.item_raw(sl.item), "item"
                 if not raw then raw, src = (sl.max or 1), "native-fallback" end
             end
-            sl.max = math.floor(raw * sm / 2)
+            sl.max = math.floor(raw * sm)
             local key = tostring(id) .. "|" .. sl.item
             if not TRACED[key] then
                 TRACED[key] = true
@@ -402,7 +429,7 @@ function L.read_inv(inv)
             end
         end
     end
-    return { ok = true, id = id, slots = s, mult = sm / 2, sm = sm }
+    return { ok = true, id = id, slots = s, mult = sm, sm = sm }
 end
 
 -- machine ID -> Inventory UObject of every ContainerObject in the world (the unit's own container skipped).
@@ -437,6 +464,28 @@ function L.item_by_name(name)
         end
     end
     return ITEMS[name]
+end
+
+-- pin the modification cost in the game's own HUD: SetPinnedCostInput.CreateInputSetPinnedCost(ItemStack[]) -> ctl:AddInputCommand(player.ID, cmd).
+-- stacks = { {name="ITEM_x", n=amount}, ... }; {} = unpin. Returns ok, err|ret. Every call is traced (UNKNOWNs settle from the trace).
+function L.send_pin(ctl, player, stacks)
+    if not valid(ctl) then ctl = FindFirstOf("DMSPlayerController") end
+    if not valid(ctl) then return false, "no controller" end
+    if not valid(player) then return false, "no player" end
+    local arr = {}
+    for _, s in ipairs(stacks) do
+        local it = L.item_by_name(s.name)
+        if it then arr[#arr + 1] = { Item = it, Amount = s.n } end
+    end
+    local okc, cmd = pcall(function()
+        return StaticFindObject("/Script/MainSequence.Default__SetPinnedCostInput"):CreateInputSetPinnedCost(arr)
+    end)
+    TRACE(("pin create n=%d -> ok=%s cmd=%s"):format(#arr, tostring(okc), tostring(cmd)))
+    if not okc or not valid(cmd) then return false, "CreateInputSetPinnedCost failed: " .. tostring(cmd) end
+    local id = unw(rd(player, "ID"))
+    local oks, r = pcall(function() ctl:AddInputCommand(id, cmd) return true end)
+    TRACE(("pin send receiver=%s -> ok=%s ret=%s"):format(tostring(id), tostring(oks), tostring(r)))
+    return oks, r
 end
 
 -- live item names (ITEM_X) from the Item objects; plan matches Contents names against them
@@ -502,17 +551,14 @@ function L.make_io(ctx)
         end
         return out
     end
-    -- one shift-click as the game sends it: press (action 2, sec = destination) then release (action 3, sec = 0).
-    -- Sent through DMSPlayerController:AddInventoryInteraction (the UI's own path): native inv_move sends receiver 0,
-    -- which the game drops. Both are sent for every move, each wrapped for the invtrace ourcmd tag and traced.
+    -- one shift-click as the game sends it (the UI's own path; native inv_move sends receiver 0 which the game drops).
     function io.send_move(prim, sec, slot0)
-        local Tr = require("bpu_invtrace")
         local c = ctx.ctl
         if not valid(c) then c = FindFirstOf("DMSPlayerController") end
         if not valid(c) then return false, "no controller" end
         local p, s0 = unw(prim), unw(sec)
         local function fire(pr, se, a)
-            return Tr.sending(call, function()
+            return call(function()
                 c:AddInventoryInteraction({ PrimaryInventoryID = pr, SecondaryInventoryID = se, SlotIndex = slot0, Action = a })
                 return true
             end)
@@ -537,26 +583,41 @@ function L.make_io(ctx)
         if inv == nil then return nil end
         return L.read_inv(inv)
     end
-    -- one raw InventoryInteraction (exact-N restore recipe): action 0 TAKE, 1 PLACE_SINGLE, 4 DROP_CURSOR. No release after it.
-    -- the cursor restore crashed the game once (untested recipe): it only runs when Mods/BlueprintUnit/restore_on.txt exists
-    function io.restore_enabled()
-        local f = _G.io.open("Mods/BlueprintUnit/restore_on.txt", "rb")
-        if f then f:close() return true end
-        return false
+    -- restore mode: "off" when Mods/BlueprintUnit/restore_off.txt exists, else "on". The Chk_Restore checkbox is applied by the builder (opts.restore).
+    function io.restore_mode()
+        local f = _G.io.open(MOD_DIR .. "restore_off.txt", "rb")
+        if f then f:close() return "off" end
+        return "on"
     end
 
     function io.send_inv(prim, sec, slot0, action)
-        local Tr = require("bpu_invtrace")
         local c = ctx.ctl
         if not valid(c) then c = FindFirstOf("DMSPlayerController") end
         if not valid(c) then return false, "no controller" end
-        local ok, r = Tr.sending(call, function()
+        local ok, r = call(function()
             c:AddInventoryInteraction({ PrimaryInventoryID = unw(prim), SecondaryInventoryID = unw(sec), SlotIndex = slot0, Action = action })
             return true
         end)
         TRACE(("inv_cmd action=%d primary=%s secondary=%s slot0=%d -> ok=%s ret=%s"):format(action, tostring(unw(prim)),
             tostring(unw(sec)), slot0, tostring(ok), tostring(r)))
         return ok, r
+    end
+    -- split route (MSCore 0.7.6 inv_split native): exact split inside one inventory, src0 -> dst0 (0-based). Local edit, not a
+    -- game command. Only defined when the native exists (absent = the restore keeps the rounded whole-stack path).
+    local function split_fn()
+        local f = (native and native.inv_split) or rawget(_G, "MSCoreNative_inv_split")
+        if type(f) == "function" then return f end
+        return nil
+    end
+    if split_fn() then
+        function io.split(inv, src0, amount, dst0)
+            local fn = split_fn()
+            if not fn then return false, "inv_split gone" end
+            local ok, r = call(fn, unw(inv), src0, amount, dst0)
+            TRACE(("inv_split inv=%s src0=%d amount=%d dst0=%d -> ok=%s ret=%s"):format(tostring(unw(inv)), src0, amount, dst0,
+                tostring(ok), tostring(r)))
+            return ok, r
+        end
     end
     -- ids of every container in the world (sorted). Used to find the containers a Build just placed.
     function io.container_ids()

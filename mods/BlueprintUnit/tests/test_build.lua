@@ -42,7 +42,7 @@ local function fake(spec)
         noop_moves = spec.noop_moves, shift_x = spec.shift_x or 0, drop_place = spec.drop_place,
         inv = { player = { id = 101, slots = spec.player }, unit = { id = 202, slots = spec.unit } },
         live_bcls = spec.live_bcls, vanish_after = spec.vanish_after,
-        mult = spec.mult or {},   -- StackMultiplier / 2 per inventory ("player" / "unit")
+        mult = spec.mult or {},   -- StackMultiplier per inventory ("player" / "unit")
     }
     local function mx(item) return f.max[item] or 50 end
     local function inv_by_id(id)
@@ -85,6 +85,75 @@ local function fake(spec)
         end
     end
 
+    -- the fake game applies inventory commands (see io.send_inv). Violations: game-rule breaks the restore must never make.
+    -- action 4 DROP_CURSOR (cursor -> player), 0 TAKE (empty cursor: min(slot, max); holding: whole cursor into the slot),
+    -- 1 PLACE_SINGLE (holding: one item into the slot). Only the press is modelled.
+    -- registered inventory id -> slots. A machine id or an unknown id is a violation (the game derefs null on PLACE_SINGLE and
+    -- TRANSFER: crash 2026-11-07 23:05). Container INVENTORY id = machine id + 5000.
+    local function inv_slots(id, action)
+        if id == 101 then return f.inv.player.slots end
+        if id == 202 then return f.inv.unit.slots end
+        if id > 5000 and f.containers[id - 5000] then return f.containers[id - 5000].slots end
+        f.violations[#f.violations + 1] = ("action %s on id %s, not a registered inventory id"):format(tostring(action), tostring(id))
+        return nil
+    end
+    local function apply_inv(prim, sec, slot0, action)
+        if action == 3 or action == 4 then f.violations[#f.violations + 1] = ("action %d sent"):format(action) end
+        if action == 4 then
+            if f.cursor.amount > 0 then put(f.inv.player.slots, f.cursor.item, f.cursor.amount, mx(f.cursor.item)) end
+            f.cursor = { item = "", amount = 0 }
+            return
+        end
+        if action == 2 then
+            -- TRANSFER: whole source slot into the secondary inventory (same-item stacks, then empty slots); the rest stays
+            local src, dst = inv_slots(prim, action), inv_slots(sec, action)
+            if not src or not dst then return end
+            local s = src[slot0 + 1]
+            if not s or s.amount <= 0 then return end
+            s.amount = put(dst, s.item, s.amount, mx(s.item))
+            if s.amount <= 0 then s.item, s.amount = "", 0 end
+            return
+        end
+        local slots = inv_slots(prim, action)
+        if not slots then return end
+        local s = slots[slot0 + 1]
+        if not s then return end
+        if action == 0 then
+            if f.cursor.amount > 0 and s.amount > 0 and s.item ~= f.cursor.item then
+                f.violations[#f.violations + 1] = ("take onto %s while holding %s"):format(s.item, f.cursor.item)
+            end
+            if f.cursor.amount == 0 then
+                if s.amount > 0 then
+                    local c = math.min(s.amount, mx(s.item))
+                    f.cursor = { item = s.item, amount = c }
+                    s.amount = s.amount - c
+                    if s.amount == 0 then s.item = "" end
+                end
+            elseif s.amount <= 0 then
+                s.item, s.amount = f.cursor.item, f.cursor.amount
+                f.cursor = { item = "", amount = 0 }
+            elseif s.item == f.cursor.item and s.amount + f.cursor.amount <= mx(s.item) then
+                s.amount = s.amount + f.cursor.amount
+                f.cursor = { item = "", amount = 0 }
+            end
+        elseif action == 1 then
+            if f.cursor.amount == 0 then f.violations[#f.violations + 1] = "place single with empty cursor"; return end
+            if s.amount <= 0 then
+                s.item, s.amount = f.cursor.item, 1
+            elseif s.item == f.cursor.item and s.amount < mx(s.item) then
+                s.amount = s.amount + 1
+            else
+                return
+            end
+            f.cursor.amount = f.cursor.amount - 1
+            if f.cursor.amount == 0 then f.cursor.item = "" end
+        end
+    end
+    -- delayed commands whose time has come, in send order (called by every read and send)
+    local function flush()
+        while #f.pending > 0 and f.pending[1].at <= f.clock do table.remove(f.pending, 1).run() end
+    end
+
     local io = {}
     local redirect = type(spec.redirect) == "string" and spec.redirect:sub(1, 2) == "on"
     if spec.redirect ~= nil then io.redirect_status = function() return spec.redirect end end
@@ -92,9 +161,14 @@ local function fake(spec)
     -- containers (restore): id -> { slots }. A placed container gets id next_id + 500 (never a player/unit id)
     f.containers = spec.containers or {}
     f.cont_slots = spec.cont_slots or 4
+    f.cont_mult = spec.cont_mult or 1   -- container StackMultiplier (read_machine_inv)
     f.noop_inv = spec.noop_inv
     f.cursor = { item = "", amount = 0 }   -- one player cursor (AddInventoryInteraction model)
-    f.cmds = {}                            -- inventory commands {primary, secondary, slot0, action}
+    f.cmd_log = {}                         -- inventory commands {primary, secondary, slot0, action, clock}
+    f.violations = {}                      -- game-rule breaks (apply_inv): TAKE onto another item, PLACE_SINGLE empty, action 3/4
+    f.pending = {}                         -- delayed inventory commands (f.delay): {sent=, at=, run=}
+    f.inflight = 0                         -- sends while an earlier delayed batch was still pending
+    f.unready, f.stall_after, f.delay, f.mode = spec.unready, spec.stall_after, spec.delay, spec.mode
     f.remembered = {}
     function io.now() return f.clock end
     function io.creative() return f.creative end
@@ -114,6 +188,7 @@ local function fake(spec)
         return table.concat(parts, "|")
     end
     function io.read_inv(which)
+        flush()
         local v = f.inv[which]
         local slots = {}
         for i, s in ipairs(v.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
@@ -197,11 +272,16 @@ local function fake(spec)
     end
     -- containers: default read (nil = not a container), ids, memory, and the exact-N cursor model of AddInventoryInteraction
     function io.read_machine_inv(id)
+        flush()
         local c = f.containers[id]
         if not c then return nil end
+        if id > 500 and (f.unready or 0) > 0 then   -- f.unready = n: the next n container reads are not ready (ok = false)
+            f.unready = f.unready - 1
+            return { ok = false, id = id, slots = {}, mult = 1 }
+        end
         local slots = {}
         for i, s in ipairs(c.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
-        return { ok = true, id = id, slots = slots, mult = 1 }
+        return { ok = true, id = id + 5000, slots = slots, mult = f.cont_mult }
     end
     function io.container_ids()
         local out = {}
@@ -209,52 +289,72 @@ local function fake(spec)
         table.sort(out)
         return out
     end
+    function io.restore_mode() return f.mode end   -- nil (default) = "on" in bpu_build
     function io.remember(key, list)
         f.remembered[key] = list
         f.remember_at = f.calls.rm + f.calls.pl + f.calls.mv
     end
-    -- action 4 DROP_CURSOR (cursor -> player), 0 TAKE (empty cursor: min(slot, max); holding: whole cursor into the slot),
-    -- 1 PLACE_SINGLE (holding: one item into the slot). Only the press is modelled; nothing else is sent.
+    -- io.send_inv: one raw InventoryInteraction. f.cmd_log records every send. f.stall_after = n: sends after the n-th return
+    -- true and apply nothing. f.delay = ms: applied when the clock reaches send time + delay. A send while an earlier delayed
+    -- batch is still pending counts in f.inflight.
+    -- f.refuse_after = n: send n+1 returns false (not recorded as applied). f.stall_after: as above.
     function io.send_inv(prim, sec, slot0, action)
-        f.cmds[#f.cmds + 1] = { prim, sec, slot0, action }
-        if f.noop_inv then return true end
-        local slots
-        if prim == 101 then slots = f.inv.player.slots elseif prim == 202 then slots = f.inv.unit.slots
-        elseif f.containers[prim] then slots = f.containers[prim].slots end
-        if action == 4 then
-            if f.cursor.amount > 0 then put(f.inv.player.slots, f.cursor.item, f.cursor.amount, mx(f.cursor.item)) end
-            f.cursor = { item = "", amount = 0 }
+        f.attempts = (f.attempts or 0) + 1
+        if action == 5 then   -- SORT (split route): the unit inventory, sec 0, slot 0. Logged, refused on request, applied unless noop_sort.
+            f.sorts = (f.sorts or 0) + 1
+            if prim ~= 202 or sec ~= 0 or slot0 ~= 0 then f.violations[#f.violations + 1] = "sort sent with wrong args" end
+            f.cmd_log[#f.cmd_log + 1] = { prim, sec, slot0, action, f.clock }
+            f.sort_at = f.sort_at or f.clock
+            if f.refuse_sort then return false, "refused" end
+            if not f.noop_sort then f.sort_apply() end
             return true
         end
-        local s = slots and slots[slot0 + 1]
-        if not s then return false end
-        if action == 0 then
-            if f.cursor.amount == 0 then
-                if s.amount > 0 then
-                    local c = math.min(s.amount, mx(s.item))
-                    f.cursor = { item = s.item, amount = c }
-                    s.amount = s.amount - c
-                    if s.amount == 0 then s.item = "" end
-                end
-            elseif s.amount <= 0 then
-                s.item, s.amount = f.cursor.item, f.cursor.amount
-                f.cursor = { item = "", amount = 0 }
-            elseif s.item == f.cursor.item and s.amount + f.cursor.amount <= mx(s.item) then
-                s.amount = s.amount + f.cursor.amount
-                f.cursor = { item = "", amount = 0 }
-            end
-        elseif action == 1 and f.cursor.amount > 0 then
-            if s.amount <= 0 then
-                s.item, s.amount = f.cursor.item, 1
-            elseif s.item == f.cursor.item and s.amount < mx(s.item) then
-                s.amount = s.amount + 1
-            else
-                return true
-            end
-            f.cursor.amount = f.cursor.amount - 1
-            if f.cursor.amount == 0 then f.cursor.item = "" end
+        if action ~= 2 then f.violations[#f.violations + 1] = ("action %s sent: restore is TRANSFER (2) only"):format(tostring(action)) end
+        if (f.fail_next or 0) > 0 then f.fail_next = f.fail_next - 1; return false, "UFunction expected 1 parameters, received 2" end
+        f.cmd_log[#f.cmd_log + 1] = { prim, sec, slot0, action, f.clock }
+        if #f.cmd_log == 1 then f.first_unready = f.unready end
+        if f.refuse_after and #f.cmd_log > f.refuse_after then return false end
+        if f.noop_inv then return true end
+        if f.stall_after and #f.cmd_log > f.stall_after then return true end
+        flush()
+        if f.delay then
+            if #f.pending > 0 and f.pending[1].sent < f.clock then f.inflight = f.inflight + 1 end
+            f.pending[#f.pending + 1] = { sent = f.clock, at = f.clock + f.delay, run = function() apply_inv(prim, sec, slot0, action) end }
+        else
+            apply_inv(prim, sec, slot0, action)
         end
         return true
+    end
+    -- SORT model: non-empty slots to the front, stable by item name, the rest empty
+    function f.sort_apply()
+        local items = {}
+        for i, s in ipairs(f.inv.unit.slots) do if s.item ~= "" and s.amount > 0 then items[#items + 1] = { s = s, i = i } end end
+        table.sort(items, function(a, b) if a.s.item ~= b.s.item then return a.s.item < b.s.item end return a.i < b.i end)
+        local copy = {}
+        for k, e in ipairs(items) do copy[k] = { item = e.s.item, amount = e.s.amount, max = e.s.max } end
+        for i, s in ipairs(f.inv.unit.slots) do
+            if copy[i] then s.item, s.amount, s.max = copy[i].item, copy[i].amount, copy[i].max else s.item, s.amount = "", 0 end
+        end
+    end
+    -- io.split (MSCore 0.7.6 native, split route only): exact split inside the unit inventory, applied at once.
+    -- f.split_fail_n = n: the next n calls are refused (nothing applied). f.split_noop: returns true, applies nothing.
+    -- Violations: non-unit inventory, slot out of range, dst not empty, amount more than the source holds.
+    if spec.split then
+        f.splits = {}
+        function io.split(inv, src0, amount, dst0)
+            f.splits[#f.splits + 1] = { inv, src0, amount, dst0 }
+            if inv ~= 202 then f.violations[#f.violations + 1] = "split on a non-unit inventory"; return false, "inv" end
+            local src, dst = f.inv.unit.slots[src0 + 1], f.inv.unit.slots[dst0 + 1]
+            if not src or not dst then f.violations[#f.violations + 1] = "split slot out of range"; return false, "range" end
+            if (f.split_fail_n or 0) > 0 then f.split_fail_n = f.split_fail_n - 1; return false, "split refused" end
+            if f.split_noop then return true end
+            if dst.amount > 0 then f.violations[#f.violations + 1] = "split into a non-empty slot" end
+            if src.amount < amount then f.violations[#f.violations + 1] = "split more than the slot holds" end
+            dst.item, dst.amount, dst.max = src.item, amount, src.max
+            src.amount = src.amount - amount
+            if src.amount <= 0 then src.item, src.amount = "", 0 end
+            return true
+        end
     end
     f.io = io
     return f
@@ -644,8 +744,8 @@ do
     check(b3:status().state == "error" and noted3 == nil, "note_build: refused build (nothing placed) reports nothing")
 end
 
--- ===== effective stack size: native max 1 is wrong, raw MaxStackSize 200 * StackMultiplier 8 / 2 = 800 per slot =====
-local EFF = { raw = { ITEM_Frame = 200, ITEM_Coil = 10 }, max = { ITEM_Frame = 800, ITEM_Coil = 40 }, mult = { player = 4, unit = 101 } }
+-- ===== effective stack size: native max 1 is wrong, raw MaxStackSize 200 * StackMultiplier 8 = 1600 per slot =====
+local EFF = { raw = { ITEM_Frame = 200, ITEM_Coil = 10 }, max = { ITEM_Frame = 1600, ITEM_Coil = 80 }, mult = { player = 8, unit = 202 } }
 -- refund 2 frames (merge room in the 190 stack) + 2 coils (1 new slot): fits with 1 free slot. Old max 1 -> refused.
 do
     local f = fake(setmetatable({ player = { E(), E(), S("ITEM_Frame", 190, 1) }, unit = inv({}, 3),
@@ -741,7 +841,7 @@ do
     b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
     local st = run(b, f, 4000)
     check(st.state == "error" and st.removed == 15 and f.calls.rm == 15 and st.text ==
-          "stopped after 15 removals: the game did not apply the move (see bpu_trace.log: ourcmd recv must equal uicmd recv)",
+          "stopped after 15 removals: the game did not apply the move (see bpu_trace.log)",
           "stall: moves never drain -> stop after the first batch, no more removals (" .. st.text .. ")")
     check(noted and #noted.r == 15, "stall: note_build reports only the 15 sent removals")
 end
@@ -906,7 +1006,7 @@ do
     b:start(plan_for(f, { removed = { { id = 8, bcls = "BP_BOX", x = 1, y = 0, refund = { ITEM_Gear = 1 } } } }), {})
     local st = run(b, f, 4000)
     check(st.state == "error" and f.calls.rm == 0 and st.text ==
-          "the game did not move the container items (see bpu_trace.log: ourcmd recv must equal uicmd recv)",
+          "the game did not move the container items (see bpu_trace.log)",
           "container: moves never empty it -> stall, nothing removed (" .. st.text .. ")")
 end
 
@@ -1065,114 +1165,486 @@ do
     check(got and got[1] == 1 and got[2] == 2, "redirect: note_build gets the sent placements and removals")
 end
 
--- ===== container contents restore (after the placements): exact-N cursor recipe on the fake cursor model =====
+-- ===== container contents restore (after the placements): whole-stack TRANSFER only (action 2) =====
 local function tot(slots, item)
     local n = 0
     for _, s in ipairs(slots) do if s.item == item then n = n + s.amount end end
     return n
 end
-local function new_cont(f)   -- id of the container the Build placed (ids > 500 in the fake)
-    for id in pairs(f.containers) do if id > 500 then return id end end
+local function new_cont(f)   -- id of the container the Build placed (machine ids > 500 in the fake), lowest first
+    local best
+    for id in pairs(f.containers) do if id > 500 and (not best or id < best) then best = id end end
+    return best
 end
-local function has_trace(traces, text)
-    for _, t in ipairs(traces) do if t == text then return true end end
+local function starts(traces, prefix)   -- some trace line starts with prefix
+    for _, t in ipairs(traces) do if t:sub(1, #prefix) == prefix then return true end end
     return false
 end
-local function cont_place(restore)
-    local p = M("BP_ContainerObject_2", 5, 0, {})
-    p.restore = restore
-    return p
+local function cmds_of(f, action)
+    local n = 0
+    for _, c in ipairs(f.cmd_log) do if c[4] == action then n = n + 1 end end
+    return n
 end
+local function cont_plate(f, id) return tot(f.containers[id].slots, "ITEM_Plate") end
+local function cont_at(x, restore) local p = M("BP_ContainerObject_2", x, 0, {}); p.restore = restore; return p end
+local function cont_place(restore) return cont_at(5, restore) end
 local REDIRECT_ON = "on: redirect=on probe_log=off groups=yes"
-
--- redirect: unit 50+50+20 Plate, restore 120 -> cycles of 50, 50, 20 (take, k x place single, surplus back when any)
-do
-    local traces = {}
-    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
-    f.io.trace = function(t) traces[#traces + 1] = t end
+local function tracer(f) local t = {}; f.io.trace = function(x) t[#t + 1] = x end; return t end
+local function whole_fake(extra)
+    local o = { redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} }
+    for k, v in pairs(extra or {}) do o[k] = v end
+    return fake(o)
+end
+local function start_cont(f, restore, opts)
     local b = B.new(f.io)
-    local ok = b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local ok = b:start(plan_for(f, { place = { cont_place(restore) }, need = {}, refund = {} }), opts or {})
+    return b, ok
+end
+
+-- whole stacks 50 + 50 + 20 -> restore 120: three TRANSFERs (2), nothing else
+do
+    local f = whole_fake()
+    local traces = tracer(f)
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    local cmds3 = 0
-    for _, c in ipairs(f.cmds) do if c[4] == 3 then cmds3 = cmds3 + 1 end end
-    check(ok and st.state == "done" and cid and tot(f.containers[cid].slots, "ITEM_Plate") == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
           "restore: 120 Plate back into the new container, unit empty (" .. st.text .. ")")
     check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil, "restore: status text")
-    check(cmds3 == 0, "restore: no release (action 3) sent")
-    check(has_trace(traces, "restore cursor: take unit slot0=0 item=ITEM_Plate expect=50 sent=true")
-          and has_trace(traces, "restore cursor: k=50 place_single into container id=" .. tostring(cid) .. " slot0=0 sent=50")
-          and has_trace(traces, "restore cursor: k=20 place_single into container id=" .. tostring(cid) .. " slot0=2 sent=20")
-          and has_trace(traces, "restore cursor: drop cursor (action 4) sent=true"), "restore: cursor steps traced (take, k, drop)")
+    check(#f.cmd_log == 3 and cmds_of(f, 2) == 3 and #f.violations == 0 and f.cmd_log[1][1] == 202 and f.cmd_log[1][2] == cid + 5000,
+          "restore whole stacks: 3 TRANSFER (2) unit -> container INVENTORY id, no other action, no violation (" .. #f.cmd_log .. " sent)")
+    check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=120 moves=3 moved=120 short=0"), "restore whole stacks: plan trace")
+    check(starts(traces, "restore unit stacks (start): ") and starts(traces, "restore unit stacks (end): "), "restore: unit stack traces at start and end")
 end
 
--- surplus: unit holds 50 Plate, restore 30 -> take 50, 30 placed, 20 put back to the same slot
+-- SM 12, raw Plate 25: slot max 300, 32-slot container = 9600. Unit 32 full stacks of 300 -> all 9600 go in, short 0
 do
-    local traces = {}
-    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {} })
-    f.io.trace = function(t) traces[#traces + 1] = t end
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 30 } }) }, need = {}, refund = {} }), {})
+    local stacks = {}
+    for i = 1, 32 do stacks[i] = S("ITEM_Plate", 300, 300) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(stacks, 32), station = {}, mult = { unit = 12 },
+                     raw = { ITEM_Plate = 25 }, max = { ITEM_Plate = 300 }, cont_slots = 32, cont_mult = 12 })
+    local traces = tracer(f)
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 9600 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    check(st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 20,
-          "restore surplus: 30 placed, 20 back in the unit (" .. st.text .. ")")
-    check(has_trace(traces, "restore cursor: surplus=20 put back to unit slot0=0 sent=true"), "restore surplus: traced")
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 9600 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.violations == 0,
+          "restore SM 12: 9600 Plate (32 x 300) into the 32-slot container, unit empty (" .. st.text .. ")")
+    check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=9600 moves=32 moved=9600 short=0"), "restore SM 12: plan trace moved 9600, short 0")
 end
 
--- unit short of an item: skipped with a note, Build still done, nothing sent to the container
+-- rounding down: need 30, unit 100 then 40 -> the 100 is skipped (30 < 50), the 40 goes in (30 >= 20)
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 40, 100) }, 3),
+                     station = {}, max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 } })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 40 and f.inv.unit.slots[1].amount == 100 and #f.cmd_log == 1
+          and f.cmd_log[1][3] == 1 and #f.violations == 0, "rounding down: 100 skipped (need < half), 40 moved (need >= half) (" .. st.text .. ")")
+end
+
+-- rounding up: need 60 and one 100 stack -> the whole stack goes in (60 >= 50), container gets 100
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 100, 100) }, 3), station = {},
+                     max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 } })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 60 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 100 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.cmd_log == 1,
+          "rounding up: need 60 of a 100 stack -> whole stack in (100) (" .. st.text .. ")")
+end
+
+-- a stack far above the need is left out with a note, nothing sent: 5050 stack, need 300
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5050, 5050) }, 3), station = {},
+                     max = { ITEM_Plate = 5050 }, raw = { ITEM_Plate = 5050 } })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 300 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 5050 and #f.cmd_log == 0,
+          "rounding skip: 300 of a 5050 stack -> nothing sent (" .. st.text .. ")")
+    check(st.text:find("; restore: Plate x300 left out (under half a unit stack)", 1, true) ~= nil, "rounding skip: note text")
+end
+
+-- two stacks, need 110 (30 then 100): 2 TRANSFERs, container 130 = 100 + 30 (slot 1 to 100, then slot 2)
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 30, 100), S("ITEM_Plate", 100, 100) }, 3),
+                     station = {}, max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 } })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 110 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 130 and f.containers[cid].slots[1].amount == 100
+          and f.containers[cid].slots[2].amount == 30 and #f.cmd_log == 2 and cmds_of(f, 2) == 2 and #f.violations == 0,
+          "two transfers: container 100 + 30, unit empty (" .. st.text .. ")")
+end
+
+-- partial room: container with one slot (cap 100), unit 80 + 80, need 120 -> 100 in, 60 stay in the unit (partial move)
+do
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 80, 100), S("ITEM_Plate", 80, 100) }, 3),
+                     station = {}, max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 }, cont_slots = 1 })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 100 and f.inv.unit.slots[2].amount == 60 and #f.cmd_log == 2
+          and #f.violations == 0, "partial room: 100 in, 60 stay in the unit (" .. st.text .. ")")
+    check(st.text:find("container " .. cid .. " full: Plate x20 left in the unit", 1, true) ~= nil, "partial room: container full note (the 20 the room did not take)")
+end
+
+-- container full: one slot -> 50 in (one TRANSFER), the other stacks do not fit, nothing else sent, 70 stay in the unit
+do
+    local f = whole_fake({ cont_slots = 1 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 70
+          and st.text:find("restored 50 items into 1 container(s)", 1, true) ~= nil
+          and st.text:find("container " .. cid .. " full: Plate x70 left in the unit", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
+    check(#f.cmd_log == 1 and cmds_of(f, 2) == 1 and #f.violations == 0, "restore full: one TRANSFER, nothing else sent, no violation")
+end
+
+-- unit short of an item: skipped with a note before anything is sent, the Build is still done
 do
     local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50) }, 3), station = {} })
-    local b = B.new(f.io)
-    local ok = b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    check(ok and st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100,
-          "restore short: contents shortage does not block the Build (" .. st.text .. ")")
+    check(ok and st.state == "done" and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.cmd_log == 0,
+          "restore short: contents shortage does not block the Build, nothing sent (" .. st.text .. ")")
     check(st.text:find("; restore: Plate x120 not restored (unit has 100)", 1, true) ~= nil, "restore short: note text")
 end
 
--- container full: one slot of 50, 120 to restore -> 50 in, then "full"
+-- ICE REPRO (user test 2026-11-07): earlier items fill the container slots, later ice gets only the room left.
+-- Container 4 slots (cap 150): Plate 450 fills 3 slots, ice wants 6 stacks -> 1 stack fits. The shortage is noted
+-- (the old planner dropped it silently: plan remainder=0 short=N, no note).
 do
-    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6),
-                     station = {}, cont_slots = 1 })
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
+    local slots = {}
+    for i = 1, 3 do slots[#slots + 1] = S("ITEM_Plate", 150, 150) end
+    for i = 1, 6 do slots[#slots + 1] = S("ITEM_WaterIce", 150, 150) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(slots, 9), station = {},
+                     max = { ITEM_Plate = 150, ITEM_WaterIce = 150 }, raw = { ITEM_Plate = 150, ITEM_WaterIce = 150 }, cont_slots = 4 })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 450 }, { name = "ITEM_WaterIce", count = 900 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    check(st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 50 and st.text:find("restored 50 items into 1 container(s)", 1, true)
-          and st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 450 and tot(f.containers[cid].slots, "ITEM_WaterIce") == 150,
+          "ice repro: plate 3 stacks, ice 1 stack (the room left) (" .. st.text .. ")")
+    check(st.text:find("container " .. cid .. " full: WaterIce x750 left in the unit", 1, true) ~= nil and tot(f.inv.unit.slots, "ITEM_WaterIce") == 750 and #f.violations == 0,
+          "ice repro: shortage noted, 750 ice stay in the unit (" .. st.text .. ")")
 end
 
--- commands accepted but nothing moves: stalled after CYCLE_MS, the run still ends done
+-- ICE with room: 3 Plate stacks + 6 ice stacks into 10 slots -> 9 transfers, ice 900, no note
 do
-    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {}, noop_inv = true })
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 50 } }) }, need = {}, refund = {} }), {})
+    local slots = {}
+    for i = 1, 3 do slots[#slots + 1] = S("ITEM_Plate", 150, 150) end
+    for i = 1, 6 do slots[#slots + 1] = S("ITEM_WaterIce", 150, 150) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(slots, 9), station = {},
+                     max = { ITEM_Plate = 150, ITEM_WaterIce = 150 }, raw = { ITEM_Plate = 150, ITEM_WaterIce = 150 }, cont_slots = 10 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 450 }, { name = "ITEM_WaterIce", count = 900 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
-    check(st.state == "done" and tot(f.containers[cid].slots, "ITEM_Plate") == 0 and st.text:find("restore stalled: container id " .. cid .. " took no items", 1, true) ~= nil,
-          "restore stalled: no items moved -> note, done (" .. st.text .. ")")
+    check(cid and tot(f.containers[cid].slots, "ITEM_WaterIce") == 900 and cmds_of(f, 2) == 9 and st.text:find("full", 1, true) == nil,
+          "ice with room: 6 ice stacks + 3 plate stacks, 9 transfers, no note (" .. st.text .. ")")
 end
 
--- new container ids never show: 60 s, then a note; the Build itself stays done
+-- stall: nothing shows -> all 3 commands sent, no further command, STALL after STALL_MS (8000) with no change
+do
+    local f = whole_fake({ stall_after = 0 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local last = f.cmd_log[#f.cmd_log] and f.cmd_log[#f.cmd_log][5] or 0
+    check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 0 and f.clock - last >= 8000 and f.clock - last <= 8250
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 8 s", 1, true) ~= nil,
+          "stall: no change for 8 s after the last send -> note, nothing more sent (" .. st.text .. ")")
+    check(#f.violations == 0, "stall: no violation")
+end
+
+-- stall partial: the first TRANSFER shows (50), the other two do not -> STALL
+do
+    local f = whole_fake({ stall_after = 1 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 50
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent)", 1, true) ~= nil,
+          "stall partial: 50 shown, 2 transfers not, STALL (" .. st.text .. ")")
+end
+
+-- live inflow of the same item into the container (+5 Plate per read after the 3 TRANSFERs): the lower bound confirms, verify done
+do
+    local f = whole_fake()
+    local orig = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id)
+        local c = f.containers[id]
+        if c and id > 500 and #f.cmd_log >= 3 then c.slots[4].item = "ITEM_Plate"; c.slots[4].amount = c.slots[4].amount + 5 end
+        return orig(id)
+    end
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) > 120 and st.text:find("stalled", 1, true) == nil and #f.violations == 0,
+          "inflow: container above the model (lower bound) confirms, no stall (" .. st.text .. ")")
+end
+
+-- restore drain: the unit matches, the container loses 5 Plate per read (belts take it) -> drained, not a stall
+do
+    local f = whole_fake()
+    local orig = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id)
+        local c = f.containers[id]
+        if c and id > 500 and #f.cmd_log >= 3 then
+            local s = c.slots[1]
+            s.amount = math.max(0, s.amount - 5)
+            if s.amount == 0 then s.item = "" end
+        end
+        return orig(id)
+    end
+    local traces = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and st.text:find("stalled", 1, true) == nil and st.text:find("check both inventories", 1, true) == nil
+          and #f.violations == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
+          "drain: container below the model and falling, unit matches -> no stall (" .. st.text .. ")")
+    check(cid and starts(traces, "restore drain: container id=" .. cid) and starts(traces, "restore drained containers: " .. cid),
+          "drain: drain and drained-containers traces name the container")
+end
+
+-- live inflow, nothing applied (unit unchanged): +1 Plate per read keeps the container moving, the stall clock still fires
+-- at 8 s after the last send, and the note names the first mismatch (the unit, then the container)
+do
+    local f = whole_fake({ stall_after = 0 })
+    local orig = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id)
+        local c = f.containers[id]
+        if c and id > 500 then c.slots[1].item = "ITEM_Plate"; c.slots[1].amount = c.slots[1].amount + 1 end
+        return orig(id)
+    end
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local last = f.cmd_log[#f.cmd_log] and f.cmd_log[#f.cmd_log][5] or 0
+    check(st.state == "done" and #f.cmd_log == 3 and f.clock - last >= 8000 and f.clock - last <= 8250
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 8 s", 1, true) ~= nil
+          and cid and st.text:find("(first mismatch: unit: Plate exp 0 got 120 | container id " .. cid .. ": Plate exp ", 1, true) ~= nil,
+          "stall with inflow: unit unchanged -> STALL after 8 s, first mismatch named (" .. st.text .. ")")
+end
+
+-- slow game, no false stall: every command shows 6 s after its send (under the 8 s idle limit), restore verified
+do
+    local f = whole_fake({ delay = 6000 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and st.text:find("stalled", 1, true) == nil and #f.violations == 0,
+          "no false stall: 6 s lag, restore 120 verified, no stall note (" .. st.text .. ")")
+end
+
+-- delay 800 ms: the batch lands after 800 ms, the verify waits for it (never two batches in flight)
+do
+    local f = whole_fake()
+    f.delay = 800
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and #f.cmd_log == 3 and f.inflight == 0 and #f.violations == 0,
+          "delay 800 ms: restore 120, verify waits for the batch (" .. st.text .. ")")
+end
+
+-- refused send, retried then skipped: command 1 refused 6 times (1 + RETRY_MAX 5) -> skipped, commands 2 and 3 go on;
+-- the verify drops the skipped move (unit keeps 50, container gets 70), no stall
+do
+    local f = whole_fake()
+    f.fail_next = 6
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 70 and tot(f.inv.unit.slots, "ITEM_Plate") == 50 and f.attempts == 8,
+          "retry then skip: command 1 refused 6 times and skipped, commands 2 and 3 go on (" .. st.text .. ")")
+    check(st.text:find("1 command(s) skipped (refused)", 1, true) ~= nil and st.text:find("stalled", 1, true) == nil and #f.violations == 0,
+          "retry then skip: note counts the skipped command, verified, no abort")
+end
+
+-- every command refused: each skipped after 6 attempts, the restore still ends, nothing moved, the note counts all 3
+do
+    local f = whole_fake()
+    f.refuse_after = 0
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 0 and f.attempts == 18 and tot(f.inv.unit.slots, "ITEM_Plate") == 120,
+          "all refused: 3 commands skipped after 6 tries each, restore ends, nothing moved (" .. st.text .. ")")
+    check(st.text:find("3 command(s) skipped (refused)", 1, true) ~= nil and st.text:find("stalled", 1, true) == nil,
+          "all refused: note counts 3 skipped")
+end
+
+-- container not ready: unreadable for 3 polls -> the first command after 2 ready reads in a row
+do
+    local f = whole_fake({ unready = 3 })
+    local t0 = f.clock
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and f.first_unready == 0 and f.cmd_log[1] and f.cmd_log[1][5] - t0 >= 1250,
+          "container not ready: 3 polls not ready, first command after 2 ready reads (" .. st.text .. ")")
+end
+
+-- container never ready: CONT_MS, then the stall note, nothing sent
+do
+    local f = whole_fake({ unready = 1e9 })
+    local t0 = f.clock
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 800)
+    check(st.state == "done" and #f.cmd_log == 0 and f.clock - t0 >= 60000
+          and st.text:find("restore stalled: container ids not found (new 1, placed 1)", 1, true) ~= nil, "container never ready: stall note after CONT_MS, nothing sent (" .. st.text .. ")")
+end
+
+-- RESTORE_MS passed (clock jump) during the verify: timeout note, nothing more sent
+do
+    local f = whole_fake({ stall_after = 0 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local n = 0
+    while b:status().state == "working" and #f.cmd_log == 0 and n < 400 do
+        f.clock = f.clock + 250
+        b:tick(f.clock)
+        n = n + 1
+    end
+    local sent = #f.cmd_log
+    f.clock = f.clock + 300001
+    b:tick(f.clock)
+    local st = b:status()
+    check(st.state == "done" and sent == 3 and #f.cmd_log == sent and st.text:find("restore stalled: timeout after 300 s", 1, true) ~= nil,
+          "restore timeout: 300 s passed -> note, nothing more sent (" .. st.text .. ")")
+end
+
+-- refused send, retried: the same command is sent again on the next tick; 2 refusals then success -> all 3 applied
+do
+    local f = whole_fake()
+    f.fail_next = 2
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and f.attempts == 5 and #f.violations == 0,
+          "retry then succeed: 2 refusals, the same command goes again, 120 in (" .. st.text .. ")")
+    check(not st.text:find("refused", 1, true), "retry then succeed: no refused note")
+end
+
+-- speed: 20 containers x 5 Plate from 20 stacks of 5 -> one TRANSFER each, done within 10 ticks of 250 ms
+do
+    local slots = {}
+    for i = 1, 20 do slots[i] = S("ITEM_Plate", 5, 5) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(slots, 20), station = {}, max = { ITEM_Plate = 5 }, raw = { ITEM_Plate = 5 } })
+    local places = {}
+    for i = 1, 20 do places[i] = cont_at(i * 2, { { name = "ITEM_Plate", count = 5 } }) end
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local t0 = f.clock
+    local st = run(b, f, 60)
+    local ids = f.io.container_ids()
+    local all = #ids == 20
+    for _, id in ipairs(ids) do if cont_plate(f, id) ~= 5 then all = false end end
+    check(ok and st.state == "done" and all and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.violations == 0 and f.clock - t0 <= 10 * 250,
+          "speed: 20 containers x 5 Plate done in " .. tostring((f.clock - t0) / 250) .. " ticks, " .. #f.cmd_log .. " commands (" .. st.text .. ")")
+end
+
+-- progress: 1100 containers x 1 Plate -> 1000 sent in the first tick (RESTORE_CMD_PER_TICK), status line shows it, then 100
+do
+    local slots = {}
+    for i = 1, 1100 do slots[i] = S("ITEM_Plate", 1, 50) end
+    local places = {}
+    for i = 1, 1100 do places[i] = cont_at(i * 2, { { name = "ITEM_Plate", count = 1 } }) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(slots, 1100), station = {} })
+    local b = B.new(f.io)
+    local ok = b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local texts, n = {}, 0
+    while b:status().state == "working" and n < 2000 do
+        f.clock = f.clock + 250
+        b:tick(f.clock)
+        n = n + 1
+        if #f.cmd_log > 0 and #texts < 1 then texts[1] = b:status().text end
+    end
+    local st = b:status()
+    local ids = f.io.container_ids()
+    check(ok and st.state == "done" and #ids == 1100 and #f.cmd_log == 1100 and cmds_of(f, 2) == 1100 and #f.violations == 0,
+          "progress: 1100 transfers, all sent and shown (" .. st.text .. ")")
+    check(texts[1] and texts[1]:find("restoring [#########-] 91%  (1,000 of 1,100 commands)", 1, true) ~= nil,
+          "progress: first tick status line " .. tostring(texts[1]))
+end
+
+-- cancel during the restore: the first tick sent 1000 (the cap), cancel -> nothing after it
+do
+    local slots = {}
+    for i = 1, 1100 do slots[i] = S("ITEM_Plate", 1, 50) end
+    local places = {}
+    for i = 1, 1100 do places[i] = cont_at(i * 2, { { name = "ITEM_Plate", count = 1 } }) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(slots, 1100), station = {} })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local n = 0
+    while b:status().state == "working" and #f.cmd_log == 0 and n < 2000 do
+        f.clock = f.clock + 250
+        b:tick(f.clock)
+        n = n + 1
+    end
+    local before = #f.cmd_log
+    local okc = b:cancel()
+    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
+    local st = b:status()
+    check(before == 1000 and okc and st.state == "error" and starts_with(st.text, "cancelled") and #f.cmd_log == before,
+          "cancel during the restore: 1000 sent, none after the cancel (" .. st.text .. ")")
+end
+
+-- mode off (restore_off.txt): nothing sent, a note says where the switch is
+do
+    local f = whole_fake()
+    f.mode = "off"
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and #f.cmd_log == 0 and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 120
+          and st.text:find("; restore: restore is off (restore_off.txt in Mods/BlueprintUnit)", 1, true) ~= nil, "mode off: nothing sent, note (" .. st.text .. ")")
+end
+
+-- Chk_Restore unchecked (opts.restore = false): off, nothing sent, the note names the checkbox; checked or no box: restore on
+do
+    local f = whole_fake()
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } }, { restore = false })
+    local st = run(b, f, 400)
+    check(st.state == "done" and #f.cmd_log == 0 and st.text:find("restore is off (Chk_Restore unchecked)", 1, true) ~= nil,
+          "checkbox unchecked: restore off, nothing sent (" .. st.text .. ")")
+    local f2 = whole_fake()
+    local b2 = start_cont(f2, { { name = "ITEM_Plate", count = 120 } }, { restore = true })
+    local st2 = run(b2, f2, 400)
+    check(st2.state == "done" and #f2.cmd_log == 3, "checkbox checked: restore on (" .. st2.text .. ")")
+    local f3 = whole_fake()
+    local b3 = start_cont(f3, { { name = "ITEM_Plate", count = 120 } }, {})
+    local st3 = run(b3, f3, 400)
+    check(st3.state == "done" and #f3.cmd_log == 3, "no checkbox widget (opts without restore): restore on (" .. st3.text .. ")")
+end
+
+-- legacy flow (no redirect): the last placement restores too, whole stacks
+do
+    local f = fake({ player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and #f.violations == 0 and cmds_of(f, 2) == 3,
+          "restore legacy: 120 back after the last placement (" .. st.text .. ")")
+end
+
+-- progress text helpers
+do
+    check(B.pure.progress(1234, 2468) == "restoring [#####-----] 50%  (1,234 of 2,468 commands)", "progress text: 50 pct with commas")
+    check(B.pure.commas(1234567) == "1,234,567" and B.pure.commas(999) == "999", "commas: thousands separators")
+    check(B.pure.bar(0, 100) == "[----------] 0%" and B.pure.bar(100, 100) == "[##########] 100%", "bar: 0 pct and 100 pct")
+end
+
+-- container ids never show: 60 s, then a note; the Build itself stays done
 do
     local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50) }, 3), station = {}, drop_place = true })
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 50 } }) }, need = {}, refund = {} }), {})
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 50 } })
     local st = run(b, f, 800)
     check(st.state == "done" and st.text:find("; restore: restore stalled: container ids not found (new 0, placed 1)", 1, true) ~= nil,
           "restore: container ids never show -> stalled note (" .. st.text .. ")")
-end
-
--- legacy flow (no redirect): the last placement restores too
-do
-    local f = fake({ player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
-    local b = B.new(f.io)
-    local ok = b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
-    local st = run(b, f, 400)
-    local cid = new_cont(f)
-    check(ok and st.state == "done" and cid and tot(f.containers[cid].slots, "ITEM_Plate") == 120, "restore legacy: 120 back after the last placement (" .. st.text .. ")")
 end
 
 -- removed container: contents remembered before the first send (session memory, cell key)
@@ -1195,33 +1667,8 @@ do
         removed = { { id = 1, bcls = "BP_OLD", x = 101, y = 0, refund = {} } } }), {})
     check(not ok2 and msg2 == "error: not enough items: Plate x5" and f.calls.rm == 0, "total check: removed contents are not supply (" .. tostring(msg2) .. ")")
     local f3 = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({}, 3), station = {} })
-    local ok3 = B.new(f3.io):start(plan_for(f3, { place = { cont_place({ { name = "ITEM_Plate", count = 500 } }) }, need = {}, refund = {} }), {})
+    local ok3 = start_cont(f3, { { name = "ITEM_Plate", count = 500 } })
     check(ok3, "total check: contents shortage never blocks the Build")
-end
-
--- cancel during the restore: no further inventory command, the container keeps what it already got, no restore text
-do
-    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50), S("ITEM_Plate", 20) }, 6), station = {} })
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_place({ { name = "ITEM_Plate", count = 120 } }) }, need = {}, refund = {} }), {})
-    local function cont_items()
-        local c = new_cont(f)
-        return c and tot(f.containers[c].slots, "ITEM_Plate") or 0
-    end
-    local n = 0
-    while b:status().state == "working" and cont_items() < 50 and n < 400 do
-        f.clock = f.clock + 250
-        b:tick(f.clock)
-        n = n + 1
-    end
-    local cmds_before, items_before = #f.cmds, cont_items()
-    local okc = b:cancel()
-    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
-    local st = b:status()
-    check(okc and st.state == "error" and starts_with(st.text, "cancelled") and st.text:find("restore", 1, true) == nil,
-          "cancel during restore: error|cancelled, no restore text (" .. st.text .. ")")
-    check(items_before == 50 and #f.cmds == cmds_before and cont_items() == items_before,
-          "cancel during restore: no further inventory command after cancel (cmds " .. cmds_before .. ", items " .. items_before .. ")")
 end
 
 -- failed recipe/port changes (io.send_changes second result) reach the final status text, legacy and redirect
@@ -1241,6 +1688,258 @@ do
         st = final(0)
         check(st.state == "done" and st.text:find("failed", 1, true) == nil, fl[1] .. ": no failed changes, no suffix (" .. st.text .. ")")
     end
+end
+
+-- ===== split route (io.split present): SORT the unit, then exact pieces (split into an empty unit slot + one TRANSFER) =====
+local function spl(o)   -- fake with io.split (spec.split); plate stacks cap 100 unless o says otherwise
+    local t = { redirect = REDIRECT_ON, player = inv({}, 3), station = {}, max = { ITEM_Plate = 100 }, raw = { ITEM_Plate = 100 }, split = true }
+    for k, v in pairs(o) do t[k] = v end
+    return fake(t)
+end
+local function churn(f, dur)   -- the unit's ITEM_Junk slot changes on every unit read for dur ms after the first SORT
+    local base = f.io.read_inv
+    f.io.read_inv = function(which)
+        if which == "unit" and f.sort_at and f.clock < f.sort_at + dur then
+            for _, s in ipairs(f.inv.unit.slots) do if s.item == "ITEM_Junk" then s.amount = s.amount == 1 and 2 or 1 end end
+        end
+        return base(which)
+    end
+end
+
+-- exact N: Plate 100 + 100, need 120 -> SORT once, one split of 20, 2 TRANSFERs, unit keeps 80, no violation
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 4) })
+    local tr = tracer(f)
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 80 and #f.violations == 0,
+          "split exact: container 120 exact, unit keeps 80, no violation (" .. st.text .. ")")
+    check(cmds_of(f, 5) == 1 and #f.splits == 1 and f.splits[1][3] == 20 and cmds_of(f, 2) == 2,
+          "split exact: 1 SORT, 1 split of 20, 2 TRANSFERs")
+    check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil
+          and starts(tr, "restore plan (split): container id=" .. cid .. " item=ITEM_Plate count=120 splits=1 moved=120 short=0"),
+          "split exact: status text and plan trace")
+end
+
+-- need 250 over three 100 stacks (3 empty slots): 100, 100, then a split of 50 -> container 250, unit keeps 50
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 6) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 250 and tot(f.inv.unit.slots, "ITEM_Plate") == 50 and #f.splits == 1 and f.splits[1][3] == 50
+          and cmds_of(f, 2) == 3 and #f.violations == 0, "split 250 of 3 stacks: container 250, unit 50, one split of 50 (" .. st.text .. ")")
+end
+
+-- two containers, each needs 20 of the same 100 stack: two splits, each into a different empty unit slot
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 6) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 20 } }), cont_at(7, { { name = "ITEM_Plate", count = 20 } }) },
+                         need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local ids = f.io.container_ids()
+    check(#ids == 2 and cont_plate(f, ids[1]) == 20 and cont_plate(f, ids[2]) == 20 and #f.splits == 2 and f.splits[1][4] ~= f.splits[2][4]
+          and #f.violations == 0, "split two containers: 20 + 20, two splits into distinct empty slots (" .. st.text .. ")")
+end
+
+-- unit short: Plate 70 for need 120 -> 70 in, a note, no split
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 70, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 70 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.splits == 0 and #f.violations == 0
+          and st.text:find("plan reduced: unit has 70 of 120 for Plate (short 50)", 1, true) ~= nil, "split unit short: 70 in, note, no split (" .. st.text .. ")")
+end
+
+-- plan reduced: unit has 30, job wants 50 -> 30 in, note names have / want / short, no old wording
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 50 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 30 and #f.violations == 0
+          and st.text:find("plan reduced: unit has 30 of 50 for Plate (short 20)", 1, true) ~= nil
+          and st.text:find("not restored (unit has", 1, true) == nil, "plan reduced: 30 in, note 'unit has 30 of 50 (short 20)' (" .. st.text .. ")")
+end
+
+-- container room 50 (one slot, cap 50), unit 40 + 40, need 80 -> 40 direct, 10 split, container 50, unit keeps 30, full note
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 40, 100), S("ITEM_Plate", 40, 100) }, 4), raw = { ITEM_Plate = 50 }, max = { ITEM_Plate = 50 }, cont_slots = 1 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 80 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 30 and #f.splits == 1 and f.splits[1][3] == 10 and #f.violations == 0
+          and st.text:find("container " .. cid .. " full: Plate x30 left in the unit", 1, true) ~= nil, "split room: container 50, unit keeps 30, full note (" .. st.text .. ")")
+end
+
+-- no free unit slot: Plate 100 + Gear 10 fill the unit, need 30 -> nothing moved, note
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Gear", 10, 50) }, 2) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.splits == 0 and cmds_of(f, 2) == 0
+          and st.text:find("; restore: Plate x30 not restored (no free unit slot)", 1, true) ~= nil, "split no free slot: nothing moved, note (" .. st.text .. ")")
+end
+
+-- split refused every time: 6 tries, skipped; its TRANSFER is not sent; the restore is done, nothing moved, no violation
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_fail_n = 1e9
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.splits == 6
+          and cmds_of(f, 2) == 0 and #f.violations == 0 and st.text:find("1 command(s) skipped (refused)", 1, true) ~= nil
+          and st.text:find("stalled", 1, true) == nil, "split refused 6 times: skipped, TRANSFER not sent, done (" .. st.text .. ")")
+end
+
+-- split refused once: retried on the next tick, 30 delivered, nothing skipped
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_fail_n = 1
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 70 and #f.splits == 2
+          and #f.violations == 0 and st.text:find("skipped", 1, true) == nil and st.text:find("stalled", 1, true) == nil,
+          "split refused once: retried, 30 delivered (" .. st.text .. ")")
+end
+
+-- no io.split: rounded route as before, no SORT sent
+do
+    local f = whole_fake()
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 0 and #f.cmd_log == 3, "no io.split: rounded route, no SORT, 3 TRANSFERs (" .. st.text .. ")")
+end
+
+-- SORT settles: no change for 1500 ms after the SORT (noop_sort = the game never sorts), then the restore runs
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100) }, 3) })
+    f.noop_sort = true
+    local tr = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local gap = f.cmd_log[2] and f.cmd_log[2][5] - f.cmd_log[1][5]
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 1 and gap and gap >= 1500 and gap < 15000
+          and starts(tr, "restore sort: unit settled"), "sort settle: runs 1500+ ms after the SORT, not before (gap " .. tostring(gap) .. ")")
+end
+
+-- SORT keeps changing for 4 s, then settles: the restore waits, then runs
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100), S("ITEM_Junk", 1, 100) }, 4) })
+    churn(f, 4000)
+    local tr = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local gap = f.cmd_log[2] and f.cmd_log[2][5] - f.cmd_log[1][5]
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and gap and gap >= 4500 and starts(tr, "restore sort: unit settled")
+          and not starts(tr, "restore sort: cap"), "sort changing 4 s: waits, then settles and runs (gap " .. tostring(gap) .. ")")
+end
+
+-- SORT never settles (changes until 14 s): the 15 s cap ends the wait and the restore runs
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100), S("ITEM_Junk", 1, 100) }, 4) })
+    churn(f, 14000)
+    local tr = tracer(f)
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    local gap = f.cmd_log[2] and f.cmd_log[2][5] - f.cmd_log[1][5]
+    check(cid and st.state == "done" and cont_plate(f, cid) == 120 and gap and gap >= 14500 and starts(tr, "restore sort: cap reached")
+          and not starts(tr, "restore sort: unit settled"), "sort cap: 15 s wait, trace, restore runs (gap " .. tostring(gap) .. ")")
+end
+
+-- SORT refused every time: 6 tries (RETRY_MAX + 1), note, the restore goes on
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100) }, 3) })
+    f.refuse_sort = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 6 and #f.violations == 0
+          and st.text:find("unit not sorted (SORT refused)", 1, true) ~= nil, "SORT refused: 6 tries, note, restore goes on (" .. st.text .. ")")
+end
+
+-- cancel during the SORT wait: the SORT is the last command
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 50, 100), S("ITEM_Plate", 50, 100), S("ITEM_Plate", 20, 100) }, 3) })
+    f.noop_sort = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local n = 0
+    while b:status().state == "working" and #f.cmd_log == 0 and n < 400 do f.clock = f.clock + 250; b:tick(f.clock); n = n + 1 end
+    local before = #f.cmd_log
+    b:cancel()
+    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
+    local st = b:status()
+    check(before == 1 and st.state == "error" and starts_with(st.text, "cancelled") and #f.cmd_log == before, "cancel during the SORT wait: nothing sent after it (" .. st.text .. ")")
+end
+
+-- cancel during the pipeline: 1100 whole-slot TRANSFERs after the SORT, 1000 go in the first send, cancel -> nothing after
+do
+    local slots = {}
+    for i = 1, 1100 do slots[i] = S("ITEM_Plate", 1, 50) end
+    local places = {}
+    for i = 1, 1100 do places[i] = cont_at(i * 2, { { name = "ITEM_Plate", count = 1 } }) end
+    local f = spl({ unit = inv(slots, 1100), max = { ITEM_Plate = 50 }, raw = { ITEM_Plate = 50 } })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local n = 0
+    while b:status().state == "working" and #f.cmd_log < 2 and n < 2000 do f.clock = f.clock + 250; b:tick(f.clock); n = n + 1 end
+    local before = #f.cmd_log
+    b:cancel()
+    for _ = 1, 40 do f.clock = f.clock + 250; b:tick(f.clock) end
+    local st = b:status()
+    check(before == 1001 and st.state == "error" and starts_with(st.text, "cancelled") and #f.cmd_log == before,
+          "cancel during the pipeline: SORT + 1000 sent, none after the cancel (" .. st.text .. ")")
+end
+
+-- split no-op (returns true, changes nothing): the model says the unit gave up 30 -> the verify never matches -> STALL
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_noop = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 30 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100
+          and st.text:find("restore stalled at pipeline (2 of 2 commands sent)", 1, true) ~= nil, "split no-op: STALL, nothing more sent (" .. st.text .. ")")
+end
+
+-- split vs queued TRANSFER: the game applies a TRANSFER late (delay), io.split at once. Container 5 takes the whole first
+-- stack (TRANSFER queued), container 7 needs 20 of the 30 stack -> the split must not pick slot 1 (emptied in the model only)
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 30, 100) }, 4), delay = 500 })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 100 } }), cont_at(7, { { name = "ITEM_Plate", count = 20 } }) },
+                         need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local ids = f.io.container_ids()
+    check(st.state == "done" and #ids == 2 and cont_plate(f, ids[1]) == 100 and cont_plate(f, ids[2]) == 20
+          and tot(f.inv.unit.slots, "ITEM_Plate") == 10 and #f.violations == 0 and #f.splits == 1 and f.splits[1][4] == 2,
+          "split race: split goes to the empty slot 3, not the slot a queued TRANSFER empties (" .. st.text .. ")")
+end
+
+-- verify poll: game applies 3 s late, 2 containers. Polls every 2 s after the first 250 ms, confirmed containers not read again
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 4), delay = 3000 })
+    local reads = {}
+    local base = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id) reads[id] = (reads[id] or 0) + 1; return base(id) end
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 100 } }), cont_at(7, { { name = "ITEM_Plate", count = 100 } }) },
+                         need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    local ids = f.io.container_ids()
+    local worst = math.max(reads[ids[1]] or 0, reads[ids[2]] or 0)
+    check(st.state == "done" and #ids == 2 and cont_plate(f, ids[1]) == 100 and cont_plate(f, ids[2]) == 100 and #f.violations == 0
+          and worst <= 8, "verify poll: container reads per container " .. worst .. " max over a 3 s wait (" .. st.text .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

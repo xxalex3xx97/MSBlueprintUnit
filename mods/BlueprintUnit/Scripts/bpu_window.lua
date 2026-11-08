@@ -6,7 +6,6 @@
 local Live = require("bpu_live")
 local Plan = require("bpu_plan")
 local Build = require("bpu_build")
-local Invtrace = require("bpu_invtrace")   -- DEV: uicmd/ourcmd InventoryInput trace
 
 local M = {}
 local MSCore, F, native   -- set by M.init
@@ -26,7 +25,8 @@ local CONTRACT = { "Panel", "Txt_Title", "Btn_Close", "Txt_Close", "Txt_Status",
   "Txt_CostHdr", "Scr_Cost", "Txt_CostEmpty", "Txt_UnitInvTitle", "Scr_UnitInv", "Txt_PlayerInvTitle", "Host_PlayerInv",
   "Pnl_ImportModal", "Txt_ImportTitle", "Btn_ImportClose", "Txt_ImportClose", "Edt_ImportJson", "Txt_ImportHint",
   "Btn_ImportOk", "Txt_ImportOk", "Btn_ImportCancel", "Txt_ImportCancel" }
--- optional, never logged if missing: Btn_CostPin, Txt_CostPin, Chk_StationBuild (CheckBox), Txt_StationBuildHint.
+-- optional, never logged if missing: Btn_CostPin, Txt_CostPin, Chk_StationBuild (CheckBox), Txt_StationBuildHint, Chk_Restore (CheckBox:
+-- unchecked = restore off; missing or checked = restore on, read on every Build press). Txt_Restore, Txt_RestoreHint: label + hint.
 
 -- S.w = WBP instance (names resolve here). S.h = MSCore.wbp handle (nil = closed). S.p = controller. S.tc = last text per name.
 -- S.imp = import modal shown. S.U = unit (Live.find_unit). S.plan / S.text = last import. S.run = token of the running build.
@@ -36,7 +36,7 @@ local S = { h = nil, w = nil, p = nil, U = nil, player = nil, ctl = nil, tc = ni
 -- has = an import or build ran in this session. S.plan / S.text are kept too (Build re-plans from S.text).
 -- Notes panel (Txt_Notes) = status line, plan summary, removes line, folded notes. Txt_Status, Txt_Summary and Txt_Removes
 -- are collapsed (empty): no text above the buttons.
-local KEPT = { has = false, rows = {} }
+local KEPT = { has = false, rows = {}, pinned = false }
 local NOTE = { status = "", summary = "", removes = "", list = "" }
 
 -- ESlateVisibility: 0 Visible, 1 Collapsed
@@ -78,7 +78,13 @@ local function setStatus(s)
 end
 
 local function setEnabled(name, b) local o = w(name); if ok(o) then pcall(function() o:SetIsEnabled(b) end) end end
-local function setBuildBtns(on) setEnabled("Btn_Build", on); setEnabled("Btn_Import", on) end
+-- button state: idle -> Build + Import; running -> the Build button reads Abort and stays enabled (cancels), Import off
+local function setBuildBtns(idle)
+  local st = M.btnState(not idle)
+  setEnabled("Btn_Build", st.build_on)
+  setEnabled("Btn_Import", st.import_on)
+  txt("Txt_Build", st.build)
+end
 
 -- read-only count: unit + player inventory. A GetItemAmount error counts as 0.
 local function haveOf(item)
@@ -133,12 +139,44 @@ local function readStationBuild()
   if ok(h) then txt("Txt_StationBuildHint", S.stationBuild and "station blocks: not implemented yet" or "") end
 end
 
--- typing in an edit box: F does not close the window then
-local function typing()
-  for _, e in ipairs(FindAllOf("EditableTextBox") or {}) do
-    if ok(e) then local s, v = pcall(function() return e:HasKeyboardFocus() end); if s and v then return true end end
+-- outer chain of a widget reaches our window (UserWidget): WidgetTree -> UserWidget
+local function owned(e)
+  local s0, want = pcall(function() return S.w:GetFullName() end)
+  if not s0 then return false end
+  local o = e
+  for _ = 1, 12 do
+    local s1, nxt = pcall(function() return o:GetOuter() end)
+    if not s1 or not ok(nxt) then return false end
+    local s2, fn = pcall(function() return nxt:GetFullName() end)
+    if s2 and fn == want then return true end
+    o = nxt
   end
   return false
+end
+
+-- first focused EditableTextBox in the game: desc (name, class, outer class), ours (owned by S.w). nil when none
+local function focusedBox()
+  for _, e in ipairs(FindAllOf("EditableTextBox") or {}) do
+    if ok(e) then
+      local s, v = pcall(function() return e:HasKeyboardFocus() end)
+      if s and v then
+        local s3, outer = pcall(function() return e:GetOuter() end)
+        local oc = (s3 and ok(outer)) and cn(outer) or "?"
+        return nm(e) .. " class=" .. cn(e) .. " outer=" .. oc, owned(e)
+      end
+    end
+  end
+  return nil
+end
+
+-- F decision (pure): nil = close, else the reason it is ignored. box() -> desc, ours (only our own focused box blocks F)
+local function fReason(imp, open, age, box)
+  if imp then return "import modal open" end
+  if not open then return "window not open" end
+  if age <= 0.5 then return ("age %.2fs <= 0.5s"):format(age) end
+  local desc, mine = box()
+  if desc and mine then return "typing in our box " .. desc end
+  return nil, desc and ("foreign focus ignored: " .. desc) or nil
 end
 
 function M.isOpen() return S.h ~= nil and ok(S.w) end
@@ -151,6 +189,13 @@ local function resetResults()
   NOTE.status, NOTE.summary, NOTE.removes, NOTE.list = "", "", "", ""
   renderNotes()
   fillCost({})
+end
+
+-- Notes panel: diagnostics only (they stay in bpu_trace.log)
+local HIDDEN_NOTES = { "skipped (block-built", "ConfigHex ignored for paired underground" }
+local function hiddenNote(n)
+  for _, p in ipairs(HIDDEN_NOTES) do if n:sub(1, #p) == p then return true end end
+  return false
 end
 
 -- Btn_Import: open the modal, focus the box (text from the last open is kept)
@@ -206,8 +251,12 @@ local function impOk()
     -- notes (scrollable): same text folded into "xN", no cap
     local order, count = {}, {}
     for _, n in ipairs(plan.notes or {}) do
-      if not count[n] then count[n] = 0; order[#order + 1] = n end
-      count[n] = count[n] + 1
+      if hiddenNote(n) then
+        Live.trace("note kept out of the panel: " .. n)
+      else
+        if not count[n] then count[n] = 0; order[#order + 1] = n end
+        count[n] = count[n] + 1
+      end
     end
     local lines = {}
     for _, n in ipairs(order) do
@@ -251,12 +300,16 @@ local function buildLoop(run)
   return function()
     if S.run ~= run then return true end
     pcall(ExecuteInGameThread, function()
-      local okT, errT = pcall(function()
+      local okT, errT = xpcall(function()
         if S.run ~= run then return end
         S.builder:tick(S.io.now())
         local st = S.builder:status()
         setStatus(st.text)
         if st.state == "done" or st.state == "error" then finishBuild(run) end
+      end, function(e)
+        -- full traceback to bpu_trace.log; the short error (returned) still goes to the Notes panel
+        Live.trace("build tick traceback: " .. (debug.traceback(tostring(e), 2):gsub("\n", " ; ")))
+        return tostring(e)
       end)
       if not okT then
         Live.trace("build tick ERROR " .. tostring(errT))
@@ -269,11 +322,27 @@ local function buildLoop(run)
   end
 end
 
+-- IsChecked of a CheckBox-like object: true / false, nil when missing or unreadable
+local function checkedOf(c)
+  if c == nil then return nil end
+  local s, v = pcall(function() return c:IsChecked() end)
+  if s and type(v) == "boolean" then return v end
+  return nil
+end
+
+-- Chk_Restore (optional CheckBox, read on every Build press): true / false, nil when the widget is missing (restore on)
+local function readRestoreBox()
+  local c = w("Chk_Restore")
+  if not ok(c) then return nil end
+  return checkedOf(c)
+end
+
 -- Btn_Build: re-plan from the saved text (station may have changed), start the builder, poll it.
 local function buildClick()
   if S.run then return end
   if not S.plan and not S.text then setStatus("import first"); return end
   readStationBuild()
+  local ui = readRestoreBox()
   local okRun, err = pcall(function()
     local live = Live.snapshot(S.U, F)
     local plan, perr = Plan.plan(S.text, live, F)
@@ -287,7 +356,7 @@ local function buildClick()
       S.io = Live.make_io({ unit = S.U, player = S.player, ctl = S.ctl, F = F, native = native, plan_mod = Plan, buildables = live.buildables })
       S.builder = Build.new(S.io)
     end
-    local started, msg = S.builder:start(plan)
+    local started, msg = S.builder:start(plan, { restore = ui })
     if not started then setStatus(msg); return end
     local run = {}
     S.run = run
@@ -379,14 +448,46 @@ function M.close()
   S.h, S.w, S.p, S.U, S.player, S.ctl = nil, nil, nil, nil, nil, nil
   S.builder, S.io, S.run, S.tc, S.imp = nil, nil, nil, nil, false   -- S.plan / S.text stay (Build re-plans from S.text)
   MSCore.wbp.close(h)
-  Invtrace.close()
   pcall(ExecuteWithDelay, 100, function() pcall(ExecuteInGameThread, MSCore.ui.clearClicks) end)
 end
 
--- F: closes the window, except while the import modal is open (typing) or an edit box has focus
+-- F: closes the window, except while the import modal is open or our own edit box has focus. Traces every press.
 function M.fKey()
-  if M.impOpen() then return end
-  if M.isOpen() and os.clock() - S.t0 > 0.5 and not typing() then M.close() end
+  local why, note = fReason(M.impOpen(), M.isOpen(), os.clock() - S.t0, focusedBox)
+  if why then Live.trace("F ignored: " .. why); return end
+  Live.trace("F closes window" .. (note and (" (" .. note .. ")") or ""))
+  M.close()
+end
+
+-- Pin (Btn_CostPin): sends the game's SetPinnedCostInput with the net-need stacks (net > 0, amount = net). Pressed again = empty array = unpin.
+-- The game HUD shows the list (amounts only, no live refresh). The label follows our last click only.
+local function pinClick()
+  local stacks = {}
+  if not KEPT.pinned then
+    for _, r in ipairs(KEPT.rows) do if r.net > 0 then stacks[#stacks + 1] = { name = r.name, n = r.net } end end
+    if #stacks == 0 then setStatus("nothing to pin"); return end
+  end
+  local okp, r = Live.send_pin(S.ctl, S.player, stacks)
+  L(("pin %s n=%d -> ok=%s ret=%s"):format(KEPT.pinned and "clear" or "set", #stacks, tostring(okp), tostring(r)))
+  if okp then
+    KEPT.pinned = not KEPT.pinned
+    txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
+  else
+    setStatus("pin failed (see log)")
+  end
+end
+
+-- Btn_Build while a run is going: Abort. Cancels the builder (items already moved stay where they are, as on close).
+local function abortClick()
+  local run = S.run
+  if not run or not S.builder then return end
+  local okc, msg = pcall(function() return S.builder:cancel() end)
+  L("abort: " .. tostring(okc) .. " " .. tostring(msg))
+  setStatus(S.builder:status().text)
+  finishBuild(run)
+end
+local function buildOrAbort()
+  if S.run then abortClick() else buildClick() end
 end
 
 local function openWindow(block, player, ctl)
@@ -415,10 +516,11 @@ local function openWindow(block, player, ctl)
   end
   bind("Btn_Close", M.close)
   bind("Btn_Import", impOpenModal)
-  bind("Btn_Build", buildClick)
+  bind("Btn_Build", buildOrAbort)
   bind("Btn_ImportClose", M.impClose)
   bind("Btn_ImportCancel", impCancel)
   bind("Btn_ImportOk", impOk)
+  bind("Btn_CostPin", pinClick)
 
   setVis(w("Pnl_ImportModal"), false)
   showText("Txt_Status", "")    -- collapsed: the text lives in the Notes panel
@@ -431,8 +533,9 @@ local function openWindow(block, player, ctl)
     resetResults()
   end
   readStationBuild()
-  L("open unit=" .. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
-  Invtrace.open()
+  setBuildBtns(true)
+  txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
+  L("open unit=".. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
 end
 
 -- block = BPO_BlueprintUnit_C only (main.lua opener filter). player = DMSPlayerObject. ctl = controller or nil. Game thread.
@@ -443,6 +546,14 @@ function M.open(block, player, ctl)
     openWindow(block, player, ctl)
   end)
   if not okO then L("open failed: " .. tostring(err)) end
+end
+
+-- pure helpers for the tests (no game objects)
+M.pure = { hiddenNote = hiddenNote, fReason = fReason, checkedOf = checkedOf }
+-- label and enabled state of the build buttons while a run goes (running = true)
+function M.btnState(running)
+  if running then return { build = "Abort", build_on = true, import_on = false } end
+  return { build = "Build", build_on = true, import_on = true }
 end
 
 function M.init(mscore)

@@ -40,7 +40,7 @@ Leftover items stay with the player.
 
 ## Hidden container
 
-The unit has a hidden container machine with 120 slots and a +10,000% stack size. It holds the refunds and the staged items.
+The unit has a hidden container machine with 120 slots and a +1,000,000% stack size. It holds the refunds and the staged items.
 
 ## Registration and window
 

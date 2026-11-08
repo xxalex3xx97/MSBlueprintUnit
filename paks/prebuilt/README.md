@@ -1,14 +1,14 @@
-# Prebuilt paks (DEV BUILD)
+# Prebuilt paks
 
-Shipped-style test paks for Blueprint Unit. Built from `paks/src/` and `ue/`.
+Shipped paks for Blueprint Unit. Built from `paks/src/` and `ue/`.
 
 - `pakchunk97-BPUnitMesh_P` : hidden collision-free machine mesh (SM2_BPUnitHidden00) + table/holo meshes.
-- `pakchunk100-BlueprintUnit_P` : BPO_BlueprintUnit, BP_BlueprintUnit, STB_BPUnitPromp, Machines/BP_BPUnitStoreObj_01, Machines/BP_BPUnitSto_2 (container at block centre, clone_0_0 variant), plus DAT_BuildingBlockRegistry and RSC_ComputationScience.
-- `pakchunk102-BPUnitUI_P` : /Game/BlueprintUnitUI window (WBP_BlueprintUnit), built headless from `ue/scripts`.
+- `pakchunk100-BlueprintUnit_P` : BPO_BlueprintUnit, BP_BlueprintUnit, STB_BPUnitPromp, Machines/BP_BPUnitStoreObj_01, Machines/BP_BPUnitSto_2 (container at block centre, clone_0_0 variant), plus DAT_BuildingBlockRegistry and RSC_ComputationScience. Blueprint Unit inventory: 120 slots, +1,000,000% stack size.
+- `pakchunk102-BPUnitUI_P` : /Game/BlueprintUnitUI window (WBP_BlueprintUnit), built headless from `ue/scripts`. Has the **Enable container item restoration** checkbox (checked by default).
 
-## Caveat
+## Notes
 
-pak100 still contains `DAT_BuildingBlockRegistry` and `RSC_ComputationScience`. These will be dropped when MSCore.blocks takes over; a later task rebuilds pak100 without the registry. Until then these dev paks are for testing only: the standalone release must NOT ship a registry override.
+pak100 contains `DAT_BuildingBlockRegistry` and `RSC_ComputationScience` and ships as is in the release.
 
 ## Integrity
 

@@ -12,9 +12,14 @@
 -- room to come back. A stall ends the run with a note. After the last command the run is done.
 -- Waits only where a later command needs an earlier one applied: staged items before the BuildInputs that charge them,
 -- a removal before a placement on the same cell, the charge before the next chunk (frees player space).
--- Restore (both flows, after the last placement): containers with plan.restore get their items from the unit by the exact-N
--- cursor recipe (drop cursor 4, TAKE 0, k x PLACE_SINGLE 1, surplus TAKE 0). Short items are skipped with a note; a Build never
--- fails because of contents. Each cycle is traced in bpu_trace.log ("restore cursor: ...").
+-- Restore (both flows, after the last placement): containers with plan.restore get their items from the unit inventory.
+-- Split route (io.split present, MSCore 0.7.6): the unit is sorted first (SORT, action 5, then settle), then each piece is
+-- exact: a whole unit slot is one TRANSFER (action 2); a part of a slot is io.split into a free unit slot, then one TRANSFER.
+-- Rounded route (no io.split, older MSCore): whole-stack TRANSFERs (action 2) only, rounded to the nearest stack
+-- (see the restore section); no SORT. Commands go out FIFO, RESTORE_CMD_PER_TICK per tick, no waits between them;
+-- then one verify with a progress stall check (STALL_MS). Restore is on unless
+-- Mods/BlueprintUnit/restore_off.txt exists or the Chk_Restore checkbox is unchecked (io.restore_mode, opts.restore).
+-- Shortages and full containers are noted; a Build never fails because of contents. Steps are traced in bpu_trace.log.
 
 local B = {}
 
@@ -26,11 +31,17 @@ local DRAIN_MS = 2000        -- refund moved to the unit must leave the player w
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
 local POLL_MS = 250
 local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
+local RESTORE_CMD_PER_TICK = 1000 -- restore pipeline: TRANSFER commands sent per tick (FIFO, no waits between them)
+local PIPE_POLL_MS = 2000    -- restore pipeline: verify poll (unit read + unconfirmed containers only), not every 250 ms
+local RETRY_MAX = 5          -- restore: a refused send is retried on the next tick this many times, then the restore stops
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
-local CONT_MS = 60000        -- restore: new container ids must show within this after the last placement
-local CYCLE_MS = 2000        -- restore: one exact-N cycle must show its items in the container within this
+local CONT_MS = 60000        -- restore: new container ids and ready containers must show within this after the last placement
+local STALL_MS = 8000       -- restore: no change in the restored items for this long after the last send -> STALL (never a fixed wait)
+local CONT_READY_POLLS = 2   -- restore: container contents readable on this many polls in a row before the first step
 local RESTORE_MS = 300000    -- restore: whole restore phase cap
+local SORT_SETTLE_MS = 1500  -- split route: unit inventory unchanged for this long after the SORT -> settled
+local SORT_MS = 15000        -- split route: SORT wait cap (still changing after this -> go on)
 
 local function get(m, k) return m[k] or 0 end
 
@@ -42,10 +53,15 @@ local function sorted_keys(m)
 end
 
 -- slot = { item = "ITEM_X" | "", amount = n, max = stack size }. Empty slot: item "".
+-- nil amount counts as 0; the first one per run is traced (nil_hook, set by B.new) with the caller, so the source shows.
+local nil_hook = nil
 local function totals(slots)
     local t = {}
-    for _, s in ipairs(slots) do
-        if s.item ~= "" and s.amount > 0 then t[s.item] = get(t, s.item) + s.amount end
+    for i, s in ipairs(slots) do
+        local item, amount = s.item or "", s.amount
+        if amount == nil and item ~= "" and nil_hook then nil_hook(i, item) end
+        amount = amount or 0
+        if item ~= "" and amount > 0 then t[item] = get(t, item) + amount end
     end
     return t
 end
@@ -61,7 +77,7 @@ local function maxes(a, b)
     return m
 end
 
--- Effective MaxStackSize per item in one inventory (inv = normalized slots): io.item_max (raw) * StackMultiplier/2.
+-- Effective MaxStackSize per item in one inventory (inv = normalized slots): io.item_max (raw) * StackMultiplier.
 -- Without io.item_max (plain fakes): the largest slot max over both inventories.
 local function capmap(io, inv, other)
     if io.item_max then
@@ -178,6 +194,77 @@ local function any_refund(refund)
     return false
 end
 
+-- progress text (status line): "[#####-----] 50%" (10 cells); commas: "1,234"
+local function pct_of(done, total) return total > 0 and math.floor(done * 100 / total + 0.5) or 100 end
+local function commas(n)
+    local s = tostring(math.floor(n))
+    local r = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    return (r:gsub("^,", ""))
+end
+local function bar(done, total)
+    local pct = pct_of(done, total)
+    local n = math.floor(pct / 10 + 0.5)
+    return ("[%s%s] %d%%"):format(("#"):rep(n), ("-"):rep(10 - n), pct)
+end
+-- "restoring [#####-----] 50%  (1,234 of 2,468 commands)<tail>"
+local function progress(done, total, tail)
+    return ("restoring %s  (%s of %s commands)%s"):format(bar(done, total), commas(done), commas(total), tail or "")
+end
+
+-- restore model (pipeline): where n items of item go into slots: same-item stacks below cap first, then empty slots.
+-- groups = { {slot=, n=} } in fill order, left = items that do not fit. Does not change slots.
+local function sim_put(slots, item, n, cap)
+    local groups = {}
+    for i, s in ipairs(slots) do
+        if n <= 0 then break end
+        if s.item == item and s.amount > 0 and s.amount < cap then
+            local k = math.min(cap - s.amount, n)
+            groups[#groups + 1] = { slot = i, n = k }
+            n = n - k
+        end
+    end
+    for i, s in ipairs(slots) do
+        if n <= 0 then break end
+        if s.amount <= 0 then
+            local k = math.min(cap, n)
+            groups[#groups + 1] = { slot = i, n = k }
+            n = n - k
+        end
+    end
+    return groups, n
+end
+
+-- free room for one more item (cap per slot): below-cap stacks of the item, then empty slots
+local function room_of(slots, item, cap)
+    local r = 0
+    for _, s in ipairs(slots) do
+        if s.amount <= 0 then r = r + cap
+        elseif s.item == item and s.amount < cap then r = r + cap - s.amount end
+    end
+    return r
+end
+
+-- applies sim_put groups to the model slots
+local function sim_apply(slots, item, groups)
+    for _, g in ipairs(groups) do
+        local s = slots[g.slot]
+        s.item, s.amount = item, s.amount + g.n
+    end
+end
+
+-- true when both item maps (item -> amount) are equal
+local function same_totals(a, b)
+    for k, v in pairs(a) do if get(b, k) ~= v then return false end end
+    for k, v in pairs(b) do if get(a, k) ~= v then return false end end
+    return true
+end
+
+local function copy_slots(inv)
+    local o = { mult = inv.mult }
+    for i, s in ipairs(inv) do o[i] = { item = s.item, amount = s.amount, max = s.max } end
+    return o
+end
+
 -- true when every refund item (refund > 0) rose by its amount since `before`. No refund items -> false.
 local function refund_arrived(refund, held, before)
     local any = false
@@ -249,7 +336,8 @@ local function new_run(plan)
     return {
         plan = plan, active = false, state = "idle", text = "", stage = 0, flow = "legacy",
         cids_before = {}, cplaced = {}, base = "",   -- restore: container ids before the Build, placed containers in order, text of the Build part
-        rjobs = {}, rj = 1, ri = 1, rem = nil, rnotes = {}, rseen = {}, rcount = 0, rcont = 0, restore_on = false, t_restore = 0, cyc = nil,
+        rjobs = {}, jobs_set = false, cready = 0, rnotes = {}, rseen = {}, rcount = 0, rcont = 0,
+        restore_on = false, t_restore = 0, ui_restore = nil, t_progress = 0, pipe_sig = nil,
         queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
@@ -269,7 +357,11 @@ end
 --   io.read_inv('player'|'unit') -> { slots = { {item=,amount=,max=} | {item=""} }, id=, ok= }
 --   io.unit_ids() -> { unit_id=, player_id= }     io.creative() -> bool     io.costs(place) -> { cost map per machine }
 --   io.send_remove(id) | io.send_move(prim_id, sec_id, slot0, action) | io.send_place(machine) | io.send_changes(chg)
---   restore only: io.send_inv(prim, sec, slot0, action) (one raw command: 0 TAKE, 1 PLACE_SINGLE, 4 DROP_CURSOR) | io.container_ids() -> ids
+--   restore only: io.send_inv(prim, sec, slot0, action) (one raw command: TRANSFER 2; SORT 5 on the unit, split route only)
+--   | io.container_ids() -> ids
+--   restore split route (optional, MSCore 0.7.6): io.split(inv, src0, amount, dst0) -> ok, err. Local edit of one inventory,
+--   not a game command. Present = split route (stage 13 SORT, then exact pieces); absent = rounded whole-stack route.
+--   io.restore_mode() -> "on" | "off" (optional; absent = "on"). builder:start(plan, { restore = true|false|nil }): the checkbox
 --   io.remember(cell_key, list {name,count}) (optional, session memory of removed containers) | io.read_machine_inv(id) (contents)
 --   io.now() -> ms
 --   io.note_build(placed, removed) optional: run end with machines placed (plan entries) / removed (live ids)
@@ -283,6 +375,14 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
+    local nil_traced = false
+    nil_hook = function(i, item)   -- totals() saw a nil amount: once per run, with the caller (level 3 = caller of totals)
+        if nil_traced then return end
+        nil_traced = true
+        local info = debug.getinfo(3, "Sl")
+        trace(("totals: nil amount at slot %d item %s, caller %s:%s"):format(i, item,
+            info and info.short_src or "?", info and tostring(info.currentline) or "?"))
+    end
     -- any end (done, error, cancel) with placed or removed machines: io.note_build keeps them as a live overlay
     local function mark_changed()
         if #R.placed_list + #R.removed_list > 0 and io.note_build then io.note_build(R.placed_list, R.removed_list) end
@@ -303,7 +403,7 @@ function B.new(io)
 
     -- inventory slots normalized: item "" when empty, amount/max always numbers
     local function norm(inv)
-        local slots = { mult = inv.mult or 1 }   -- StackMultiplier / 2 of this inventory (capmap)
+        local slots = { mult = inv.mult or 1 }   -- StackMultiplier of this inventory (capmap)
         for i, s in ipairs(inv.slots or {}) do
             slots[i] = { item = s.item or "", amount = s.amount or 0, max = (s.max and s.max > 0) and s.max or 1 }
         end
@@ -356,7 +456,7 @@ function B.new(io)
     local function restore_suffix()
         if not R.restore_on then return "" end
         local parts = {}
-        if R.rcount > 0 then parts[#parts + 1] = ("restored %d items into %d container(s)"):format(R.rcount, R.rcont) end
+        if R.rcount > 0 then parts[#parts + 1] = ("restored %s items into %s container(s)"):format(R.rcount, R.rcont) end
         for _, n in ipairs(R.rnotes) do parts[#parts + 1] = n end
         if #parts == 0 then return "" end
         return "; restore: " .. table.concat(parts, "; ")
@@ -398,12 +498,13 @@ function B.new(io)
             end
         end
         if want == 0 then return end_run(base) end
-        if io.restore_enabled and not io.restore_enabled() then
-            R.restore_on = true
-            R.rnotes[#R.rnotes + 1] = "container contents stay in the unit (restore is off: create Mods/BlueprintUnit/restore_on.txt to test it)"
+        local mode = io.restore_mode and io.restore_mode() or "on"
+        if R.ui_restore == false and mode == "on" then mode = "off" end   -- Chk_Restore unchecked
+        R.restore_on = true
+        if mode == "off" then
+            R.rnotes[#R.rnotes + 1] = R.ui_restore == false and "restore is off (Chk_Restore unchecked)" or "restore is off (restore_off.txt in Mods/BlueprintUnit)"
             return end_run(base)
         end
-        R.restore_on = true
         R.stage = 12
         R.t_stage = now
         R.t_next = now + POLL_MS
@@ -601,7 +702,7 @@ function B.new(io)
             if get(held, item) > 0 then
                 if now - R.t_stage >= DRAIN_MS then
                     for _, k in ipairs(sorted_keys(R.drain)) do trace(("drain stall: held[%s]=%d"):format(k, get(held, k))) end
-                    return stall("the game did not apply the move (see bpu_trace.log: ourcmd recv must equal uicmd recv)")
+                    return stall("the game did not apply the move (see bpu_trace.log)")
                 end
                 R.t_next = now + POLL_MS
                 return
@@ -665,7 +766,7 @@ function B.new(io)
                 if (s.item or "") ~= "" and (s.amount or 0) > 0 then n_now = n_now + 1 end
             end
             if n_now == e.slots then
-                return stall("the game did not move the container items (see bpu_trace.log: ourcmd recv must equal uicmd recv)")
+                return stall("the game did not move the container items (see bpu_trace.log)")
             end
             return stall("the unit inventory is full, empty it and Build again")
         end
@@ -770,151 +871,498 @@ function B.new(io)
             R.chunks, R.chunks_done = 1, 1
             return after_place(now, ("sent: placed %d, removed %d (refund goes into the unit; the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed))
         end
-        set_status("working", ("sending commands: %d of %d"):format(R.qpos - 1, #q))
+        set_status("working", ("sending commands: %d of %d (%d%%)"):format(R.qpos - 1, #q, pct_of(R.qpos - 1, #q)))
         R.stage = 11
         R.t_next = now   -- next slice on the next tick, no waiting
     end
 
     -- ===== restore container contents (after the last placement, both flows) =====
+    -- TRANSFER only (action 2): Primary = unit inventory, Secondary = container INVENTORY id, SlotIndex = unit slot.
+    -- No cursor, no TAKE (0), no PLACE_SINGLE (1), no put-back: the game never holds an item during the restore.
+    -- Split route (io.split present): stage 13 sorts the unit (SORT, action 5: the only non-TRANSFER command, see
+    -- io.send_inv) and waits until it settles. Stage 15 plans exact pieces: a whole unit slot is one TRANSFER; a part of
+    -- a slot is io.split into a free unit slot (local edit, not a game command), then one TRANSFER of that slot.
+    -- Rounded route (no io.split, older MSCore): the rounding below.
+    -- Rounding per container item (need = count, unit slots in slot order, a = slot amount): a slot is moved when
+    -- 2*need >= a (the whole stack goes in, rounds up), skipped when 2*need < a (rounds down; the next slot is looked at).
+    -- A move is capped by the container room: moved = min(a, room). A partial move leaves the rest in the unit.
+    -- The item stops at need <= 0, when the container has no room, or when no unit slot is left. Nothing is dropped
+    -- silently: every shortage has a note.
+    -- Stage 12: new container ids (not in cids_before, ascending) are matched to the placed containers in placement order.
+    -- Probe: only the first item of the first container with contents, at most 5 (same rounding).
+    -- Stage 15: the plan is built from one fresh read and sent FIFO, RESTORE_CMD_PER_TICK per tick, no waits between commands.
+    -- Stage 16: verify (restored items only). No change for STALL_MS after the last send -> STALL note, nothing more sent.
+    -- Hard cap: RESTORE_MS from the start of the restore phase.
+
     -- stage 12: new container ids (not in cids_before, ascending) are matched to the placed containers in placement order.
     local function cont_wait(now)
-        local ids = io.container_ids and io.container_ids() or {}
-        local new = {}
-        for _, id in ipairs(ids) do if not R.cids_before[id] then new[#new + 1] = id end end
-        table.sort(new)
-        if #new == #R.cplaced then
-            trace("restore: new container ids " .. (#new > 0 and table.concat(new, ",") or "none") .. " for the placed containers in order")
-            for i, pl in ipairs(R.cplaced) do
-                if pl.restore and #pl.restore > 0 then R.rjobs[#R.rjobs + 1] = { id = new[i], items = pl.restore } end
+        if not R.jobs_set then
+            local ids = io.container_ids and io.container_ids() or {}
+            local new = {}
+            for _, id in ipairs(ids) do if not R.cids_before[id] then new[#new + 1] = id end end
+            table.sort(new)
+            if #new ~= #R.cplaced then
+                R.cready = 0
+                if now - R.t_stage >= CONT_MS then
+                    R.rnotes[#R.rnotes + 1] = ("restore stalled: container ids not found (new %s, placed %s)"):format(#new, #R.cplaced)
+                    return end_run(R.base)
+                end
+                R.t_next = now + POLL_MS
+                return
             end
-            R.rj, R.ri, R.rem = 1, 1, nil
+            trace("restore: new container ids " .. (#new > 0 and table.concat(new, ",") or "none") .. " for the placed containers in order")
+            local jobs = {}
+            for i, pl in ipairs(R.cplaced) do
+                if pl.restore and #pl.restore > 0 then jobs[#jobs + 1] = { id = new[i], items = pl.restore } end
+            end
+            R.rjobs, R.jobs_set = jobs, true
+        end
+        local ready = true
+        for _, job in ipairs(R.rjobs) do
+            local inv = io.read_machine_inv and io.read_machine_inv(job.id)
+            if not (inv and inv.ok and #(inv.slots or {}) > 0) then ready = false end
+        end
+        R.cready = ready and R.cready + 1 or 0
+        if R.cready >= CONT_READY_POLLS then
             R.t_restore = now
-            R.stage = 13
+            if io.split then
+                R.stage, R.t_stage = 13, now   -- split route: sort the unit first
+                R.t_next = now
+                set_status("working", "sorting the unit inventory")
+                return
+            end
+            R.stage = 15   -- plan + send
             R.t_next = now
             set_status("working", "restoring container contents")
             return
         end
         if now - R.t_stage >= CONT_MS then
-            R.rnotes[#R.rnotes + 1] = ("restore stalled: container ids not found (new %d, placed %d)"):format(#new, #R.cplaced)
+            R.rnotes[#R.rnotes + 1] = ("restore stalled: container ids not found (new %s, placed %s)"):format(#R.rjobs, #R.cplaced)
             return end_run(R.base)
         end
         R.t_next = now + POLL_MS
     end
 
-    local function next_item() R.ri = R.ri + 1; R.rem = nil end
-    local function next_job() R.rj = R.rj + 1; R.ri = 1; R.rem = nil end
-
-    -- stage 13: one exact-N cycle per call. Unit short of an item (at the start of that item) -> skipped with a note.
-    -- Cycle: DROP_CURSOR (4), TAKE unit slot (0), k x PLACE_SINGLE container slot (1), surplus TAKE back to the unit slot (0).
-    -- No action 3 (release) anywhere. Stage 14 checks the container.
-    local function restore_next(now)
-        if now - R.t_restore > RESTORE_MS then
-            R.rnotes[#R.rnotes + 1] = "restore stalled: timeout after 300 s"
-            return end_run(R.base)
+    local function slots_text(slots)
+        local parts = {}
+        for _, s in ipairs(slots) do
+            local item, amount = s.item or "", s.amount or 0
+            parts[#parts + 1] = (item ~= "" and amount > 0) and (shortname(item) .. ":" .. amount) or "-"
         end
-        local job = R.rjobs[R.rj]
-        if not job then return end_run(R.base) end
-        local it = job.items[R.ri]
-        if not it then next_job(); R.t_next = now; return end
+        return table.concat(parts, " ")
+    end
+    local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
+    -- end of the restore phase
+    local function restore_end()
+        -- unit stacks at the end (read only: a failed read is not an error here)
+        if io.read_inv then
+            local ps2, us2 = read_both()
+            if ps2 then trace("restore unit stacks (end): " .. slots_text(us2)) end
+        end
+        if (R.skipped or 0) > 0 then rs_note(("%s command(s) skipped (refused)"):format(R.skipped)) end
+        end_run(R.base)
+    end
+    -- rcount / rcont (containers that got items, by container id)
+    local function delivered(n, id)
+        R.rcount = R.rcount + n
+        if n > 0 and not R.rseen[id] then R.rseen[id] = true; R.rcont = R.rcont + 1 end
+    end
+    -- stage 13 (split route): SORT the unit inventory (action 5, primary = unit, secondary 0, slot 0), then wait until the
+    -- unit shows no change for SORT_SETTLE_MS (cap SORT_MS from the stage start). A refused SORT is retried, then the restore goes on.
+    local function unit_sig(us)
+        local parts = {}
+        for i, s in ipairs(us) do parts[i] = s.item .. ":" .. s.amount end
+        return table.concat(parts, ",")
+    end
+    local function sort_go(now)
+        R.stage, R.t_next = 15, now
+        set_status("working", "restoring container contents")
+    end
+    local function sort_wait(now)
+        if now - R.t_restore > RESTORE_MS then
+            rs_note("restore stalled: timeout after 300 s")
+            return restore_end()
+        end
+        if not R.sort_sent then
+            local ok, err = io.send_inv(R.unit_inv, 0, 0, 5)
+            if not ok then
+                R.fails = (R.fails or 0) + 1
+                trace(("restore sort: SORT refused (attempt %s, error: %s)"):format(R.fails, tostring(err)))
+                if R.fails <= RETRY_MAX then R.t_next = now; return end
+                R.fails = 0
+                rs_note("unit not sorted (SORT refused)")
+                return sort_go(now)
+            end
+            R.fails, R.sort_sent, R.sort_sig, R.sort_t = 0, true, nil, now
+            trace("restore sort: SORT sent (action 5, primary=unit inventory)")
+            R.t_next = now + POLL_MS
+            return
+        end
         local ps, us, err = read_both()
         if not ps then return fail(err) end
-        local have = get(totals(us), it.name)
-        if R.rem == nil then
-            if have < it.count then
-                R.rnotes[#R.rnotes + 1] = ("%s x%d not restored (unit has %d)"):format(shortname(it.name), it.count, have)
-                next_item(); R.t_next = now; return
-            end
-            R.rem = it.count
+        local sig = unit_sig(us)
+        if sig ~= R.sort_sig then R.sort_sig, R.sort_t = sig, now end
+        if now - R.sort_t >= SORT_SETTLE_MS then
+            trace("restore sort: unit settled")
+            return sort_go(now)
         end
-        if R.rem <= 0 then next_item(); R.t_next = now; return end
-        local map, _, cinv = contents_of(job)
-        if not map then
-            R.rnotes[#R.rnotes + 1] = ("container id %s cannot be read"):format(tostring(job.id))
-            next_job(); R.t_next = now; return
+        if now - R.t_stage >= SORT_MS then
+            trace("restore sort: cap reached, still changing, going on")
+            return sort_go(now)
         end
-        local cn = norm(cinv)
-        local cmax = capmap(io, cn, us)
-        local dest
-        for i, s in ipairs(cn) do
-            if s.item == it.name and s.amount > 0 and s.amount < cmax[it.name] then dest = i break end
-        end
-        if not dest then
-            for i, s in ipairs(cn) do if s.amount <= 0 then dest = i break end end
-        end
-        if not dest then
-            R.rnotes[#R.rnotes + 1] = ("container id %s full"):format(tostring(job.id))
-            next_job(); R.t_next = now; return
-        end
-        local room = cmax[it.name] - ((cn[dest].item == it.name) and cn[dest].amount or 0)
-        local src
-        for i, s in ipairs(us) do if s.item == it.name and s.amount > 0 then src = i break end end
-        if not src then
-            R.rnotes[#R.rnotes + 1] = ("%s x%d not restored (unit has %d)"):format(shortname(it.name), it.count, have)
-            next_item(); R.t_next = now; return
-        end
-        local expect = math.min(us[src].amount, capmap(io, us, cn)[it.name])
-        local k = math.min(R.rem, expect, room)
-        if k <= 0 then
-            R.rnotes[#R.rnotes + 1] = ("restore stalled: no room in container id %s"):format(tostring(job.id))
-            return end_run(R.base)
-        end
-        local dropped = io.send_inv(R.player_inv, 0, 0, 4)
-        trace(("restore cursor: drop cursor (action 4) sent=%s"):format(tostring(dropped)))
-        local taken = io.send_inv(R.unit_inv, 0, src - 1, 0)
-        trace(("restore cursor: take unit slot0=%d item=%s expect=%d sent=%s"):format(src - 1, it.name, expect, tostring(taken)))
-        if not taken then
-            R.rnotes[#R.rnotes + 1] = "restore stalled: take refused"
-            return end_run(R.base)
-        end
-        local placed = 0
-        for _ = 1, k do if io.send_inv(job.id, 0, dest - 1, 1) then placed = placed + 1 end end
-        trace(("restore cursor: k=%d place_single into container id=%s slot0=%d sent=%d"):format(k, tostring(job.id), dest - 1, placed))
-        local surplus = expect - k
-        if surplus > 0 then
-            local back = io.send_inv(R.unit_inv, 0, src - 1, 0)
-            trace(("restore cursor: surplus=%d put back to unit slot0=%d sent=%s"):format(surplus, src - 1, tostring(back)))
-        end
-        R.cyc = { before = get(map, it.name), k = placed }
-        R.stage = 14
-        R.t_stage = now
         R.t_next = now + POLL_MS
     end
 
-    -- stage 14: the container must show the cycle's items (CYCLE_MS). None -> restore stalled, stop. Short -> full (or cursor short), next container.
-    local function restore_verify(now)
-        local job = R.rjobs[R.rj]
-        local it = job and job.items[R.ri]
-        if not it then return end_run(R.base) end
-        local map = contents_of(job)
-        if not map then
-            R.rnotes[#R.rnotes + 1] = ("container id %s cannot be read"):format(tostring(job.id))
-            next_job(); R.stage = 13; R.t_next = now; return
+    -- split route: lowest-index empty unit slot not already used as staging in this plan (ponytail: ceiling = free unit slots, no reuse)
+    local function empty_dst(um, used)
+        for i, s in ipairs(um) do
+            if s.amount <= 0 and not used[i] then return i end
         end
-        local delta = get(map, it.name) - R.cyc.before
-        if delta < R.cyc.k and now - R.t_stage < CYCLE_MS then R.t_next = now + POLL_MS; return end
-        trace(("restore cursor: container id=%s delta=%d (sent %d)"):format(tostring(job.id), delta, R.cyc.k))
-        if delta <= 0 then
-            R.rnotes[#R.rnotes + 1] = ("restore stalled: container id %s took no items"):format(tostring(job.id))
-            return end_run(R.base)
+        return nil
+    end
+
+    -- stage 15 plan, split route (same shape as pipe_build). Per container item: need = count (the unit total caps it).
+    -- Unit slots in slot order: take = min(slot amount, need, container room). take == slot -> one TRANSFER of that slot.
+    -- take < slot -> split { src0, take, dst0 } into a free empty unit slot, then one TRANSFER of dst0 (pair links them).
+    local function pipe_build_split(us)
+        local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, split = true, full = {} }
+        local um = pm.unit
+        local used, npair = {}, 0
+        for _, job in ipairs(R.rjobs) do
+            local map, _, cinv = contents_of(job)
+            local cid = cinv and cinv.id
+            if not map then
+                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+            elseif cid == nil or cid == job.id or cid == R.unit_inv or cid == R.player_inv then
+                -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
+                rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
+            else
+                local cn = norm(cinv)
+                local cmax = capmap(io, cn, um)
+                local jm = { id = job.id, slots = cn, short = {}, moved = 0 }
+                pm.jobs[#pm.jobs + 1] = jm
+                for _, it in ipairs(job.items) do
+                    local need = it.count
+                    local have = get(totals(um), it.name)
+                    if have < need then
+                        rs_note(("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have), commas(it.count), shortname(it.name), commas(it.count - have)))
+                        jm.short[#jm.short + 1] = { name = it.name, count = need - have }
+                        need = have
+                    end
+                    pm.touched[it.name] = true
+                    local cap, moved_item, nsplit, why = cmax[it.name], 0, 0, nil
+                    for i, s in ipairs(um) do
+                        if need <= 0 or why then break end
+                        if s.item == it.name and s.amount > 0 then
+                            local room = room_of(cn, it.name, cap)
+                            if room <= 0 then break end
+                            local take = math.min(s.amount, need, room)
+                            local dst = i
+                            if take < s.amount then
+                                dst = empty_dst(um, used)
+                                if not dst then why = "noslot"; break end
+                                used[dst] = true
+                                npair, nsplit = npair + 1, nsplit + 1
+                                pq[#pq + 1] = { kind = "split", src = i - 1, amount = take, dst = dst - 1, pair = npair,
+                                    job = job.id, item = it.name, moved = take }
+                            end
+                            pq[#pq + 1] = { kind = "transfer", prim = R.unit_inv, sec = cid, slot0 = dst - 1, action = 2,
+                                pair = (dst ~= i) and npair or nil, job = job.id, item = it.name, moved = take }
+                            -- the TRANSFER empties dst only when the game ticks, but io.split acts at once: a slot a queued
+                            -- TRANSFER touches is never a split destination in this pass (else "split into a non-empty slot")
+                            used[dst] = true
+                            sim_apply(cn, it.name, sim_put(cn, it.name, take, cap))
+                            s.amount = s.amount - take   -- the staged part left the slot (split), or the whole slot went (TRANSFER)
+                            if s.amount <= 0 then s.item, s.amount = "", 0 end
+                            need, moved_item = need - take, moved_item + take
+                        end
+                    end
+                    jm.moved = jm.moved + moved_item
+                    if need > 0 then
+                        if why == "noslot" then
+                            rs_note(("%s x%s not restored (no free unit slot)"):format(shortname(it.name), need))
+                        elseif room_of(cn, it.name, cap) <= 0 then
+                            pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = need }
+                        end
+                    end
+                    trace(("restore plan (split): container id=%s item=%s count=%s splits=%s moved=%s short=%s"):format(
+                        tostring(job.id), it.name, tostring(it.count), tostring(nsplit), tostring(moved_item), tostring(math.max(need, 0))))
+                end
+            end
         end
-        if not R.rseen[R.rj] then R.rseen[R.rj] = true; R.rcont = R.rcont + 1 end
-        R.rcount = R.rcount + delta
-        R.rem = R.rem - delta
-        R.stage = 13
-        R.t_next = now
-        if delta < R.cyc.k then
-            R.rnotes[#R.rnotes + 1] = ("container id %s full or cursor short (took %d of %d)"):format(tostring(job.id), delta, R.cyc.k)
-            next_job()
+        return pq, pm
+    end
+
+    -- stage 15 plan: TRANSFER commands from one fresh read (models of the unit and of each container). Nothing is sent here.
+    -- pm = { unit = model slots, touched = { item = true }, jobs = { {id, slots = model, short = {}, moved = n} } }
+    local function pipe_build(us)
+        if io.split then return pipe_build_split(us) end
+        local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, full = {} }
+        local um = pm.unit
+        local function add(prim, sec, slot0, job_id, item, moved)
+            pq[#pq + 1] = { kind = "transfer", prim = prim, sec = sec, slot0 = slot0, action = 2, job = job_id, item = item, moved = moved }
         end
+        for _, job in ipairs(R.rjobs) do
+            local map, _, cinv = contents_of(job)
+            local cid = cinv and cinv.id
+            if not map then
+                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+            elseif cid == nil or cid == job.id or cid == R.unit_inv or cid == R.player_inv then
+                -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
+                rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
+            else
+                local cn = norm(cinv)
+                local cmax = capmap(io, cn, um)
+                local jm = { id = job.id, slots = cn, short = {}, moved = 0 }
+                pm.jobs[#pm.jobs + 1] = jm
+                for _, it in ipairs(job.items) do
+                    local have = get(totals(um), it.name)
+                    if have < it.count then
+                        rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), it.count, have))
+                    else
+                        pm.touched[it.name] = true
+                        local cap, need, nmoves, moved_item = cmax[it.name], it.count, 0, 0
+                        for i, s in ipairs(um) do
+                            if need <= 0 then break end
+                            if s.item == it.name and s.amount > 0 and 2 * need >= s.amount then
+                                local room = room_of(cn, it.name, cap)
+                                if room <= 0 then break end
+                                local moved = math.min(s.amount, room)
+                                add(R.unit_inv, cid, i - 1, job.id, it.name, moved)
+                                local groups = sim_put(cn, it.name, moved, cap)
+                                sim_apply(cn, it.name, groups)
+                                s.amount = s.amount - moved
+                                if s.amount <= 0 then s.item, s.amount = "", 0 end
+                                need, nmoves, moved_item = need - moved, nmoves + 1, moved_item + moved
+                            end
+                        end
+                        if need > 0 then
+                            jm.short[#jm.short + 1] = { name = it.name, count = need }
+                            local left_slot = false
+                            for _, s in ipairs(um) do if s.item == it.name and s.amount > 0 then left_slot = true break end end
+                            if room_of(cn, it.name, cap) <= 0 then
+                                pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = need }
+                            elseif left_slot then
+                                rs_note(("%s x%s left out (under half a unit stack)"):format(shortname(it.name), need))
+                            else
+                                rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), need, get(totals(um), it.name)))
+                            end
+                        end
+                        jm.moved = jm.moved + moved_item
+                        trace(("restore plan: container id=%s item=%s count=%s moves=%s moved=%s short=%s"):format(
+                            tostring(job.id), it.name, tostring(it.count), tostring(nmoves), tostring(moved_item), tostring(math.max(need, 0))))
+                    end
+                end
+            end
+        end
+        return pq, pm
+    end
+
+    -- the model matches the game. Unit: the restored items equal the model. Container (confirmed once, not read again):
+    -- at least the model amount of every touched item (lower bound, so live inflow of the same item does not block it).
+    -- sig = unit totals of the touched items + unit slots. Container totals are not in it: inflow never resets the stall clock.
+    -- detail = first unconfirmed container (expected vs got per touched item) and the unit when it differs; for traces/notes.
+    local function geq(t, e)
+        for k, v in pairs(e) do if t[k] < v then return false end end
+        return true
+    end
+    local function pipe_state(us)
+        local names = sorted_keys(R.pm.touched)
+        local function only(t) local o = {} for _, k in ipairs(names) do o[k] = get(t, k) end return o end
+        local function rows(act, exp)
+            local o = {}
+            for _, k in ipairs(names) do o[#o + 1] = ("%s exp %s got %s"):format(shortname(k), tostring(exp[k]), tostring(act[k])) end
+            return table.concat(o, ", ")
+        end
+        local uT = only(totals(us))
+        local parts, why, udet, cdet = {}, nil, nil, nil
+        for _, k in ipairs(names) do parts[#parts + 1] = k .. "=" .. uT[k] end
+        local eU = totals(R.pm.unit)
+        for k, v in pairs(R.skip_u or {}) do eU[k] = get(eU, k) + v end   -- skipped moves never left the unit
+        local eUo = only(eU)
+        if not same_totals(uT, eUo) then why, udet = "unit", "unit: " .. rows(uT, eUo) end
+        local unit_ok = (why == nil)
+        -- a container that matched its model once is not read again (jm.confirmed)
+        R.last_reads, R.last_slow, R.last_confirmed = 0, 0, 0
+        for _, jm in ipairs(R.pm.jobs) do
+            if jm.confirmed then R.last_confirmed = R.last_confirmed + 1 end
+            local map
+            if not jm.confirmed then
+                local t0 = io.now()
+                map = contents_of(jm)
+                R.last_reads, R.last_slow = R.last_reads + 1, math.max(R.last_slow, io.now() - t0)
+            end
+            if not jm.confirmed and not map then
+                why = why or ("container " .. tostring(jm.id) .. " unreadable")
+                cdet = cdet or ("container id " .. tostring(jm.id) .. ": unreadable")
+            elseif not jm.confirmed then
+                local cT = only(map)
+                local eC = totals(jm.slots)
+                for k, v in pairs((R.skip_c or {})[jm.id] or {}) do eC[k] = get(eC, k) - v end
+                local eCo = only(eC)
+                -- drain: the unit matches the model, the container did not go up since the last read, no move of it was skipped
+                local rose = false
+                if jm.prev then
+                    for _, k in ipairs(names) do if cT[k] > jm.prev[k] then rose = true end end
+                end
+                if geq(cT, eCo) then jm.confirmed = true
+                elseif unit_ok and jm.prev and not rose and (R.skip_c or {})[jm.id] == nil then
+                    jm.confirmed, jm.drained = true, true
+                    trace(("restore drain: container id=%s treated as drained (%s)"):format(tostring(jm.id), rows(cT, eCo)))
+                else
+                    why = why or ("container " .. tostring(jm.id))
+                    cdet = cdet or ("container id " .. tostring(jm.id) .. ": " .. rows(cT, eCo))
+                end
+                jm.prev = cT
+            end
+        end
+        -- split route, nothing skipped: the unit slots must match the model too (slot layout after the sort and the splits)
+        if R.pm.split and why == nil and (R.skipped or 0) == 0 and unit_sig(us) ~= unit_sig(R.pm.unit) then why = "unit slots" end
+        local lines = {}
+        if udet then lines[#lines + 1] = udet end
+        if cdet then lines[#lines + 1] = cdet end
+        local sig = table.concat(parts, ";") .. "|" .. unit_sig(us)
+        return why == nil, why, sig, #lines > 0 and table.concat(lines, " | ") or nil
+    end
+
+    -- verified (or nothing to send): count what the containers got, end the restore
+    local function pipe_finish()
+        local drained = {}
+        for _, jm in ipairs(R.pm.jobs) do if jm.drained then drained[#drained + 1] = tostring(jm.id) end end
+        if #drained > 0 then trace("restore drained containers: " .. table.concat(drained, ",")) end
+        for _, jm in ipairs(R.pm.jobs) do
+            local sk = 0
+            for _, v in pairs((R.skip_c or {})[jm.id] or {}) do sk = sk + v end
+            delivered(jm.moved - sk, jm.id)
+        end
+        restore_end()
+    end
+
+    -- clamp notes: each container-item the room cut short (full[] from the planner): one note each, or one summary above 10
+    local function full_notes(list)
+        if #list <= 10 then
+            for _, f in ipairs(list) do
+                rs_note(("container %s full: %s x%s left in the unit"):format(tostring(f.id), shortname(f.item), commas(f.left)))
+            end
+        elseif #list > 0 then
+            local left = 0
+            for _, f in ipairs(list) do left = left + f.left end
+            rs_note(("%s containers full, %s items left in the unit"):format(#list, commas(left)))
+        end
+    end
+
+    -- stage 15: send up to RESTORE_CMD_PER_TICK commands (FIFO). The plan is built on the first call, from a fresh read.
+    local function pipe_send(now)
+        if not R.pm then
+            local ps, us, err = read_both()
+            if not ps then return fail(err) end
+            trace("restore unit stacks (start): " .. slots_text(us))
+            R.pq, R.pm = pipe_build(us)
+            full_notes(R.pm.full)
+            R.qpos = 1
+            trace(("restore pipeline: %s command(s) for %s container(s), %s per tick"):format(
+                tostring(#R.pq), tostring(#R.pm.jobs), tostring(RESTORE_CMD_PER_TICK)))
+            if #R.pq == 0 then return pipe_finish() end
+        end
+        local sent = 0
+        while R.qpos <= #R.pq and sent < RESTORE_CMD_PER_TICK do
+            local c = R.pq[R.qpos]
+            local ok, err
+            if c.kind == "split" then
+                local t0 = io.now()
+                trace(("restore split: before src0=%s amount=%s dst0=%s at %s ms"):format(tostring(c.src), tostring(c.amount), tostring(c.dst), tostring(t0)))
+                ok, err = io.split(R.unit_inv, c.src, c.amount, c.dst)
+                trace(("restore split: after sent=%s err=%s, %s ms"):format(tostring(ok), tostring(err), tostring(io.now() - t0)))
+            elseif c.pair and R.dead and R.dead[c.pair] then
+                ok = true   -- its split was skipped: nothing is staged, so this TRANSFER is passed (not sent, not counted)
+            else
+                ok, err = io.send_inv(c.prim, c.sec, c.slot0, c.action)
+            end
+            if ok then
+                R.fails = 0
+                R.qpos, sent = R.qpos + 1, sent + 1
+            else
+                -- refused (not applied): the same command goes again on the next tick, up to RETRY_MAX times
+                R.fails = (R.fails or 0) + 1
+                trace(("restore pipe: refused command %s of %s (attempt %s, error: %s)"):format(
+                    R.qpos, #R.pq, R.fails, tostring(err)))
+                if R.fails <= RETRY_MAX then
+                    R.t_next = now
+                    return
+                end
+                -- retries used up: skip it (its move never happened, the model drops it), the restore goes on
+                R.skipped = (R.skipped or 0) + 1
+                R.skip_u = R.skip_u or {}
+                R.skip_u[c.item] = get(R.skip_u, c.item) + c.moved
+                R.skip_c = R.skip_c or {}
+                R.skip_c[c.job] = R.skip_c[c.job] or {}
+                R.skip_c[c.job][c.item] = get(R.skip_c[c.job], c.item) + c.moved
+                if c.kind == "split" then R.dead = R.dead or {}; R.dead[c.pair] = true end   -- its TRANSFER is passed, not sent
+                trace(("restore pipe: command %s of %s SKIPPED after %s refusals (error: %s)"):format(
+                    R.qpos, #R.pq, R.fails, tostring(err)))
+                R.fails = 0
+                R.qpos = R.qpos + 1
+            end
+        end
+        trace(("restore pipeline: sent %s, %s of %s"):format(tostring(sent), tostring(R.qpos - 1), tostring(#R.pq)))
+        if R.qpos > #R.pq then
+            R.t_progress, R.t_sent, R.stage = now, now, 16
+            trace("restore pipeline: all commands sent, waiting for the game to show them")
+            R.t_next = now + POLL_MS   -- first verify soon (usually already shown), then every PIPE_POLL_MS
+        else
+            set_status("working", progress(R.qpos - 1, #R.pq))
+            R.t_next = now   -- next slice on the next tick, no wait
+        end
+    end
+
+    -- stage 16: the model must show. Progress = any change of the restored items; no change for STALL_MS -> STALL note,
+    -- nothing more is sent. The status line stays at 100 % sent while the game catches up.
+    local function pipe_wait(now)
+        if now - R.t_restore > RESTORE_MS then
+            trace("restore pipeline: TIMEOUT, first mismatch: " .. tostring(R.last_detail))
+            rs_note("restore stalled: timeout after 300 s" .. (R.last_detail and (" (first mismatch: " .. R.last_detail .. ")") or ""))
+            return restore_end()
+        end
+        local tr0 = io.now()
+        local ps, us, err = read_both()
+        if not ps then return fail(err) end
+        local unit_ms = io.now() - tr0
+        local good, why, sig, detail = pipe_state(us)
+        R.polls = (R.polls or 0) + 1
+        trace(("restore poll: %s ms since the last send, unit read %s ms, containers read %s (slowest %s ms, %s of %s confirmed), mismatch %s"):format(
+            tostring(now - R.t_sent), tostring(unit_ms), tostring(R.last_reads), tostring(R.last_slow),
+            tostring(R.last_confirmed), tostring(#R.pm.jobs), tostring(why)))
+        if R.pipe_sig == nil then R.pipe_sig = sig   -- baseline: the stall clock runs from the last send
+        elseif sig ~= R.pipe_sig then R.pipe_sig, R.t_progress = sig, now end
+        R.last_detail = detail
+        -- mismatch trace: when it changes, at most once per 5 polls
+        if detail and detail ~= R.mis_last and R.polls - (R.mis_poll or -5) >= 5 then
+            trace("restore mismatch: " .. detail)
+            R.mis_last, R.mis_poll = detail, R.polls
+        end
+        if good then
+            trace("restore pipeline: verified (unit and containers show the model)")
+            return pipe_finish()
+        end
+        if now - R.t_progress >= STALL_MS then
+            trace(("restore pipeline: STALL, no change for %s ms (mismatch: %s)"):format(tostring(now - R.t_progress), tostring(why)))
+            trace("restore pipeline: first mismatch: " .. tostring(detail))
+            rs_note(("restore stalled at pipeline (%s of %s commands sent), no change for %d s, check both inventories by hand%s"):format(
+                commas(R.qpos - 1), commas(#R.pq), math.floor(STALL_MS / 1000), detail and (" (first mismatch: " .. detail .. ")") or ""))
+            return restore_end()
+        end
+        set_status("working", progress(#R.pq, #R.pq, ", waiting for the game"))
+        R.t_next = now + PIPE_POLL_MS
     end
 
     local builder = {}
 
     -- start(plan, opts): checks station, totals, creative; sends the first removal batch. Nothing is sent on a refusal.
-    -- opts is accepted for the contract, not used.
-    function builder:start(plan, _opts)
+    -- opts = { restore = true | false | nil } (Chk_Restore; nil = no checkbox, restore on).
+    function builder:start(plan, opts)
         if R.active then return false, "error: busy: another build is running" end
         R = new_run(nil)
+        if type(opts) == "table" then R.ui_restore = opts.restore end   -- Chk_Restore: true / false, nil = no checkbox (on)
         if not plan or not plan.valid then return start_fail("import first") end
         local P = {
             station = plan.station, fp = plan.fp,
@@ -1027,8 +1475,9 @@ function B.new(io)
         local s = R.stage
         if s == 11 then send_queue(now)
         elseif s == 12 then cont_wait(now)
-        elseif s == 13 then restore_next(now)
-        elseif s == 14 then restore_verify(now)
+        elseif s == 13 then sort_wait(now)
+        elseif s == 15 then pipe_send(now)
+        elseif s == 16 then pipe_wait(now)
         elseif s == 2 then arrival_wait(now)
         elseif s == 4 or s == 9 then chunk_start(now)
         elseif s == 5 then staging_wait(now)
@@ -1063,7 +1512,7 @@ end
 B.pure = {
     totals = totals, maxes = maxes, list = list, shortfall = shortfall, total_check = total_check,
     stage_moves = stage_moves, refund_fit = refund_fit, room_ok = room_ok, chunk_len = chunk_len,
-    overlaps = overlaps,
+    overlaps = overlaps, progress = progress, bar = bar, commas = commas,
 }
 
 return B

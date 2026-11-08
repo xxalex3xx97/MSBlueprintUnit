@@ -12,7 +12,7 @@ Tools: MS_MODS_ROOT (default F:\MSDemoMods) for legacy/ source and tools\retoc.
 - `-Pos X,Y` = machine position (int32 X, Y, block-relative machine units, scale not verified). Element = count | `80 09 0c` class | `80 07 06` transform | X | Y (22 bytes). Env `BPU_MX`/`BPU_MY` read by patch_bpo_machine.py.
   - none: 5 packages, no container.
   - vanilla: 5 packages, container = vanilla `BP_ContainerObject_2` (32 slots, bonus 10). No Machines clone. Try this first.
-  - clone: 7 packages (+ `Machines/BP_BPUnitStoreObj_01` sim, + `Machines/BP_BPUnitSto_2` actor), container = clone sim (120 slots, bonus 200).
+  - clone: 7 packages (+ `Machines/BP_BPUnitStoreObj_01` sim, + `Machines/BP_BPUnitSto_2` actor), container = clone sim (120 slots, bonus 20000, +1,000,000%).
   - **Install pakchunk97 (BPUnitMesh, has `SM2_BPUnitHidden00`) AND pakchunk100 together** for the clone variant. The actor's mesh is the tiny collision-free hidden mesh from pak97; without it the actor will not load.
 - Container = DefaultMachines entry. It is NOT the connector array: vanilla uexp 374 is the CONNECTOR array (`BPO_LargeConnector_C`, count 1, end 404), left untouched.
   DefaultMachines is a separate property, unversioned-header index 24, absent in BPO_CommandModule. `patch_bpo_machine.py <DIR> <CLASS PKG> <CLASS NAME>`:
@@ -21,7 +21,7 @@ Tools: MS_MODS_ROOT (default F:\MSDemoMods) for legacy/ source and tools\retoc.
   Machine cell (0,0), no payload. Real placement later: `80 07 06` + X,Y int32, machine coords ~8x finer than block cells.
 - Names/imports/preload: +2 names, +2 imports (package + BlueprintGeneratedClass), +1 CreateBefore preload entry (export 1, same as connector).
 - `python -I patch_bpo_machine.py --walk <base>` prints the CONNECTOR walk only.
-- clone.js Job D (gated on BPU_CONTAINER=1): sim BP_ContainerObject_2 -> BP_BPUnitStoreObj_01, InventorySize @120 32->120, bonus @124 10->200. Actor BP_Container_2 -> `Machines/BP_BPUnitSto_2` (copy, invisible: mesh SM2_LargeContainer -> SM2_BPUnitHidden00).
+- clone.js Job D (gated on BPU_CONTAINER=1): sim BP_ContainerObject_2 -> BP_BPUnitStoreObj_01, InventorySize @120 32->120, bonus @124 10->2000000. Actor BP_Container_2 -> `Machines/BP_BPUnitSto_2` (copy, invisible: mesh SM2_LargeContainer -> SM2_BPUnitHidden00).
   - Sim's actor import is FName base `/Game/Blueprints/Machines/BP_Container` with FName number 3 (the `_2` suffix is the number, not a dangling name). Job D renames the base to `BP_BPUnitSto` (same length), so number 3 resolves to `/Game/Blueprints/Machines/BP_BPUnitSto_2`. Class `BP_Container_2_C` -> `BP_BPUnitSto_2_C`.
   - Actor base rename skips `WBP_Container` (W before) and `BP_ContainerObject` (Object after). Actor header FString `/Game/Blueprints/Machines/BP_Container_2` -> `..._BP_BPUnitSto_2`.
   - Parent `BP_ContainerObject` stays vanilla. Sim leftover scan: no `BP_Container\0`, no `BP_Container_2`.
