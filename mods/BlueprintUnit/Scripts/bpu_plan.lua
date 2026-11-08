@@ -597,6 +597,7 @@ local function build(text, live, F, opts)
                 return rot >= 2 and -f or f
             end
             table.sort(v, function(a, b)   -- stable: index breaks ties
+                if machines[a].h ~= machines[b].h then return machines[a].h < machines[b].h end   -- floors never pair across
                 if line(a) ~= line(b) then return line(a) < line(b) end
                 if flow(a) ~= flow(b) then return flow(a) < flow(b) end
                 return a < b
@@ -605,7 +606,7 @@ local function build(text, live, F, opts)
             for k = 1, #v do
                 if not used[k] then
                     for q = k + 1, #v do
-                        if line(v[q]) ~= line(v[k]) then break end
+                        if line(v[q]) ~= line(v[k]) or machines[v[q]].h ~= machines[v[k]].h then break end
                         if not used[q] then
                             local d = flow(v[q]) - flow(v[k])
                             if d < 2 or d % 2 ~= 0 then break end   -- off-grid or same cell: no pair
