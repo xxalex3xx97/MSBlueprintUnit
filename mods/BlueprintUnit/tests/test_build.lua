@@ -1270,7 +1270,7 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 100 and f.inv.unit.slots[2].amount == 60 and #f.cmd_log == 2
           and #f.violations == 0, "partial room: 100 in, 60 stay in the unit (" .. st.text .. ")")
-    check(st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "partial room: container full note")
+    check(st.text:find("container " .. cid .. " full: Plate x20 left in the unit", 1, true) ~= nil, "partial room: container full note (the 20 the room did not take)")
 end
 
 -- container full: one slot -> 50 in (one TRANSFER), the other stacks do not fit, nothing else sent, 70 stay in the unit
@@ -1281,7 +1281,7 @@ do
     local cid = new_cont(f)
     check(st.state == "done" and cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 70
           and st.text:find("restored 50 items into 1 container(s)", 1, true) ~= nil
-          and st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
+          and st.text:find("container " .. cid .. " full: Plate x70 left in the unit", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
     check(#f.cmd_log == 1 and cmds_of(f, 2) == 1 and #f.violations == 0, "restore full: one TRANSFER, nothing else sent, no violation")
 end
 
@@ -1310,7 +1310,7 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 450 and tot(f.containers[cid].slots, "ITEM_WaterIce") == 150,
           "ice repro: plate 3 stacks, ice 1 stack (the room left) (" .. st.text .. ")")
-    check(st.text:find("container id " .. cid .. " full", 1, true) ~= nil and tot(f.inv.unit.slots, "ITEM_WaterIce") == 750 and #f.violations == 0,
+    check(st.text:find("container " .. cid .. " full: WaterIce x750 left in the unit", 1, true) ~= nil and tot(f.inv.unit.slots, "ITEM_WaterIce") == 750 and #f.violations == 0,
           "ice repro: shortage noted, 750 ice stay in the unit (" .. st.text .. ")")
 end
 
@@ -1350,6 +1350,42 @@ do
     check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 50
           and st.text:find("restore stalled at pipeline (3 of 3 commands sent)", 1, true) ~= nil,
           "stall partial: 50 shown, 2 transfers not, STALL (" .. st.text .. ")")
+end
+
+-- live inflow of the same item into the container (+5 Plate per read after the 3 TRANSFERs): the lower bound confirms, verify done
+do
+    local f = whole_fake()
+    local orig = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id)
+        local c = f.containers[id]
+        if c and id > 500 and #f.cmd_log >= 3 then c.slots[4].item = "ITEM_Plate"; c.slots[4].amount = c.slots[4].amount + 5 end
+        return orig(id)
+    end
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) > 120 and st.text:find("stalled", 1, true) == nil and #f.violations == 0,
+          "inflow: container above the model (lower bound) confirms, no stall (" .. st.text .. ")")
+end
+
+-- live inflow, nothing applied (unit unchanged): +1 Plate per read keeps the container moving, the stall clock still fires
+-- at 8 s after the last send, and the note names the first mismatch (the unit, then the container)
+do
+    local f = whole_fake({ stall_after = 0 })
+    local orig = f.io.read_machine_inv
+    f.io.read_machine_inv = function(id)
+        local c = f.containers[id]
+        if c and id > 500 then c.slots[1].item = "ITEM_Plate"; c.slots[1].amount = c.slots[1].amount + 1 end
+        return orig(id)
+    end
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    local last = f.cmd_log[#f.cmd_log] and f.cmd_log[#f.cmd_log][5] or 0
+    check(st.state == "done" and #f.cmd_log == 3 and f.clock - last >= 8000 and f.clock - last <= 8250
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 8 s", 1, true) ~= nil
+          and cid and st.text:find("(first mismatch: unit: Plate exp 0 got 120 | container id " .. cid .. ": Plate exp ", 1, true) ~= nil,
+          "stall with inflow: unit unchanged -> STALL after 8 s, first mismatch named (" .. st.text .. ")")
 end
 
 -- slow game, no false stall: every command shows 6 s after its send (under the 8 s idle limit), restore verified
@@ -1702,7 +1738,7 @@ do
     local st = run(b, f, 400)
     local cid = new_cont(f)
     check(cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 30 and #f.splits == 1 and f.splits[1][3] == 10 and #f.violations == 0
-          and st.text:find("container id " .. cid .. " full", 1, true) ~= nil, "split room: container 50, unit keeps 30, full note (" .. st.text .. ")")
+          and st.text:find("container " .. cid .. " full: Plate x30 left in the unit", 1, true) ~= nil, "split room: container 50, unit keeps 30, full note (" .. st.text .. ")")
 end
 
 -- no free unit slot: Plate 100 + Gear 10 fill the unit, need 30 -> nothing moved, note
