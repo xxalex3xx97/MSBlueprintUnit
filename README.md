@@ -12,6 +12,7 @@ A **Blueprint Unit** station block, cloned from the Command Module and researche
 
 - Main Sequence Demo (Steam).
 - **MSCore 0.7.6 or newer**, installed with **MSCoreManager.exe**. Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes.
+- **MSCore 0.8.0 or newer** only for the optional **Station Build** checkbox; **MSCore 0.8.1** so that deconstructing by hand refunds into your own inventory (older MSCore keeps the refund redirect always on).
 - No other mod needed. Does not need MiningBenchMod or the Mining Unit.
 
 ## Install
@@ -43,11 +44,16 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 - Places the factory on your station.
 - Never rebuilds identical machines. It only changes recipes.
 - Takes the items it needs from the unit's inventory first, then from your inventory.
-- Refunds go into the unit inventory.
+- Refunds of what the build removes go into the unit inventory. The redirect is on only while the build runs (MSCore 0.8.1), so your own deconstruction is not affected.
 - Leftover items stay with you.
 - Items inside removed containers also refund into the unit.
 - Container contents are restored after Build, on by default. The **Enable container item restoration** checkbox turns it off (`restore_off.txt` also disables it). With MSCore 0.7.6 the unit sorts, splits the exact amount and moves it; older MSCore is not supported.
 - While a build or restore runs, the **Build** button reads **Abort** and cancels it. Closing the window cancels it too; items already moved stay where they are.
+
+**Station Build (optional checkbox, off by default).** Tick **Station Build (place station blocks + factory)** before Build to also place the station blocks of the JSON (Station 1x1, docks, elevators, ...), then the factory. Needs MSCore 0.8.0 or newer (the box says so when it is older).
+- A block of the JSON that is missing from your station is placed. A live block that stands in the way (and is not in the JSON) is removed first; the removed block is refunded and the new one charged as one net cost. The Blueprint Unit block itself is never removed.
+- Blocks locked by research are skipped, with a note. If the unit and you together cannot pay for all blocks, Build refuses with the list of missing items and builds nothing.
+- A splitter that already exists with different port settings is removed and placed again with the new settings.
 
 **Blueprint Unit inventory:** 120 slots, +1,000,000% stack size. Existing 1000-slot or 300-slot units keep their size: place a new unit.
 
@@ -57,7 +63,7 @@ Every player in a co-op session needs the mod installed.
 
 ## Known limits
 
-- Station blocks cannot be imported yet. Only factory blueprints.
+- Station Build places only the blocks of the JSON and removes blocks in their way; other live blocks are left alone. Tested in game with a Station 1x1 replacing a Shipyard side; other classes and rotations are untested.
 - Teleporter cannot be placed by Build.
 - Single-player tested. Co-op may desync after the split step.
 - Belts and machine contents are not restored.
