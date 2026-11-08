@@ -42,7 +42,7 @@ local function fake(spec)
         noop_moves = spec.noop_moves, shift_x = spec.shift_x or 0, drop_place = spec.drop_place,
         inv = { player = { id = 101, slots = spec.player }, unit = { id = 202, slots = spec.unit } },
         live_bcls = spec.live_bcls, vanish_after = spec.vanish_after,
-        mult = spec.mult or {},   -- StackMultiplier / 2 per inventory ("player" / "unit")
+        mult = spec.mult or {},   -- StackMultiplier per inventory ("player" / "unit")
     }
     local function mx(item) return f.max[item] or 50 end
     local function inv_by_id(id)
@@ -161,6 +161,7 @@ local function fake(spec)
     -- containers (restore): id -> { slots }. A placed container gets id next_id + 500 (never a player/unit id)
     f.containers = spec.containers or {}
     f.cont_slots = spec.cont_slots or 4
+    f.cont_mult = spec.cont_mult or 1   -- container StackMultiplier (read_machine_inv)
     f.noop_inv = spec.noop_inv
     f.cursor = { item = "", amount = 0 }   -- one player cursor (AddInventoryInteraction model)
     f.cmd_log = {}                         -- inventory commands {primary, secondary, slot0, action, clock}
@@ -280,7 +281,7 @@ local function fake(spec)
         end
         local slots = {}
         for i, s in ipairs(c.slots) do slots[i] = { item = s.item, amount = s.amount, max = s.max } end
-        return { ok = true, id = id + 5000, slots = slots, mult = 1 }
+        return { ok = true, id = id + 5000, slots = slots, mult = f.cont_mult }
     end
     function io.container_ids()
         local out = {}
@@ -743,8 +744,8 @@ do
     check(b3:status().state == "error" and noted3 == nil, "note_build: refused build (nothing placed) reports nothing")
 end
 
--- ===== effective stack size: native max 1 is wrong, raw MaxStackSize 200 * StackMultiplier 8 / 2 = 800 per slot =====
-local EFF = { raw = { ITEM_Frame = 200, ITEM_Coil = 10 }, max = { ITEM_Frame = 800, ITEM_Coil = 40 }, mult = { player = 4, unit = 101 } }
+-- ===== effective stack size: native max 1 is wrong, raw MaxStackSize 200 * StackMultiplier 8 = 1600 per slot =====
+local EFF = { raw = { ITEM_Frame = 200, ITEM_Coil = 10 }, max = { ITEM_Frame = 1600, ITEM_Coil = 80 }, mult = { player = 8, unit = 202 } }
 -- refund 2 frames (merge room in the 190 stack) + 2 coils (1 new slot): fits with 1 free slot. Old max 1 -> refused.
 do
     local f = fake(setmetatable({ player = { E(), E(), S("ITEM_Frame", 190, 1) }, unit = inv({}, 3),
@@ -1213,6 +1214,21 @@ do
     check(#f.cmd_log == 3 and cmds_of(f, 2) == 3 and #f.violations == 0 and f.cmd_log[1][1] == 202 and f.cmd_log[1][2] == cid + 5000,
           "restore whole stacks: 3 TRANSFER (2) unit -> container INVENTORY id, no other action, no violation (" .. #f.cmd_log .. " sent)")
     check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=120 moves=3 moved=120 short=0"), "restore whole stacks: plan trace")
+end
+
+-- SM 12, raw Plate 25: slot max 300, 32-slot container = 9600. Unit 32 full stacks of 300 -> all 9600 go in, short 0
+do
+    local stacks = {}
+    for i = 1, 32 do stacks[i] = S("ITEM_Plate", 300, 300) end
+    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv(stacks, 32), station = {}, mult = { unit = 12 },
+                     raw = { ITEM_Plate = 25 }, max = { ITEM_Plate = 300 }, cont_slots = 32, cont_mult = 12 })
+    local traces = tracer(f)
+    local b, ok = start_cont(f, { { name = "ITEM_Plate", count = 9600 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(ok and st.state == "done" and cid and cont_plate(f, cid) == 9600 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.violations == 0,
+          "restore SM 12: 9600 Plate (32 x 300) into the 32-slot container, unit empty (" .. st.text .. ")")
+    check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=9600 moves=32 moved=9600 short=0"), "restore SM 12: plan trace moved 9600, short 0")
 end
 
 -- rounding down: need 30, unit 100 then 40 -> the 100 is skipped (30 < 50), the 40 goes in (30 >= 20)

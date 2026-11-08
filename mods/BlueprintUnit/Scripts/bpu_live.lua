@@ -393,8 +393,8 @@ end
 
 -- MSCore 0.7.3 native read: factory_native.read_inventory(id) -> slots {item="ITEM_X" | "", amount, max}, or nil, err.
 -- ok=false when the inventory is invalid, MSCore is older than 0.7.3, or the native read fails (err says why).
--- Slot max = effective max in this inventory: raw MaxStackSize (native, or the Item UObject when native <= 1) * StackMultiplier / 2.
--- mult = StackMultiplier / 2 (SM 2 = x1, SM 8 = x4, unit SM 202 = x101). SM unreadable -> 2.
+-- Slot max = effective max in this inventory: raw MaxStackSize (native, or the Item UObject when native <= 1) * StackMultiplier.
+-- mult = StackMultiplier (SM 2 = x2, SM 8 = x8, unit SM 202 = x202). SM unreadable -> 2 (x2, the game baseline).
 function L.read_inv(inv)
     if not valid(inv) then return { ok = false, slots = {} } end
     local id = unw(rd(inv, "ID"))
@@ -413,7 +413,7 @@ function L.read_inv(inv)
                 raw, src = L.item_raw(sl.item), "item"
                 if not raw then raw, src = (sl.max or 1), "native-fallback" end
             end
-            sl.max = math.floor(raw * sm / 2)
+            sl.max = math.floor(raw * sm)
             local key = tostring(id) .. "|" .. sl.item
             if not TRACED[key] then
                 TRACED[key] = true
@@ -421,7 +421,7 @@ function L.read_inv(inv)
             end
         end
     end
-    return { ok = true, id = id, slots = s, mult = sm / 2, sm = sm }
+    return { ok = true, id = id, slots = s, mult = sm, sm = sm }
 end
 
 -- machine ID -> Inventory UObject of every ContainerObject in the world (the unit's own container skipped).

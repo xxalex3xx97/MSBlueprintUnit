@@ -191,8 +191,8 @@ check(rc.REC_TitaniumPlates == "TitaniumPlates" and Live._recobj.TitaniumPlates 
 
 fakeInv = { [8] = W.uslots, [7] = W.pslots }  -- later make_world calls replace it
 local ui = Live.read_inv(W.unit)
-check(ui.ok and ui.id == 8 and #ui.slots == 2 and ui.slots[1].item == "ITEM_A" and ui.slots[1].amount == 5 and ui.slots[1].max == 50,
-      "read_inv: native read_inventory, item name, amount, max")
+check(ui.ok and ui.id == 8 and #ui.slots == 2 and ui.slots[1].item == "ITEM_A" and ui.slots[1].amount == 5 and ui.slots[1].max == 100,
+      "read_inv: native read_inventory, item name, amount, max (native 50 x unreadable SM 2 = 100)")
 check(ui.slots[2].item == "" and ui.slots[2].amount == 0, "read_inv: empty slot item \"\"")
 local pi = Live.read_inv(W.pinv)
 check(pi.ok and pi.id == 7 and #pi.slots == 2, "read_inv: player inventory by id")
@@ -212,25 +212,31 @@ check(Live.creative(W.player, {}) == false and Live.creative({}, { bCreative = t
       "creative: player, then ctl, then false")
 check(Live.item_by_name("ITEM_A") == world.Item[1] and Live.item_by_name("ITEM_Z") == nil, "item_by_name: found and nil")
 
--- effective max: native max 1 (wrong) -> Item MaxStackSize 200; slot max = 200 * StackMultiplier / 2 (SM 8 -> 800, unit SM 202 -> 20200)
+-- effective max: native max 1 (wrong) -> Item MaxStackSize 200; slot max = 200 * StackMultiplier (SM 8 -> 1600, unit SM 202 -> 40400)
 do
     local frame = named("ITEM_Frame", { MaxStackSize = 200 })
+    local plate = named("ITEM_Plate", { MaxStackSize = 25 })
     world.Item[#world.Item + 1] = frame
+    world.Item[#world.Item + 1] = plate
     local recobj = Live._recobj   -- Live.reset clears it; later checks need it
     Live.reset()
     fakeInv[55] = { { Item = frame, Amount = 190, NativeMax = 1 }, { Amount = 0 } }
+    fakeInv[56] = { { Item = plate, Amount = 300, NativeMax = 1 } }
     local r = Live.read_inv({ ID = 55, IsValid = alive, StackMultiplier = 8 })
-    check(r.ok and r.mult == 4 and r.slots[1].max == 800 and r.slots[2].max == 1 and Live.item_raw("ITEM_Frame") == 200,
-          "read_inv: native max 1 -> Item max 200, SM 8 -> effective 800 (mult 4)")
+    check(r.ok and r.mult == 8 and r.slots[1].max == 1600 and r.slots[2].max == 1 and Live.item_raw("ITEM_Frame") == 200,
+          "read_inv: native max 1 -> Item max 200, SM 8 -> effective 1600 (mult 8)")
+    local p12 = Live.read_inv({ ID = 56, IsValid = alive, StackMultiplier = 12 })
+    check(p12.ok and p12.mult == 12 and p12.slots[1].max == 300, "read_inv: ice raw 25, SM 12 -> slot max 300 (the 32-slot container holds 9600)")
     local u = Live.read_inv({ ID = 55, IsValid = alive, StackMultiplier = 202 })
-    check(u.ok and u.mult == 101 and u.slots[1].max == 20200, "read_inv: unit SM 202 -> effective 20200 (mult 101)")
+    check(u.ok and u.mult == 202 and u.slots[1].max == 40400, "read_inv: unit SM 202 -> effective 40400 (mult 202)")
     local nosm = Live.read_inv({ ID = 55, IsValid = alive })
-    check(nosm.ok and nosm.mult == 1 and nosm.slots[1].max == 200, "read_inv: SM unreadable -> 2 (x1)")
+    check(nosm.ok and nosm.mult == 2 and nosm.slots[1].max == 400, "read_inv: SM unreadable -> 2 (x2 baseline)")
     local tf = io.open(dir .. "../bpu_trace.log", "r")
     local tt = tf and tf:read("a") or ""
     if tf then tf:close() end
-    check(tt:find("maxstack inv=55 item=ITEM_Frame raw=200 (item) sm=8 effective=800", 1, true) ~= nil,
+    check(tt:find("maxstack inv=55 item=ITEM_Frame raw=200 (item) sm=8 effective=1600", 1, true) ~= nil,
           "trace: maxstack line with raw, sm, effective")
+    world.Item[#world.Item] = nil
     world.Item[#world.Item] = nil
     Live.reset()
     Live._recobj = recobj

@@ -77,7 +77,7 @@ local function maxes(a, b)
     return m
 end
 
--- Effective MaxStackSize per item in one inventory (inv = normalized slots): io.item_max (raw) * StackMultiplier/2.
+-- Effective MaxStackSize per item in one inventory (inv = normalized slots): io.item_max (raw) * StackMultiplier.
 -- Without io.item_max (plain fakes): the largest slot max over both inventories.
 local function capmap(io, inv, other)
     if io.item_max then
@@ -403,7 +403,7 @@ function B.new(io)
 
     -- inventory slots normalized: item "" when empty, amount/max always numbers
     local function norm(inv)
-        local slots = { mult = inv.mult or 1 }   -- StackMultiplier / 2 of this inventory (capmap)
+        local slots = { mult = inv.mult or 1 }   -- StackMultiplier of this inventory (capmap)
         for i, s in ipairs(inv.slots or {}) do
             slots[i] = { item = s.item or "", amount = s.amount or 0, max = (s.max and s.max > 0) and s.max or 1 }
         end
