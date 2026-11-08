@@ -4,7 +4,7 @@ Shipped paks for Blueprint Unit. Built from `paks/src/` and `ue/`.
 
 - `pakchunk97-BPUnitMesh_P` : hidden collision-free machine mesh (SM2_BPUnitHidden00) + table/holo meshes.
 - `pakchunk100-BlueprintUnit_P` : BPO_BlueprintUnit, BP_BlueprintUnit, STB_BPUnitPromp, Machines/BP_BPUnitStoreObj_01, Machines/BP_BPUnitSto_2 (container at block centre, clone_0_0 variant), plus DAT_BuildingBlockRegistry and RSC_ComputationScience. Blueprint Unit inventory: 120 slots, +1,000,000% stack size.
-- `pakchunk102-BPUnitUI_P` : /Game/BlueprintUnitUI window (WBP_BlueprintUnit), built headless from `ue/scripts`. Has the **Enable container item restoration** checkbox (checked by default).
+- `pakchunk102-BPUnitUI_P` : /Game/BlueprintUnitUI window (WBP_BlueprintUnit), built headless from `ue/scripts`. Has the **Station Build** checkbox (off by default) and the **Enable container item restoration** checkbox (checked by default).
 
 ## Notes
 
