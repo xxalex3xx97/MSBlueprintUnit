@@ -127,7 +127,13 @@ local function fillCost(rows)
   setVis(w("Txt_CostEmpty"), shown == 0)
 end
 
--- Station Build placeholder: optional Chk_StationBuild (designer CheckBox). Only the hint text changes; nothing is sent.
+-- Station Build: optional Chk_StationBuild (CheckBox, default unchecked = off), read on open, Import and Build press.
+-- Ticked on an MSCore without the 0.8.0 natives: the hint under the box and the status line say so; Import/Build stop.
+local STATION_OLD = "Station Build needs MSCore 0.8.0 or newer"
+local function stationHint(ticked, cap)
+  if ticked and not cap then return STATION_OLD end
+  return ""
+end
 local function readStationBuild()
   local c = w("Chk_StationBuild")
   if ok(c) then
@@ -136,8 +142,17 @@ local function readStationBuild()
     if s and type(v) == "boolean" then S.stationBuild = v end
   end
   local h = w("Txt_StationBuildHint")
-  if ok(h) then txt("Txt_StationBuildHint", S.stationBuild and "station blocks: not implemented yet" or "") end
+  if ok(h) then txt("Txt_StationBuildHint", stationHint(S.stationBuild, (Live.station_build_capable()))) end
 end
+-- true = blocked (status set): Station Build ticked and MSCore too old
+local function stationBlocked()
+  if not S.stationBuild or Live.station_build_capable() then return false end
+  setStatus(STATION_OLD)
+  return true
+end
+-- options for bpu_plan and bpu_live (Station Build only when ticked; off = the plan and snapshot as before)
+local function planOpts() return { trace = Live.trace, station_build = S.stationBuild } end
+local function snapOpts() return { station_build = S.stationBuild, player = S.player } end
 
 -- outer chain of a widget reaches our window (UserWidget): WidgetTree -> UserWidget
 local function owned(e)
@@ -237,11 +252,12 @@ local function impOk()
     Live.trace("impOk before readStationBuild")
     readStationBuild()
     Live.trace("impOk after readStationBuild")
+    if stationBlocked() then return end
     local t0 = os.clock()
-    local live = Live.snapshot(S.U, F)
+    local live = Live.snapshot(S.U, F, snapOpts())
     Live.trace(("impOk snapshot %.1f ms blocks=%d machines=%d"):format((os.clock() - t0) * 1000, #live.blocks, #live.existing))
     t0 = os.clock()
-    local plan, perr = Plan.plan(text, live, F, { trace = Live.trace })
+    local plan, perr = Plan.plan(text, live, F, planOpts())
     Live.trace(("impOk plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then setStatus("error: " .. tostring(perr)); return end
     S.plan, S.text = plan, text
@@ -282,7 +298,7 @@ local function finishBuild(run)
   setBuildBtns(true)
   KEPT.has = true   -- the result line is the Notes status line (buildLoop); the plan summary stays
   local okR, err = pcall(function()
-    local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F), F)
+    local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F, snapOpts()), F, planOpts())
     if not plan then
       Live.trace("finishBuild replan failed: " .. tostring(perr))
       setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
@@ -342,10 +358,11 @@ local function buildClick()
   if S.run then return end
   if not S.plan and not S.text then setStatus("import first"); return end
   readStationBuild()
+  if stationBlocked() then return end
   local ui = readRestoreBox()
   local okRun, err = pcall(function()
-    local live = Live.snapshot(S.U, F)
-    local plan, perr = Plan.plan(S.text, live, F)
+    local live = Live.snapshot(S.U, F, snapOpts())
+    local plan, perr = Plan.plan(S.text, live, F, planOpts())
     if not plan then
       Live.trace("buildClick replan failed: " .. tostring(perr))
       setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
@@ -549,7 +566,7 @@ function M.open(block, player, ctl)
 end
 
 -- pure helpers for the tests (no game objects)
-M.pure = { hiddenNote = hiddenNote, fReason = fReason, checkedOf = checkedOf }
+M.pure = { hiddenNote = hiddenNote, fReason = fReason, checkedOf = checkedOf, stationHint = stationHint, STATION_OLD = STATION_OLD }
 -- label and enabled state of the build buttons while a run goes (running = true)
 function M.btnState(running)
   if running then return { build = "Abort", build_on = true, import_on = false } end

@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+Station Build needs **MSCore 0.8.0 or newer** (the add_block, pending and read_block_class natives). Without it the rest of the mod works as before.
+
+### Added
+- **Station Build (place station blocks + factory)** checkbox (`Chk_StationBuild`, default unchecked). Ticked: the JSON's station blocks are placed first (one add sequence through MSCore), then the factory as before.
+- Block rules: a class not in this game, a non-station block, a block whose research state is unknown, and a cell already occupied or overlapping another block of the file are skipped with a note. Locked (not researched) classes are listed as locked.
+- Research state is read in Lua (`DMSWorld:GetResearchState():IsBlockUnlocked`); when it cannot be read the block is skipped, and one note says Station Build placed nothing when that holds for every class.
+- Block costs are added to the cost list. If the unit and player together lack items for all blocks, Build is refused with the shortfall list and nothing is sent. Creative mode skips that refusal.
+- Summary adds `blocks N` when the checkbox is ticked.
+- Ticked on an older MSCore: the hint under the box and the status line read "Station Build needs MSCore 0.8.0 or newer"; Import and Build stop.
+- Trace (`bpu_trace.log`): every add, the poll of the station blocks, the research-state read per class.
+
+### Known limits
+- Not tested in game yet. Block bounds units and rotation are inferred. Untested: the research-state API names, the add/apply burst, which player inventory the apply needs.
+- Machines of a placed block show up in the game 20-30 s later (the existing overlay covers the wait).
+
 ## [0.2.0] - 2026-11-08
 
 Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes. Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size.
