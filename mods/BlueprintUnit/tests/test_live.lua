@@ -266,8 +266,8 @@ do
     local src = fw:read("a")
     fw:close()
     check(src:find("okT, errT = xpcall(", 1, true) ~= nil and src:find("build tick ERROR", 1, true) ~= nil
-          and src:find("build tick traceback", 1, true) ~= nil,
-          "window: tick error is caught, traced, and ends the run")
+          and src:find("end, tostring)", 1, true) ~= nil,
+          "window: tick error is caught (plain tostring handler), traced, and ends the run")
     check(src:find("finishBuild replan failed", 1, true) ~= nil and src:find("buildClick replan failed", 1, true) ~= nil,
           "window: replan failures traced")
     check(src:find('if not S.plan and not S.text then setStatus("import first")', 1, true) ~= nil,

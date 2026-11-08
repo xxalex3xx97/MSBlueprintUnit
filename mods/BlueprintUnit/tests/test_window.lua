@@ -69,5 +69,26 @@ for _, name in ipairs({ "probe_p1_station01.json", "probe_p2_dock.json" }) do
     check(off == nil and offerr:find("These blocks are not on the station grid", 1, true) ~= nil, name .. ": station build off -> unchanged refusal")
 end
 
+do
+    local cancelled, cb, asyncUsed = nil, nil, false
+    LoopInGameThreadWithDelay = function(ms, f) cb = f; return 42 end
+    CancelDelayedAction = function(h) cancelled = h end
+    LoopAsync = function() asyncUsed = true end
+    local n = 0
+    W.loopGT(300, function() n = n + 1; return n >= 2 end)
+    cb(); check(n == 1 and cancelled == nil, "loopGT: game-thread timer ticks, not cancelled yet")
+    cb(); check(n == 2 and cancelled == 42, "loopGT: fn true cancels the handle")
+    check(asyncUsed == false, "loopGT: LoopAsync unused when the game-thread API exists")
+    LoopInGameThreadWithDelay, CancelDelayedAction = nil, nil
+    local acb
+    LoopAsync = function(ms, f) acb = f end
+    ExecuteInGameThread = function(f) f() end
+    local m = 0
+    W.loopGT(300, function() m = m + 1; return m >= 2 end)
+    acb(); acb()
+    check(m == 2 and acb() == true, "loopGT fallback: stops after fn returns true")
+    LoopAsync, ExecuteInGameThread = nil, nil
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

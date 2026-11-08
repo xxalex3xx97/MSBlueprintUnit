@@ -238,8 +238,5 @@ pcall(function()
     end)
   end)
 end)
--- crate hide, world scan: every 3 s. Only crate sims (BP_BPUnitStoreObj_01_C) cost anything; done ones are cached.
-pcall(LoopAsync, 3000, function()
-  pcall(ExecuteInGameThread, function() pcall(BPU.hideCrates, nil) end)
-  return false
-end)
+-- crate hide, world scan: every 3 s, on the game thread (BPU.loopGT). Only crate sims (BP_BPUnitStoreObj_01_C) cost anything; done ones are cached.
+pcall(BPU.loopGT, 3000, function() pcall(BPU.hideCrates, nil); return false end)

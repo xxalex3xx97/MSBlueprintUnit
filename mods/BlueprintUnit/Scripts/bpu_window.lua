@@ -286,9 +286,13 @@ local function impOk()
     Live.trace(("impOk fillCost %.1f ms rows=%d"):format((os.clock() - t0) * 1000, #rows))
     M.impClose()
     Live.trace("impOk done")
-  end, function(e) pcall(function() local f = io.open("Mods/BlueprintUnit/bpu_last_import.json", "wb"); if f then f:write(S.lastText or ""); f:close() end end); Live.trace("impOk ERROR " .. tostring(e) .. " | " .. (tostring(debug.traceback("", 2)):gsub("\n", " ; "))); return e end)
+  end, tostring)
   collectgarbage("restart")
-  if not okRun then L("import failed: " .. tostring(err)); setStatus("error: import failed: " .. tostring(err)) end
+  if not okRun then
+    pcall(function() local f = io.open("Mods/BlueprintUnit/bpu_last_import.json", "wb"); if f then f:write(S.lastText or ""); f:close() end end)
+    Live.trace("impOk ERROR " .. tostring(err))
+    L("import failed: " .. tostring(err)); setStatus("error: import failed: " .. tostring(err))
+  end
 end
 
 -- end of a build run: buttons back, result line, cost list re-planned from the saved text (what is still missing)
@@ -310,30 +314,39 @@ local function finishBuild(run)
   if not okR then L("refresh after build failed: " .. tostring(err)) end
 end
 
--- polls the builder every 300 ms on the game thread. Stops (returns true) when the run was replaced or closed.
+-- game-thread timer. UE4SS LoopAsync runs its Lua lambda on the async thread inside this Lua state and corrupts it while the game thread runs long Lua (impOk, plan, build).
+-- LoopInGameThreadWithDelay runs on the game thread only. fn returns true = stop. Old UE4SS without it: LoopAsync + ExecuteInGameThread as before.
+function M.loopGT(ms, fn)
+  if LoopInGameThreadWithDelay and CancelDelayedAction then
+    local h
+    local okL, res = pcall(LoopInGameThreadWithDelay, ms, function() if fn() then pcall(CancelDelayedAction, h) end end)
+    if okL then h = res; return end
+  end
+  local stop = false
+  LoopAsync(ms, function()
+    if stop then return true end
+    pcall(ExecuteInGameThread, function() if not stop and fn() then stop = true end end)
+    return false
+  end)
+end
+
+-- polls the builder every 300 ms on the game thread (M.loopGT). Stops (returns true) when the run was replaced or closed.
 -- A Lua error in a tick ends the run (finishBuild sets S.run = nil, the next poll returns true); S.plan / S.text stay.
 local function buildLoop(run)
   return function()
     if S.run ~= run then return true end
-    pcall(ExecuteInGameThread, function()
-      local okT, errT = xpcall(function()
-        if S.run ~= run then return end
-        S.builder:tick(S.io.now())
-        local st = S.builder:status()
-        setStatus(st.text)
-        if st.state == "done" or st.state == "error" then finishBuild(run) end
-      end, function(e)
-        -- full traceback to bpu_trace.log; the short error (returned) still goes to the Notes panel
-        Live.trace("build tick traceback: " .. (debug.traceback(tostring(e), 2):gsub("\n", " ; ")))
-        return tostring(e)
-      end)
-      if not okT then
-        Live.trace("build tick ERROR " .. tostring(errT))
-        NOTE.status = "error: " .. tostring(errT)
-        renderNotes()
-        finishBuild(run)
-      end
-    end)
+    local okT, errT = xpcall(function()
+      S.builder:tick(S.io.now())
+      local st = S.builder:status()
+      setStatus(st.text)
+      if st.state == "done" or st.state == "error" then finishBuild(run) end
+    end, tostring)
+    if not okT then
+      Live.trace("build tick ERROR " .. tostring(errT))
+      NOTE.status = "error: " .. tostring(errT)
+      renderNotes()
+      finishBuild(run)
+    end
     return false
   end
 end
@@ -379,7 +392,7 @@ local function buildClick()
     S.run = run
     setBuildBtns(false)
     setStatus(S.builder:status().text)
-    LoopAsync(300, buildLoop(run))
+    M.loopGT(300, buildLoop(run))
   end)
   if not okRun then
     L("build failed: " .. tostring(err))
