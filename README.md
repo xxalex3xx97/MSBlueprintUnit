@@ -11,7 +11,7 @@ A **Blueprint Unit** station block, cloned from the Command Module and researche
 ## Requirements
 
 - Main Sequence Demo (Steam).
-- **MSCore 0.7.5 or newer**, installed with **MSCoreManager.exe**.
+- **MSCore 0.7.6 or newer**, installed with **MSCoreManager.exe**. Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes.
 - No other mod needed. Does not need MiningBenchMod or the Mining Unit.
 
 ## Install
@@ -45,9 +45,11 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 - Takes the items it needs from the unit's inventory first, then from your inventory.
 - Refunds go into the unit inventory.
 - Leftover items stay with you.
-- Items inside removed containers also refund into the unit. Rebuilt containers come back empty: restoring their contents is experimental and off (see the changelog).
+- Items inside removed containers also refund into the unit.
+- Container contents are restored after Build, on by default. The **Enable container item restoration** checkbox turns it off (`restore_off.txt` also disables it). With MSCore 0.7.6 the unit sorts, splits the exact amount and moves it; older MSCore is not supported.
+- While a build or restore runs, the **Build** button reads **Abort** and cancels it. Closing the window cancels it too; items already moved stay where they are.
 
-**Blueprint Unit inventory:** 120 slots, +10,000% stack size.
+**Blueprint Unit inventory:** 120 slots, +1,000,000% stack size. Existing 1000-slot or 300-slot units keep their size: place a new unit.
 
 ## Co-op
 
@@ -57,6 +59,8 @@ Every player in a co-op session needs the mod installed.
 
 - Station blocks cannot be imported yet. Only factory blueprints.
 - Teleporter cannot be placed by Build.
+- Single-player tested. Co-op may desync after the split step.
+- Belts and machine contents are not restored.
 
 ## Credits
 

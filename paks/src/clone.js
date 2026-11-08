@@ -53,22 +53,34 @@ const bpUe = job(BP_OLD + '.uexp', BP_NEW + '.uexp', (b) => ({
 }));
 console.log('BP uexp (0 ok): bpo=' + bpUe.bpo + ' bp=' + bpUe.bp + ' mesh=' + bpUe.mesh);
 
-// ---- Job A: prompt string table (copy of STB_Interaction, "to Use Blueprint"; same length) ----
 const PROMPT = 'STB_BPUnitPromp', STB_OLD = 'STB_Interaction';
-const PROMPT_OLD_TXT = 'to Open Designer\x00', PROMPT_NEW_TXT = 'to Use Blueprint\x00';
-if (PROMPT_OLD_TXT.length !== PROMPT_NEW_TXT.length || STB_OLD.length !== PROMPT.length) throw new Error('length mismatch: prompt');
-function jobAt(inDir, outDir, name, fn) {
-  const buf = fs.readFileSync(path.join(inDir, name)); const len = buf.length;
-  const c = fn(buf);
-  if (buf.length !== len) throw new Error('length changed ' + name);
-  fs.writeFileSync(path.join(outDir, name.replace(STB_OLD, PROMPT)), buf);
-  console.log('prompt', name, '->', PROMPT, JSON.stringify(c));
-  return c;
+if (STB_OLD.length !== PROMPT.length) throw new Error('length mismatch: prompt');
+const P_OLD = Buffer.from('\x11\x00\x00\x00to Open Designer\x00', 'latin1');
+const P_NEW = Buffer.from('\x17\x00\x00\x00to Open Blueprint Unit\x00', 'latin1');
+if (P_OLD.readInt32LE(0) !== P_OLD.length - 4 || P_NEW.readInt32LE(0) !== P_NEW.length - 4) throw new Error('prompt fstring len');
+const DELTA = P_NEW.length - P_OLD.length;   // 6
+const pUa = fs.readFileSync(path.join(LOC_IN, STB_OLD + '.uasset'));
+let pUe = fs.readFileSync(path.join(LOC_IN, STB_OLD + '.uexp'));
+const nUa = replaceAll(pUa, STB_OLD, PROMPT) + replaceAll(pUa, u16(STB_OLD), u16(PROMPT));
+const nUe = replaceAll(pUe, STB_OLD, PROMPT);
+need('prompt uasset table rename (ascii+utf16)', nUa); need('prompt uexp table rename', nUe);
+{
+  const i = pUe.indexOf(P_OLD);
+  if (i < 0 || pUe.indexOf(P_OLD, i + 1) !== -1) throw new Error('prompt text not exactly once');
+  const B = 60 + pUa.readInt32LE(52), EO = pUa.readInt32LE(B + 28);
+  const ser = Number(pUa.readBigInt64LE(EO + 28));
+  if (pUa.readInt32LE(44) !== pUa.length || ser !== pUe.length - 4 || Number(pUa.readBigInt64LE(EO + 36)) !== pUa.length || pUa.readInt32LE(B + 140) !== pUa.length + ser) throw new Error('STB header layout unexpected');
+  pUe = Buffer.concat([pUe.subarray(0, i), P_NEW, pUe.subarray(i + P_OLD.length)]);
+  pUa.writeBigInt64LE(BigInt(ser + DELTA), EO + 28);
+  pUa.writeInt32LE(pUa.length + ser + DELTA, B + 140);
+  let p = 10 + PROMPT.length + 1; const cnt = pUe.readInt32LE(p); p += 4; let val = null;
+  const fs_ = () => { const l = pUe.readInt32LE(p); const s = pUe.toString('latin1', p + 4, p + 3 + l); p += 4 + l; return s; };
+  for (let k = 0; k < cnt; k++) { const key = fs_(), v = fs_(); if (key === 'PressKeyToOpenDesigner') val = v; }
+  if (cnt !== 41 || val !== 'to Open Blueprint Unit' || pUe.readInt32LE(p) !== 0 || p + 4 !== pUe.length - 4 || pUe.readInt32LE(pUe.length - 4) !== -1641380927 || Number(pUa.readBigInt64LE(EO + 28)) !== pUe.length - 4 || pUa.readInt32LE(B + 140) !== pUa.length + pUe.length - 4) throw new Error('STB re-parse failed');
 }
-const pUa = jobAt(LOC_IN, LOC_OUT, STB_OLD + '.uasset', (b) => ({ stb: replaceAll(b, STB_OLD, PROMPT), stbU16: replaceAll(b, u16(STB_OLD), u16(PROMPT)) }));
-need('prompt uasset table rename (ascii+utf16)', pUa.stb + pUa.stbU16);
-const pUe = jobAt(LOC_IN, LOC_OUT, STB_OLD + '.uexp', (b) => ({ stb: replaceAll(b, STB_OLD, PROMPT), text: replaceAll(b, PROMPT_OLD_TXT, PROMPT_NEW_TXT) }));
-need('prompt uexp table rename', pUe.stb); need('prompt uexp text', pUe.text);
+fs.writeFileSync(path.join(LOC_OUT, PROMPT + '.uasset'), pUa);
+fs.writeFileSync(path.join(LOC_OUT, PROMPT + '.uexp'), pUe);
+console.log('prompt table written, uexp +' + DELTA);
 
 // ---- post-patches on existing BP_BlueprintUnit outputs (same length) ----
 function patchOut(name, fn) {
@@ -151,7 +163,7 @@ const SIM_OLD = 'BP_ContainerObject_2', SIM_NEW = 'BP_BPUnitStoreObj_01';
 if (SIM_OLD.length !== SIM_NEW.length) throw new Error('length mismatch: machine');
 // sim uexp int32 (BP_ContainerObject_2.uexp, from diff_container.py): InventorySize @120, StackSizeBonusMultiplier @124
 const INV_OFF = 120, INV_OLD = 32, INV_NEW = 120;
-const BONUS_OFF = 124, BONUS_OLD = 10, BONUS_NEW = 200;
+const BONUS_OFF = 124, BONUS_OLD = 10, BONUS_NEW = 20000;
 function machJob(src, dst, fn) {
   const buf = fs.readFileSync(path.join(MACH_IN, src)); const len = buf.length;
   const c = fn(buf);

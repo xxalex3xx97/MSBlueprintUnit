@@ -467,13 +467,17 @@ local function build(text, live, F, opts)
                 item_idx = item_idx or item_index(live.items)
                 local order, sum = {}, {}
                 for _, c in ipairs(m.contents_raw) do
-                    local hits = item_idx[canon(c.name)] or {}
+                    local cn = canon(c.name)
+                    -- site ids are sometimes singular ("reinforcedplate" = ITEM_ReinforcedPlates): try the other plural form
+                    local hits = item_idx[cn] or item_idx[cn:gsub("s$", "")] or item_idx[cn .. "s"] or {}
                     if #hits ~= 1 then
-                        bail((#hits == 0 and "unknown" or "ambiguous") .. " item in Contents at (" .. m.x .. "," .. m.y .. "): " .. c.name)
+                        -- an item the game does not know must not block the whole import: leave it out, say so
+                        notes[#notes + 1] = ("Contents item skipped (%s): %s x%d at (%d,%d)"):format(#hits == 0 and "unknown" or "ambiguous", c.name, c.count, m.x, m.y)
+                    else
+                        local name = hits[1]
+                        if not sum[name] then sum[name] = 0; order[#order + 1] = name end
+                        sum[name] = sum[name] + c.count
                     end
-                    local name = hits[1]
-                    if not sum[name] then sum[name] = 0; order[#order + 1] = name end
-                    sum[name] = sum[name] + c.count
                 end
                 m.contents = {}
                 for _, name in ipairs(order) do m.contents[#m.contents + 1] = { name = name, count = sum[name] } end
@@ -667,15 +671,14 @@ local function build(text, live, F, opts)
     local placed = {}
     for _, m in ipairs(rest) do placed[m] = true end
     for _, c in ipairs(cells) do if placed[cell_of[c]] then placed[c] = true end end
-    -- floor/parity via F for placed only; overlap pairwise (same layer), pair skipped when neither side is placed
+    -- floor/parity via F for placed only (floor failures are placed anyway); overlap pairwise (same layer), pair skipped when neither side is placed
     local floors = F.floor_rects(blocks, F.block_floor)
-    local skip = {}
+    local off, n_off = {}, 0   -- off-floor machines are placed anyway (the game does not check floors)
     for _, m in ipairs(all) do
         if placed[m] then
             local ok, why = F.validate_place(floors, {}, m)
             if not ok and why:find("outside every floor", 1, true) then
-                -- floor model has gaps (docks, shipyards): leave the machine out, never half-build it
-                skip[cell_of[m] or m] = true
+                if cell_of[m] == nil then off[m.dat] = (off[m.dat] or 0) + 1; n_off = n_off + 1 end
             elseif not ok then
                 if opts and type(opts.trace) == "function" then
                     local lines = {}
@@ -686,22 +689,10 @@ local function build(text, live, F, opts)
             end
         end
     end
-    if next(skip) then
-        local cnt, keep_m, keep_all = {}, {}, {}
-        for _, m in ipairs(machines) do
-            if skip[m] then cnt[m.dat] = (cnt[m.dat] or 0) + 1 else keep_m[#keep_m + 1] = m end
-        end
-        for _, e in ipairs(all) do
-            if skip[e] or skip[cell_of[e]] then placed[e] = nil else keep_all[#keep_all + 1] = e end
-        end
-        machines, all = keep_m, keep_all
-        -- exit cells of a skipped entrance drop too: they would otherwise drive conflict removals (newall)
-        local keep_c = {}
-        for _, c in ipairs(cells) do if not (skip[c] or skip[cell_of[c]]) then keep_c[#keep_c + 1] = c end end
-        cells = keep_c
-        for _, d in ipairs(sorted_keys(cnt)) do
-            notes[#notes + 1] = ("skipped (outside the modeled floors): %d x %s"):format(cnt[d], d)
-        end
+    if n_off > 0 then
+        local parts = {}
+        for _, d in ipairs(sorted_keys(off)) do parts[#parts + 1] = ("%s x%d"):format(d, off[d]) end
+        notes[#notes + 1] = ("%d placed outside the modeled floors: %s"):format(n_off, table.concat(parts, ", "))
     end
     -- sweep: sorted by left edge, stop when the next left edge is past this right edge (same pairs as the probe's O(n^2))
     -- ponytail: sweep is enough for ~3000 machines; spatial buckets if a blueprint ever gets much bigger
@@ -758,6 +749,12 @@ local function build(text, live, F, opts)
             end
         end
     end
+    -- kept splitters: port settings are never applied; count the ones whose live cfg bytes differ (empty live = different)
+    local split_diff = 0
+    for _, m in ipairs(kept) do
+        if tostring(m.dat):find("Splitter", 1, true) and m.cfg and m.cfg ~= "" and (m.live or "") ~= m.cfg then split_diff = split_diff + 1 end
+    end
+    if split_diff > 0 then notes[#notes + 1] = split_diff .. " kept splitters have different port settings than the blueprint (not changed)" end
 
     -- removals: conflicts (same layer overlap with new machines, kept ones excluded) + stale (existing the blueprint no longer has)
     local newall = {}
@@ -865,6 +862,7 @@ local function build(text, live, F, opts)
             end
         end
     end
+    if next(restore) then notes[#notes + 1] = "items on belts and in machines are not restored (the blueprint holds container contents only)" end
     local refund_all = {}
     for k, v in pairs(refund) do refund_all[k] = v end
     for k, v in pairs(refund_cont) do refund_all[k] = (refund_all[k] or 0) + v end

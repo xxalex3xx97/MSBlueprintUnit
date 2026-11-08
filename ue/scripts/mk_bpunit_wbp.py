@@ -205,6 +205,40 @@ txt('Txt_Summary', 'Row_Stack', '', 14, WHITE, wrap=True, h='Fill', pad=(0, 0, 0
 box(U.HorizontalBox, 'Row_Buttons', 'Row_Stack', h='Fill', pad=(0, 4, 0, 12))
 big_btn('Btn_Import', 'Txt_Import', 'Import', 'Row_Buttons', (0, 0, 6, 0))
 big_btn('Btn_Build', 'Txt_Build', 'Build', 'Row_Buttons', (6, 0, 0, 0))
+# Chk_Restore: container item restoration, DEFAULT CHECKED (Lua reads IsChecked at Build; unchecked = restore off)
+def cb_style(c):
+    def cb_brush(fill, edge):
+        b = round_brush(fill, 4.0)
+        v = U.DeprecateSlateVector2D(); v.set_editor_property('x', 22.0); v.set_editor_property('y', 22.0)
+        b.set_editor_property('image_size', v)
+        o = b.get_editor_property('outline_settings')
+        o.set_editor_property('color', slate_color(edge)); o.set_editor_property('width', 2.0)
+        b.set_editor_property('outline_settings', o)
+        return b
+    LIGHT = lin('D0D0D0')
+    cs = c.get_editor_property('widget_style')
+    for k, f in (('unchecked_image', INSET), ('unchecked_hovered_image', BTN), ('unchecked_pressed_image', BTN),
+                 ('checked_image', GOLD), ('checked_hovered_image', GOLD), ('checked_pressed_image', GOLD),
+                 ('undetermined_image', BTN), ('undetermined_hovered_image', BTN), ('undetermined_pressed_image', BTN)):
+        cs.set_editor_property(k, cb_brush(f, LIGHT))
+    c.set_editor_property('widget_style', cs)
+box(U.HorizontalBox, 'Row_Restore', 'Row_Stack', h='Fill', pad=(0, 0, 0, 4))
+cb2 = add(wbp, U.CheckBox, 'Chk_Restore', 'Row_Restore')
+slot(cb2, v='Center', pad=(0, 0, 10, 0))
+try:
+    cb_style(cb2)
+except Exception as e:
+    print('CHECKBOX-STYLE-NOTSET Chk_Restore (default style kept)', e)
+try:
+    cb2.set_editor_property('checked_state', U.CheckBoxState.CHECKED)
+    print('Chk_Restore default via checked_state')
+except Exception as e:
+    print('CHECKED_STATE-NOTSET', e)
+    cb2.set_editor_property('is_checked', True)
+    print('Chk_Restore default via is_checked')
+txt('Txt_Restore', 'Row_Restore', 'Enable container item restoration', 14, WHITE, fill=1.0, h='Fill', v='Center')
+txt('Txt_RestoreHint', 'Row_Stack', 'When enabled (default), the unit takes items from its inventory and fills the containers with the contents set in the JSON.',
+    12, DIM, wrap=True, h='Fill', pad=(32, 0, 0, 12))
 txt('Txt_UnitInvTitle', 'Row_Stack', 'Block inventory', 16, GOLD, pad=(0, 0, 0, 8))
 # inventory hosts: auto-size (Fill=0) Left/Top wrappers so WBP_Inventory_C's UniformGridPanel gets its natural width (no cell stretch);
 # vertical Fill weights (unit 0.5 / player 0.35) wrap them. ScrollBox desired width = content width, so Scr_UnitInv hugs the 8 columns.
