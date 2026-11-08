@@ -52,7 +52,7 @@ local function fixture(name)
 end
 local FX_INFO = {
     BPO_Station_01 = { station = true, unlocked = true, bounds = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }, cost = { ITEM_A = 2 } },
-    BPO_StationBlockDock = { station = true, unlocked = true, bounds = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }, cost = { ITEM_A = 1 } },
+    BPO_Dock_2 = { station = true, unlocked = true, bounds = { x0 = 0, x1 = 0, y0 = 0, y1 = 0, z0 = 0, z1 = 0 }, cost = { ITEM_A = 1 } },
 }
 local function fx_live(over)
     local l = { station = 42, blocks = { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0 } }, existing = {},
