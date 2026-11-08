@@ -2,7 +2,10 @@
 -- Run: lua test_live.lua (from any dir). Exit code 1 when a check fails.
 local dir = (arg and arg[0] or ""):match("^(.*[/\\])") or "./"
 package.path = dir .. "../Scripts/?.lua;" .. package.path
+do local f = io.open(dir .. "../bpu_trace.log", "wb"); f:write(("x"):rep(2200000)); f:close() end  -- over 2 MB: bpu_live truncates it at load
 local Live = require("bpu_live")
+local sz0 = -1  -- trace log size right after load (earlier checks write to it, so measure now)
+do local f = io.open(dir .. "../bpu_trace.log", "rb"); if f then sz0 = f:seek("end"); f:close() end end
 local P = require("bpu_plan")
 local F = dofile(dir .. "fixtures/mscore_factory_snapshot.lua")
 
@@ -156,6 +159,9 @@ check(#ms == 3 and ms[1].id == 10 and ms[2].id == 11 and ms[3].id == 12, "read_m
 check(ms[1].bcls == "BP_ConveyorBeltObject" and ms[1].cls == "BP_ConveyorBeltObject", "read_machines: _C stripped")
 check(ms[1].x == 1 and ms[1].y == 1 and ms[1].h == 0 and ms[1].rot == 0, "read_machines: x,y,h,rot")
 check(ms[1].cfg == "\1\2\255" and ms[2].cfg == "" and ms[3].cfg == nil, "read_machines: cfg bytes, empty, unreadable=nil")
+
+-- trace log cap: the 2.2 MB file written before the require was truncated at load
+check(sz0 == 0, "trace log > 2 MB truncated at load")
 
 -- trace trail: the native read writes "read_station done" to <mod dir>bpu_trace.log
 do

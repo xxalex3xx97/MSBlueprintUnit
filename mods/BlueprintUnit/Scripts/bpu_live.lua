@@ -9,6 +9,14 @@ L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_stati
 -- Trace trail for native crashes: print + append to <mod dir>pu_trace.log (open/append/flush/close per call).
 local MOD_DIR = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../"   -- Mods/BlueprintUnit/, not the process cwd
 local TRACE_PATH = MOD_DIR .. "bpu_trace.log"
+-- ponytail: cap bpu_trace.log: truncate at start when over 2 MB
+pcall(function()
+    local f = io.open(TRACE_PATH, "rb")
+    if f then
+        local n = f:seek("end"); f:close()
+        if n and n > 2 * 1024 * 1024 then local w = io.open(TRACE_PATH, "wb"); if w then w:close() end end
+    end
+end)
 local function TRACE(m)
     m = tostring(m)
     print("[BPUnit] " .. m)
@@ -543,17 +551,14 @@ function L.make_io(ctx)
         end
         return out
     end
-    -- one shift-click as the game sends it: press (action 2, sec = destination) then release (action 3, sec = 0).
-    -- Sent through DMSPlayerController:AddInventoryInteraction (the UI's own path): native inv_move sends receiver 0,
-    -- which the game drops. Both are sent for every move, each wrapped for the invtrace ourcmd tag and traced.
+    -- one shift-click as the game sends it (the UI's own path; native inv_move sends receiver 0 which the game drops).
     function io.send_move(prim, sec, slot0)
-        local Tr = require("bpu_invtrace")
         local c = ctx.ctl
         if not valid(c) then c = FindFirstOf("DMSPlayerController") end
         if not valid(c) then return false, "no controller" end
         local p, s0 = unw(prim), unw(sec)
         local function fire(pr, se, a)
-            return Tr.sending(call, function()
+            return call(function()
                 c:AddInventoryInteraction({ PrimaryInventoryID = pr, SecondaryInventoryID = se, SlotIndex = slot0, Action = a })
                 return true
             end)
@@ -578,22 +583,18 @@ function L.make_io(ctx)
         if inv == nil then return nil end
         return L.read_inv(inv)
     end
-    -- restore mode: "off" when Mods/BlueprintUnit/restore_off.txt exists, "probe" when restore_probe.txt exists (5 items of
-    -- one item only), else "on". The window's Chk_Restore checkbox is applied by the builder (builder:start opts.restore).
+    -- restore mode: "off" when Mods/BlueprintUnit/restore_off.txt exists, else "on". The Chk_Restore checkbox is applied by the builder (opts.restore).
     function io.restore_mode()
         local f = _G.io.open(MOD_DIR .. "restore_off.txt", "rb")
         if f then f:close() return "off" end
-        f = _G.io.open(MOD_DIR .. "restore_probe.txt", "rb")
-        if f then f:close() return "probe" end
         return "on"
     end
 
     function io.send_inv(prim, sec, slot0, action)
-        local Tr = require("bpu_invtrace")
         local c = ctx.ctl
         if not valid(c) then c = FindFirstOf("DMSPlayerController") end
         if not valid(c) then return false, "no controller" end
-        local ok, r = Tr.sending(call, function()
+        local ok, r = call(function()
             c:AddInventoryInteraction({ PrimaryInventoryID = unw(prim), SecondaryInventoryID = unw(sec), SlotIndex = slot0, Action = action })
             return true
         end)

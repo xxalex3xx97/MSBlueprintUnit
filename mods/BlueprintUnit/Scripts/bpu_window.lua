@@ -6,7 +6,6 @@
 local Live = require("bpu_live")
 local Plan = require("bpu_plan")
 local Build = require("bpu_build")
-local Invtrace = require("bpu_invtrace")   -- DEV: uicmd/ourcmd InventoryInput trace
 
 local M = {}
 local MSCore, F, native   -- set by M.init
@@ -449,7 +448,6 @@ function M.close()
   S.h, S.w, S.p, S.U, S.player, S.ctl = nil, nil, nil, nil, nil, nil
   S.builder, S.io, S.run, S.tc, S.imp = nil, nil, nil, nil, false   -- S.plan / S.text stay (Build re-plans from S.text)
   MSCore.wbp.close(h)
-  Invtrace.close()
   pcall(ExecuteWithDelay, 100, function() pcall(ExecuteInGameThread, MSCore.ui.clearClicks) end)
 end
 
@@ -538,7 +536,6 @@ local function openWindow(block, player, ctl)
   setBuildBtns(true)
   txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
   L("open unit=".. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
-  Invtrace.open()
 end
 
 -- block = BPO_BlueprintUnit_C only (main.lua opener filter). player = DMSPlayerObject. ctl = controller or nil. Game thread.

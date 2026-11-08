@@ -841,7 +841,7 @@ do
     b:start(plan_for(f, { removed = m.removed, refund = m.total }), {})
     local st = run(b, f, 4000)
     check(st.state == "error" and st.removed == 15 and f.calls.rm == 15 and st.text ==
-          "stopped after 15 removals: the game did not apply the move (see bpu_trace.log: ourcmd recv must equal uicmd recv)",
+          "stopped after 15 removals: the game did not apply the move (see bpu_trace.log)",
           "stall: moves never drain -> stop after the first batch, no more removals (" .. st.text .. ")")
     check(noted and #noted.r == 15, "stall: note_build reports only the 15 sent removals")
 end
@@ -1006,7 +1006,7 @@ do
     b:start(plan_for(f, { removed = { { id = 8, bcls = "BP_BOX", x = 1, y = 0, refund = { ITEM_Gear = 1 } } } }), {})
     local st = run(b, f, 4000)
     check(st.state == "error" and f.calls.rm == 0 and st.text ==
-          "the game did not move the container items (see bpu_trace.log: ourcmd recv must equal uicmd recv)",
+          "the game did not move the container items (see bpu_trace.log)",
           "container: moves never empty it -> stall, nothing removed (" .. st.text .. ")")
 end
 
@@ -1593,24 +1593,6 @@ do
           "cancel during the restore: 1000 sent, none after the cancel (" .. st.text .. ")")
 end
 
--- probe: only the first item of the first container, at most 5 (rounding applies): a 5050 stack moves nothing, the note says why
-do
-    local f = fake({ redirect = REDIRECT_ON, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 5050, 5050), S("ITEM_Gear", 10) }, 3),
-                     station = {}, max = { ITEM_Plate = 5050 }, raw = { ITEM_Plate = 5050 } })
-    f.mode = "probe"
-    local tr = tracer(f)
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 20 } }), cont_at(7, { { name = "ITEM_Gear", count = 10 } }) },
-                         need = {}, refund = {} }), {})
-    local st = run(b, f, 600)
-    local ids = f.io.container_ids()
-    check(st.state == "done" and #ids == 2 and #f.cmd_log == 0 and tot(f.containers[ids[2]].slots, "ITEM_Gear") == 0 and #f.violations == 0,
-          "probe: nothing sent for 5 of a 5050 stack, other container untouched (" .. st.text .. ")")
-    check(st.text:find("probe: restored 0 of Plate into container id " .. tostring(ids[1]), 1, true) ~= nil
-          and st.text:find("Plate x5 left out (under half a unit stack)", 1, true) ~= nil and starts(tr, "probe: unit=["),
-          "probe: summary note, rounding note, probe trace line")
-end
-
 -- mode off (restore_off.txt): nothing sent, a note says where the switch is
 do
     local f = whole_fake()
@@ -1884,22 +1866,6 @@ do
     local cid = new_cont(f)
     check(st.state == "done" and cid and cont_plate(f, cid) == 120 and cmds_of(f, 5) == 6 and #f.violations == 0
           and st.text:find("unit not sorted (SORT refused)", 1, true) ~= nil, "SORT refused: 6 tries, note, restore goes on (" .. st.text .. ")")
-end
-
--- probe with split: 5 of a 100 stack -> one split of 5, one TRANSFER, container 5; two unit traces (before and after)
-do
-    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Gear", 10, 50) }, 4) })
-    f.mode = "probe"
-    local tr = tracer(f)
-    local b = B.new(f.io)
-    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 20 } }) }, need = {}, refund = {} }), {})
-    local st = run(b, f, 600)
-    local cid = new_cont(f)
-    local nprobe = 0
-    for _, t in ipairs(tr) do if t:find("^probe: unit=%[") then nprobe = nprobe + 1 end end
-    check(st.state == "done" and cid and cont_plate(f, cid) == 5 and #f.splits == 1 and f.splits[1][3] == 5 and #f.violations == 0 and nprobe == 2
-          and st.text:find("probe: restored 5 of Plate into container id " .. tostring(cid), 1, true) ~= nil,
-          "probe split: 5 in, one split of 5, unit traces before and after (" .. st.text .. ")")
 end
 
 -- cancel during the SORT wait: the SORT is the last command

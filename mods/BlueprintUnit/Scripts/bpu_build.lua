@@ -337,7 +337,7 @@ local function new_run(plan)
         plan = plan, active = false, state = "idle", text = "", stage = 0, flow = "legacy",
         cids_before = {}, cplaced = {}, base = "",   -- restore: container ids before the Build, placed containers in order, text of the Build part
         rjobs = {}, jobs_set = false, cready = 0, rnotes = {}, rseen = {}, rcount = 0, rcont = 0,
-        restore_on = false, probe = false, probe_started = false, t_restore = 0, ui_restore = nil, t_progress = 0, pipe_sig = nil,
+        restore_on = false, t_restore = 0, ui_restore = nil, t_progress = 0, pipe_sig = nil,
         queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
@@ -361,7 +361,7 @@ end
 --   | io.container_ids() -> ids
 --   restore split route (optional, MSCore 0.7.6): io.split(inv, src0, amount, dst0) -> ok, err. Local edit of one inventory,
 --   not a game command. Present = split route (stage 13 SORT, then exact pieces); absent = rounded whole-stack route.
---   io.restore_mode() -> "on" | "probe" | "off" (optional; absent = "on"). builder:start(plan, { restore = true|false|nil }): the checkbox
+--   io.restore_mode() -> "on" | "off" (optional; absent = "on"). builder:start(plan, { restore = true|false|nil }): the checkbox
 --   io.remember(cell_key, list {name,count}) (optional, session memory of removed containers) | io.read_machine_inv(id) (contents)
 --   io.now() -> ms
 --   io.note_build(placed, removed) optional: run end with machines placed (plan entries) / removed (live ids)
@@ -505,7 +505,6 @@ function B.new(io)
             R.rnotes[#R.rnotes + 1] = R.ui_restore == false and "restore is off (Chk_Restore unchecked)" or "restore is off (restore_off.txt in Mods/BlueprintUnit)"
             return end_run(base)
         end
-        R.probe = (mode == "probe")
         R.stage = 12
         R.t_stage = now
         R.t_next = now + POLL_MS
@@ -703,7 +702,7 @@ function B.new(io)
             if get(held, item) > 0 then
                 if now - R.t_stage >= DRAIN_MS then
                     for _, k in ipairs(sorted_keys(R.drain)) do trace(("drain stall: held[%s]=%d"):format(k, get(held, k))) end
-                    return stall("the game did not apply the move (see bpu_trace.log: ourcmd recv must equal uicmd recv)")
+                    return stall("the game did not apply the move (see bpu_trace.log)")
                 end
                 R.t_next = now + POLL_MS
                 return
@@ -767,7 +766,7 @@ function B.new(io)
                 if (s.item or "") ~= "" and (s.amount or 0) > 0 then n_now = n_now + 1 end
             end
             if n_now == e.slots then
-                return stall("the game did not move the container items (see bpu_trace.log: ourcmd recv must equal uicmd recv)")
+                return stall("the game did not move the container items (see bpu_trace.log)")
             end
             return stall("the unit inventory is full, empty it and Build again")
         end
@@ -916,16 +915,7 @@ function B.new(io)
             for i, pl in ipairs(R.cplaced) do
                 if pl.restore and #pl.restore > 0 then jobs[#jobs + 1] = { id = new[i], items = pl.restore } end
             end
-            if R.probe then
-                if #jobs == 0 then
-                    R.rnotes[#R.rnotes + 1] = "probe: no container with contents to restore"
-                    return end_run(R.base)
-                end
-                local first = jobs[1].items[1]
-                jobs = { { id = jobs[1].id, items = { { name = first.name, count = math.min(5, first.count) } } } }
-            end
             R.rjobs, R.jobs_set = jobs, true
-            R.probe_job = R.probe and jobs[1] or nil
         end
         local ready = true
         for _, job in ipairs(R.rjobs) do
@@ -962,7 +952,7 @@ function B.new(io)
         return table.concat(parts, " ")
     end
     local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
-    -- end of the restore phase (probe: its summary note first)
+    -- end of the restore phase
     local function restore_end()
         -- unit stacks at the end (read only: a failed read is not an error here)
         if io.read_inv then
@@ -970,10 +960,6 @@ function B.new(io)
             if ps2 then trace("restore unit stacks (end): " .. slots_text(us2)) end
         end
         if (R.skipped or 0) > 0 then rs_note(("%s command(s) skipped (refused)"):format(R.skipped)) end
-        local j = R.probe_job
-        if R.probe and j then
-            rs_note(("probe: restored %s of %s into container id %s"):format(R.rcount, shortname(j.items[1].name), tostring(j.id)))
-        end
         end_run(R.base)
     end
     -- rcount / rcont (containers that got items, by container id)
@@ -981,11 +967,6 @@ function B.new(io)
         R.rcount = R.rcount + n
         if n > 0 and not R.rseen[id] then R.rseen[id] = true; R.rcont = R.rcont + 1 end
     end
-    -- probe: slot lists of the unit and the container
-    local function probe_trace(us, cslots)
-        trace(("probe: unit=[%s] cont=[%s]"):format(slots_text(us), slots_text(cslots)))
-    end
-
     -- stage 13 (split route): SORT the unit inventory (action 5, primary = unit, secondary 0, slot 0), then wait until the
     -- unit shows no change for SORT_SETTLE_MS (cap SORT_MS from the stage start). A refused SORT is retried, then the restore goes on.
     local function unit_sig(us)
@@ -1056,10 +1037,6 @@ function B.new(io)
                 -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
                 rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
             else
-                if R.probe and not R.probe_started then
-                    R.probe_started = true
-                    probe_trace(us, cinv.slots)
-                end
                 local cn = norm(cinv)
                 local cmax = capmap(io, cn, um)
                 local jm = { id = job.id, slots = cn, short = {}, moved = 0 }
@@ -1134,10 +1111,6 @@ function B.new(io)
                 -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
                 rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
             else
-                if R.probe and not R.probe_started then
-                    R.probe_started = true
-                    probe_trace(us, cinv.slots)
-                end
                 local cn = norm(cinv)
                 local cmax = capmap(io, cn, um)
                 local jm = { id = job.id, slots = cn, short = {}, moved = 0 }
@@ -1254,12 +1227,6 @@ function B.new(io)
 
     -- verified (or nothing to send): count what the containers got, end the restore
     local function pipe_finish()
-        if R.probe and R.pm.jobs[1] then
-            -- probe after-trace: the unit and the first container as the game shows them now
-            local ps, us2 = read_both()
-            local _, _, cinv = contents_of(R.pm.jobs[1])
-            if ps and cinv then probe_trace(us2, cinv.slots) end
-        end
         local drained = {}
         for _, jm in ipairs(R.pm.jobs) do if jm.drained then drained[#drained + 1] = tostring(jm.id) end end
         if #drained > 0 then trace("restore drained containers: " .. table.concat(drained, ",")) end
@@ -1310,15 +1277,6 @@ function B.new(io)
                 ok = true   -- its split was skipped: nothing is staged, so this TRANSFER is passed (not sent, not counted)
             else
                 ok, err = io.send_inv(c.prim, c.sec, c.slot0, c.action)
-            end
-            if R.probe then
-                if c.kind == "split" then
-                    trace(("restore pipe: split src0=%s amount=%s dst0=%s sent=%s"):format(tostring(c.src), tostring(c.amount),
-                        tostring(c.dst), tostring(ok)))
-                else
-                    trace(("restore pipe: %s primary=%s secondary=%s slot0=%s action=%s sent=%s"):format(c.kind,
-                        tostring(c.prim), tostring(c.sec), tostring(c.slot0), tostring(c.action), tostring(ok)))
-                end
             end
             if ok then
                 R.fails = 0
