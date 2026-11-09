@@ -219,6 +219,8 @@ local function station_data(st)
     TRACE("read_station native sid=" .. tostring(sid))
     local b, m = FN.read_station(sid)
     if not b then error("read_station: " .. tostring(m), 0) end
+    -- bid = live BlockID (MSCore 0.8.3), -1/nil when unreadable. id = bid: the dock rename matches on it (bpu_plan renames).
+    for _, x in ipairs(b) do if type(x.bid) == "number" and x.bid >= 0 then x.id = x.bid end end
     cache = { sid = sid, blocks = b, machines = m }
     TRACE("read_station done blocks=" .. #b .. " machines=" .. #m)
     return cache
@@ -563,38 +565,24 @@ function L.item_by_name(name)
     return ITEMS[name]
 end
 
--- id of a MachineID / BlockID / ParentID value: a number, or the .ID of its struct wrapper; nil when neither
-local function id_val(v)
-    if type(v) == "number" then return v end
-    local a = unw(rd(v, "ID"))
-    if type(a) == "number" then return a end
-    local b = unw(v)
-    if type(b) == "number" then return b end
-    return nil
-end
-
--- Dock child machine of a named live block: the Dock object of the block's class with ParentID = station and BlockID = rn.id.
--- Exactly one match, else nil + reason. rn.id nil (live read has no BlockID) = nil: a dock is never guessed.
+-- Dock child machine of a named live block, from MSCore 0.8.3 FN.read_docks rows {machine_id, block_id, parent_id, class, name, raw_id}:
+-- the row with class = rn.cls, parent_id = station and block_id = rn.id. Exactly one match, else nil + reason.
+-- rn.id nil (block id not read) = nil: a dock is never guessed. Older MSCore (no read_docks) = nil + reason, never a silent no-op.
 function L.dock_for(station, rn)
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.read_docks) then return nil, "dock names need MSCore >= 0.8.3" end
     if rn.id == nil then return nil, "block id not in the live read" end
+    local rows, err = FN.read_docks(station)
+    if not rows then return nil, tostring(err) end
     local hit, n = nil, 0
-    for _, d in ipairs(FindAllOf("Dock") or {}) do
-        if valid(d) and clsname(d) == rn.cls and id_val(rd(d, "ParentID")) == station and id_val(rd(d, "BlockID")) == rn.id then
+    for _, r in ipairs(rows) do
+        if short(r.class) == rn.cls and r.parent_id == station and r.block_id == rn.id then
             n = n + 1
-            hit = d
+            hit = r
         end
     end
     if n ~= 1 then return nil, n .. " dock matches" end
     return hit
-end
-
--- DisplayName of a dock: FText (ToString) or FString. nil when unreadable.
-local function dock_name(d)
-    local okT, t = pcall(function() return rd(d, "DisplayName"):ToString() end)
-    if okT and type(t) == "string" then return t end
-    local v = unw(rd(d, "DisplayName"))
-    if type(v) == "string" then return v end
-    return nil
 end
 
 -- rename a dock with the game's own two steps: SetTextInputCommand.CreateInputSetText(text, 0), then
@@ -810,10 +798,10 @@ function L.make_io(ctx)
         for _, rn in ipairs(list or {}) do
             local okd, d, err = pcall(L.dock_for, U.station, rn)
             if not okd then d, err = nil, tostring(d) end
-            local mid = d and id_val(rd(d, "MachineID"))
+            local mid = d and d.machine_id
             if not d or mid == nil then
                 failn = failn + 1; why = why or err or "dock machine id not readable"
-            elseif sent[mid] or not Plan.rename_due(rn.name, dock_name(d)) then
+            elseif sent[mid] or not Plan.rename_due(rn.name, d.name) then
                 -- already has this name, or sent in this run: nothing to do
             else
                 sent[mid] = true

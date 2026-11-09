@@ -46,8 +46,9 @@ local fakeMachines = {
 }
 Live.mscore = { factory_native = { read_station = function(sid)
     fakeCalls = fakeCalls + 1
-    return { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0 } }, fakeMachines
+    return { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0, bid = -1 } }, fakeMachines
 end,
+read_docks = function(sid) return {} end,
 -- native shape: {item="ITEM_X" | "", amount, max} per slot; the fake keeps game-like slot structs {Item, Amount}
 read_inventory = function(id)
     local src = fakeInv[id]
@@ -625,19 +626,27 @@ end
 
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 
--- dock names: dock child found by class + ParentID + BlockID (exactly one); rename = CreateInputSetText(text, 0) then AddInputCommand(MachineID)
+-- dock names: MSCore 0.8.3 read_docks rows; one match by class, parent_id and block_id; rename = CreateInputSetText(text, 0) then AddInputCommand(machine_id)
 do
-    local function dock(cls, mid, bid, parent, name)
-        return named("Dock_" .. mid, { Class = named(cls), ParentID = parent, BlockID = { ID = bid }, MachineID = { ID = mid },
-            DisplayName = { ToString = function() return name end } })
-    end
-    local savedDocks, savedSFO3 = world.Dock, StaticFindObject
-    local d_old = dock("BPO_StationBlockDock_C", 555, 77, 42, "Old")
-    world.Dock = { d_old, dock("BPO_StationBlockDock_C", 556, 78, 42, "Other"), dock("BPO_IndustrialDock_C", 557, 77, 42, "X") }
+    local savedMs, savedSFO3 = Live.mscore, StaticFindObject
+    local function row(cls, mid, bid, parent, name) return { machine_id = mid, block_id = bid, parent_id = parent, class = cls, name = name, raw_id = mid } end
+    local rows = { row("BPO_StationBlockDock_C", 555, 77, 42, "Old"), row("BPO_StationBlockDock_C", 556, 78, 42, "Other"),
+        row("BPO_IndustrialDock_C", 557, 77, 42, "X") }
+    local d_old = rows[1]
+    Live.mscore = { factory_native = { read_docks = function() return rows end } }
     local rn = { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 77 }
-    check(Live.dock_for(42, rn) == d_old, "dock_for: one match by class, ParentID and BlockID")
+    check(Live.dock_for(42, rn) == d_old, "dock_for: one native match by class, parent_id and block_id")
     check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" }) == nil, "dock_for: no block id -> nil")
     check(Live.dock_for(99, rn) == nil, "dock_for: other station -> nil")
+    check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 79 }) == nil, "dock_for: no match -> nil")
+    rows[4] = row("BPO_StationBlockDock_C", 558, 77, 42, "Dup")
+    local dn2, dw2 = Live.dock_for(42, rn)
+    check(dn2 == nil and dw2 == "2 dock matches", "dock_for: two matches -> nil")
+    rows[4] = nil
+    Live.mscore = { factory_native = {} }
+    local dn3, dw3 = Live.dock_for(42, rn)
+    check(dn3 == nil and dw3 == "dock names need MSCore >= 0.8.3", "dock_for: MSCore without read_docks -> refused with message")
+    Live.mscore = { factory_native = { read_docks = function() return rows end } }
     local made, sentc = {}, {}
     StaticFindObject = function(_) return { CreateInputSetText = function(_, text, cfg)
         made[#made + 1] = { text = text, cfg = cfg }
@@ -648,12 +657,12 @@ do
     local okR, failR = ioR.send_renames({ rn })
     check(okR == 1 and failR == 0 and #sentc == 1 and sentc[1].id == 555, "send_renames: one AddInputCommand to the dock MachineID")
     check(#made == 1 and made[1].text == "New" and made[1].cfg == 0, "send_renames: CreateInputSetText(name, 0)")
-    d_old.DisplayName = { ToString = function() return "New" end }
+    d_old.name = "New"
     local o2, f2 = ioR.send_renames({ rn })
     check(o2 == 0 and f2 == 0 and #sentc == 1, "send_renames: live name already equal -> nothing sent")
     local o3, f3 = ioR.send_renames({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" } })
     check(o3 == 0 and f3 == 1 and #sentc == 1, "send_renames: no block id -> not applied, nothing sent")
-    world.Dock, StaticFindObject = savedDocks, savedSFO3
+    Live.mscore, StaticFindObject = savedMs, savedSFO3
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, fail))

@@ -255,13 +255,14 @@ local function split_plain(s, sep)
 end
 
 -- parse_station(text) -> blocks, machines. Text from MSCore.native.read_station (format: cpp/MSCore/msc_station.hpp).
--- B\tclass\tgx\tgy\th\trot ; M\tid\tcls\tx\ty\th\trot\tcfg. cfg "-" -> nil (unreadable), "" -> "" (empty), else raw bytes.
+-- B\tclass\tgx\tgy\th\trot\tbid ; M\tid\tcls\tx\ty\th\trot\tcfg. cfg "-" -> nil (unreadable), "" -> "" (empty), else raw bytes.
+-- bid = BlockID (MSCore 0.8.3), -1 when unreadable.
 function M.parse_station(text)
     local blocks, machines = {}, {}
     for _, line in ipairs(split_plain(text or "", "\n")) do
         local f = split_plain(line, "\t")
         if f[1] == "B" and #f >= 6 then
-            blocks[#blocks + 1] = { class = f[2], gx = tonumber(f[3]), gy = tonumber(f[4]), h = tonumber(f[5]), rot = tonumber(f[6]) }
+            blocks[#blocks + 1] = { class = f[2], gx = tonumber(f[3]), gy = tonumber(f[4]), h = tonumber(f[5]), rot = tonumber(f[6]), bid = tonumber(f[7]) }
         elseif f[1] == "M" and #f >= 8 then
             local cfg = f[8]
             if cfg == "-" then cfg = nil
