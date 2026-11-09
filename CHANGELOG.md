@@ -2,10 +2,16 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.1] - 2026-11-09
+
+Requires **MSCore 0.7.6 or newer**.
+
+### Fixed
+- Underground belts pair per floor (machine height): stacked floors no longer fail with "underground too long".
+- Random Lua errors and crashes when importing large designs: the timers now run on the game thread.
 
 ### Changed
-- **Chk_Restore** unchecked: the cost list leaves out the container contents, and toggling the box refreshes the list at once from the last plan (no replan).
+- **Enable container item restoration** unchecked: the cost list leaves out the container item costs, and toggling the box refreshes the cost list at once (no replan).
 
 ## [0.2.0] - 2026-11-08
 
