@@ -444,7 +444,7 @@ local function plan_blocks(doc, blocks, live, opts)
         opts.trace(("station blocks: doc %d, missing %d, accept %d, remove %d, skipped %d, locked %s"):format(#doc.blocks, #missing,
             #bl, #res.remove, #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
         for _, n in ipairs(res.raw) do opts.trace("  " .. n) end
-        for _, s in ipairs(res.shortfall) do opts.trace(("  short %s need %d have %d"):format(s.item, s.need, s.have)) end
+        for _, s in ipairs(res.shortfall) do opts.trace(("  short %s need %d have %d"):format(s.item, math.floor(s.need + 0.5), math.floor(s.have + 0.5))) end
         opts.trace("station blocks self overlaps: " .. #B.self_overlaps(doc.blocks, info_of))
     end
     return out
@@ -584,7 +584,7 @@ local function build(text, live, F, opts)
                     local hits = item_idx[cn] or item_idx[cn:gsub("s$", "")] or item_idx[cn .. "s"] or {}
                     if #hits ~= 1 then
                         -- an item the game does not know must not block the whole import: leave it out, say so
-                        notes[#notes + 1] = ("Contents item skipped (%s): %s x%d at (%d,%d)"):format(#hits == 0 and "unknown" or "ambiguous", c.name, c.count, m.x, m.y)
+                        notes[#notes + 1] = ("Contents item skipped (%s): %s x%d at (%d,%d)"):format(#hits == 0 and "unknown" or "ambiguous", c.name, math.floor(c.count + 0.5), math.floor(m.x + 0.5), math.floor(m.y + 0.5))
                     else
                         local name = hits[1]
                         if not sum[name] then sum[name] = 0; order[#order + 1] = name end
@@ -751,7 +751,7 @@ local function build(text, live, F, opts)
                 end
                 if trace_on and is_ug(m) then
                     opts.trace(("ug cfg reject: json %s %d,%d,h%d,rot%d | live id=%s live %s live_len=%d | json %s json_len=%d"):format(
-                        tostring(m.bcls), m.x, m.y, m.h, m.rot, tostring(e.id), cfg_desc(e.cfg), cfg_len(e.cfg),
+                        tostring(m.bcls), math.floor(m.x + 0.5), math.floor(m.y + 0.5), math.floor(m.h + 0.5), math.floor(m.rot + 0.5), tostring(e.id), cfg_desc(e.cfg), cfg_len(e.cfg),
                         cfg_desc(m.cfg), cfg_len(m.cfg or "")))
                 end
             end

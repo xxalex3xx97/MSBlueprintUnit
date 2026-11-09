@@ -25,6 +25,8 @@ local Blk = require("bpu_blocks")
 local B = {}
 
 local TOTAL_MS = 300000   -- whole run
+-- %d takes integers only: game amounts and ms differences can be fractional (io.now() is a float ms clock)
+local function whole(x) return math.floor((tonumber(x) or 0) + 0.5) end
 local BLOCKS_MS = 10000   -- Station Build: the station blocks must all show within this after their one send, else STALL (never resent)
 local STAGE_MS = 3000     -- staging round stalls after this
 local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
@@ -99,7 +101,7 @@ end
 local function list(m)
     local parts = {}
     for _, k in ipairs(sorted_keys(m)) do
-        if m[k] > 0 then parts[#parts + 1] = (k:gsub("^ITEM_", "")) .. (" x%d"):format(m[k]) end
+        if m[k] > 0 then parts[#parts + 1] = (k:gsub("^ITEM_", "")) .. (" x%d"):format(whole(m[k])) end
     end
     return table.concat(parts, ", ")
 end
@@ -720,7 +722,7 @@ function B.new(io)
             return stall("the unit inventory is full, empty it and Build again")
         end
         for _, s in ipairs(mo) do
-            trace(("moveout: chosen slot0=%d item=%s amount=%d"):format(s - 1, ps[s].item, ps[s].amount))
+            trace(("moveout: chosen slot0=%d item=%s amount=%d"):format(s - 1, ps[s].item, whole(ps[s].amount)))
         end
         for _, s in ipairs(mo) do
             if not send_move(R.player_inv, R.unit_inv, s, "moveout") then return fail("InventoryInput refused") end
@@ -776,7 +778,7 @@ function B.new(io)
         for item in pairs(R.drain) do
             if get(held, item) > 0 then
                 if now - R.t_stage >= DRAIN_MS then
-                    for _, k in ipairs(sorted_keys(R.drain)) do trace(("drain stall: held[%s]=%d"):format(k, get(held, k))) end
+                    for _, k in ipairs(sorted_keys(R.drain)) do trace(("drain stall: held[%s]=%d"):format(k, whole(get(held, k)))) end
                     return stall("the game did not apply the move (see bpu_trace.log)")
                 end
                 R.t_next = now + POLL_MS
@@ -1557,7 +1559,7 @@ function B.new(io)
             local left = Blk.missing_after(P.blocks, ex, P.remove)
             miss = #left
             if miss == 0 then
-                trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, now - R.t_blocks))
+                trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, whole(now - R.t_blocks)))
                 resolve_new_renames(ex, now)
                 if #R.bren > 0 then
                     R.stage = 19
@@ -1596,7 +1598,7 @@ function B.new(io)
                 local parts = {}
                 for _, s in ipairs(plan.block_refuse) do
                     local name = s.item:gsub("^ITEM_", "")
-                    parts[#parts + 1] = ("need %d %s, have %d (%d short)"):format(s.need, name, s.have, s.need - s.have)
+                    parts[#parts + 1] = ("need %d %s, have %d (%d short)"):format(whole(s.need), name, whole(s.have), whole(s.need - s.have))
                 end
                 return start_fail(Blk.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; " .. Blk.TEXT.nothing_built .. ".")
             end

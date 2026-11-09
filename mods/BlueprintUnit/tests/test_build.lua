@@ -2358,6 +2358,24 @@ do
     check(st.state == "done" and #calls == 1 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil, "dock names: normal path sends the live renames once (" .. st.text .. ")")
 end
 
+-- fractional ms clock (io.now is a float ms clock): the station-block trace used %d on now - t_blocks and raised, aborting the tick
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 1000, block_delay = 1000 })
+    f.clock = 678.123
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local err
+    for _ = 1, 80 do
+        f.clock = f.clock + 333.3
+        local okt, e = pcall(b.tick, b, f.clock)
+        if not okt then err = e break end
+        if b:status().state ~= "working" then break end
+    end
+    local st = b:status()
+    check(ok and not err and st.state == "done" and #f.ren_calls == 1 and f.calls.pl == 1,
+          "fractional ms: no error in the station block stage, dock rename sent (" .. tostring(err or st.text) .. ")")
+end
+
 -- permanent reason (io.dock_found): the dock fails at the first check, no polling, reason in the status, factory still runs
 do
     local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_reason = "dock names need MSCore >= 0.8.3" })

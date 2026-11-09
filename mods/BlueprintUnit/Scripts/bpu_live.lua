@@ -789,7 +789,7 @@ function L.make_io(ctx)
             local fn = split_fn()
             if not fn then return false, "inv_split gone" end
             local ok, r = call(fn, unw(inv), src0, amount, dst0)
-            TRACE(("inv_split inv=%s src0=%d amount=%d dst0=%d -> ok=%s ret=%s"):format(tostring(unw(inv)), src0, amount, dst0,
+            TRACE(("inv_split inv=%s src0=%d amount=%d dst0=%d -> ok=%s ret=%s"):format(tostring(unw(inv)), src0, math.floor((tonumber(amount) or 0) + 0.5), dst0,
                 tostring(ok), tostring(r)))
             return ok, r
         end

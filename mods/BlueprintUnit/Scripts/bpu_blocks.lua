@@ -73,7 +73,8 @@ B.RAW = {
 }
 
 local function ik(v)
-    return math.tointeger(v) or v or 0
+    local n = tonumber(v) or 0
+    return math.tointeger(n) or math.floor(n + 0.5)   -- %d caller: a fractional game coordinate must not raise
 end
 
 function B.key(b)
