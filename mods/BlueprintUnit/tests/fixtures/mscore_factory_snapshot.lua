@@ -263,7 +263,7 @@ function M.parse_station(text)
         local f = split_plain(line, "\t")
         if f[1] == "B" and #f >= 6 then
             local mids = {}
-            if f[9] and f[9] ~= "" then for _, v in ipairs(split_plain(f[9], ",")) do mids[#mids + 1] = tonumber(v) end end
+            if f[9] and f[9] ~= "" then for p in string.gmatch(f[9], "[^,]+") do local n = tonumber(p); if n then mids[#mids + 1] = n end end end   -- tonumber skips spaces; non-numeric pieces dropped
             blocks[#blocks + 1] = { class = f[2], gx = tonumber(f[3]), gy = tonumber(f[4]), h = tonumber(f[5]), rot = tonumber(f[6]), bid = tonumber(f[7]), mids = mids }
         elseif f[1] == "M" and #f >= 8 then
             local cfg = f[8]
