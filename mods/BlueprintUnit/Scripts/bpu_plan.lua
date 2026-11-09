@@ -478,13 +478,17 @@ local function build(text, live, F, opts)
     -- Blocks must be on the live station Blueprint. Station Build (opts.station_build): missing blocks are classified and
     -- placed by plan_blocks instead of refused here
     local bplan
-    local renames = {}   -- dock names for matched live blocks (Station Build placements are not renamed yet)
+    local blockset = {}
+    for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = b end
+    local renames = {}   -- dock names for matched live blocks (both modes)
+    local block_renames = {}   -- Station Build: named docks placed by this run (no live id yet, bpu_build resolves it)
     if opts and opts.station_build then
         bplan = plan_blocks(doc, blocks, live, opts)
         for _, n in ipairs(bplan.notes) do notes[#notes + 1] = n end
+        for _, a in ipairs(bplan.blocks) do
+            if a.name then block_renames[#block_renames + 1] = { bcls = a.class, cls = DOCK_NAME_CLS[a.class], gx = a.gx, gy = a.gy, h = a.h, name = a.name } end
+        end
     else
-        local blockset = {}
-        for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = b end
         local missing, missing_jb = {}, {}
         for _, jb in ipairs(doc.blocks) do
             if not blockset[jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h] then
@@ -506,16 +510,16 @@ local function build(text, live, F, opts)
             bail(("These blocks are not on the station grid: %s. Fix them in the blueprint or tick Station Build."):format(
                 B.listing(places, #missing_jb)))
         end
-        -- Named docks: one rename per named JSON block, on the live block it matched (same key as above). id = live BlockID
-        -- when the live read has it (nil: bpu_live cannot find the dock child and reports it). Plan never sends anything.
-        local seen_rn = {}
-        for _, jb in ipairs(doc.blocks) do
-            local key = jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h
-            if jb.name and not seen_rn[key] then
-                seen_rn[key] = true
-                local lb = blockset[key]
-                renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = jb.name, id = lb and lb.id }
-            end
+    end
+    -- Named docks: one rename per named JSON block that is live now, on the live block it matched (same key). id = live BlockID
+    -- when the live read has it (nil: bpu_live cannot find the dock child and reports it). Plan never sends anything.
+    local seen_rn = {}
+    for _, jb in ipairs(doc.blocks) do
+        local key = jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h
+        local lb = blockset[key]
+        if jb.name and lb and not seen_rn[key] then
+            seen_rn[key] = true
+            renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = jb.name, id = lb.id }
         end
     end
 
@@ -985,6 +989,7 @@ local function build(text, live, F, opts)
         counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN, block_remove = bplan and #bplan.remove or nil },
         removes = removes,
         renames = renames,
+        block_renames = block_renames,
         fp = P.fingerprint(existing),
         valid = true,
         -- Station Build only (nil when off): accepted block records, their cost, removed live blocks and their refund, count, refusal list
@@ -1038,6 +1043,8 @@ function P.summary(plan)
     s = s .. ", recipe changes " .. c.recipe
     if plan.block_count then s = s .. ", blocks " .. plan.block_count end
     if plan.block_remove and #plan.block_remove > 0 then s = s .. ", removed " .. #plan.block_remove end
+    local nrn = #(plan.renames or {}) + #(plan.block_renames or {})   -- live named docks + named docks this Station Build places
+    if nrn > 0 then s = s .. ", dock names " .. nrn end
     return s
 end
 

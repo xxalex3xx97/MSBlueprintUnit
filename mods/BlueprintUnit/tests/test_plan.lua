@@ -507,5 +507,27 @@ check("names: old JSON -> no renames", nn and #nn.renames == 0)
 check("names: rename_due decision", P.rename_due("A", "B") and not P.rename_due("A", "A") and not P.rename_due(nil, "B")
     and not P.rename_due("", "B") and P.rename_due("A", nil))
 
+-- Station Build dock names: a named dock that is live gets a rename (with its id); a named dock this run places goes to
+-- block_renames (no id, bpu_build resolves it after the placement). Summary counts both.
+local function sb_dock(x, name)
+    return '{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":' .. x .. ',"Y":0},"Height":0,"GridRotation":0,"Name":"' .. name .. '"}'
+end
+local SB_DOCK_INFO = function(cls)
+    if cls == "BPO_Dock" then return { station = true, unlocked = true, bounds = SB_BOUNDS, cost = { ITEM_B = 1 } } end
+    return sb_info(cls)
+end
+local dk = sb_plan(sb_json(sb_dock(0, "Main"), sb_dock(2, "Gate")), { block_info = SB_DOCK_INFO, blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 } } })
+check("sb names: plan valid, one block placed", dk and dk.valid and dk.block_count == 1)
+check("sb names: live named dock -> rename with its live id", dk and #dk.renames == 1 and dk.renames[1].id == 77 and dk.renames[1].gx == 0
+    and dk.renames[1].cls == "BPO_StationBlockDock")
+check("sb names: missing named dock -> not in renames, in block_renames", dk and #dk.block_renames == 1 and dk.block_renames[1].gx == 2
+    and dk.block_renames[1].name == "Gate" and dk.block_renames[1].bcls == "BPO_Dock" and dk.block_renames[1].cls == "BPO_StationBlockDock")
+check("sb names: summary dock names 2", dk and P.summary(dk) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, dock names 2")
+local dk0 = sb_plan(sb_json(sb_dock(2, "Gate")), { block_info = SB_DOCK_INFO, blocks = {} })
+check("sb names: nothing live -> no renames, summary dock names 1 (new dock only)", dk0 and #dk0.renames == 0 and #dk0.block_renames == 1
+    and P.summary(dk0) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, dock names 1")
+check("summary: no renames, text unchanged", P.summary({ counts = { place = 0, keep = 0, remove = 0, recipe = 0 }, refund = {}, renames = {} })
+    == "place 0, keep 0, remove 0, recipe changes 0")
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

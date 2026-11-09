@@ -2249,5 +2249,110 @@ do
     check(R.redirect_ours == false and count(f.rd_log, "enable:false") == 2, "safety net: idle tick releases the leftover flag once")
 end
 
+-- ===== dock names: Station Build named docks are renamed after the block and its dock child show (stage 19) =====
+-- spec.dock_after: the dock child shows this many ms after the station send (nil = never)
+local function dock_fake(spec)
+    local f = blocks_fake(spec)
+    f.ren_calls, f.sent_at = {}, 0
+    local send0 = f.io.send_blocks
+    f.io.send_blocks = function(...) f.sent_at = f.clock; return send0(...) end
+    f.io.send_renames = function(list)
+        local copy = {}
+        for i, rn in ipairs(list) do copy[i] = rn end
+        f.ren_calls[#f.ren_calls + 1] = copy
+        return spec.ren_ok or #list, spec.ren_fail or 0
+    end
+    f.io.dock_found = function(rn)
+        return spec.dock_after ~= nil and f.clock >= f.sent_at + spec.dock_after and rn.id ~= nil
+    end
+    local base_scan = f.io.scan_blocks
+    f.io.scan_blocks = function()   -- live block ids: 500 + index
+        local out = base_scan()
+        for i, b in ipairs(out) do b.id = 500 + i end
+        return out
+    end
+    return f
+end
+local DOCK_BLK = { class = "BPO_Dock", gx = 2, gy = 0, h = 0, rot = 0, name = "Gate" }
+local DOCK_RN = { bcls = "BPO_Dock", cls = "BPO_StationBlockDock", gx = 2, gy = 0, h = 0, name = "Gate" }
+local function dock_plan(f)
+    local p = with_blocks(f, { DOCK_BLK }, { ITEM_Plate = 2 })
+    p.block_renames = { DOCK_RN }
+    return p
+end
+
+-- block shows at the first poll, dock child 1 s later (2 dock polls): renamed once with the live block id
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 1000 })
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 1 and #f.ren_calls[1] == 1, "dock names: one rename sent (" .. st.text .. ")")
+    check(f.ren_calls[1] and f.ren_calls[1][1].id == 501 and f.ren_calls[1][1].name == "Gate" and f.ren_calls[1][1].cls == "BPO_StationBlockDock",
+          "dock names: id is the fresh live block id, class is the dock child")
+    check(st.text:find("renamed 1 dock(s)", 1, true) ~= nil and f.sent_blocks == 1 and f.calls.pl == 1,
+          "dock names: status says renamed 1 dock(s), one send, factory still runs after")
+end
+
+-- dock child never shows: 'not applied: dock not found' after 10 s, nothing sent, the run still finishes
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local t0 = f.clock
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 0 and st.text:find("; 1 dock name(s) not applied: dock not found", 1, true) ~= nil,
+          "dock names: dock never shows -> not applied, dock not found (" .. st.text .. ")")
+    check(f.clock - t0 >= 10000 and f.clock - t0 < 11000 and f.calls.pl == 1, "dock names: given up after 10 s, factory still placed")
+end
+
+-- name already equal in the game: the rename reports nothing applied, so no dock text in the status
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 0, ren_ok = 0, ren_fail = 0 })
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and #f.ren_calls == 1 and not st.text:find("dock", 1, true),
+          "dock names: name already equal -> no dock text (" .. st.text .. ")")
+end
+
+-- rename-only run (nothing else to change): start sends the renames and finishes with the rename text
+do
+    local f = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    local calls = {}
+    f.io.send_renames = function(list) calls[#calls + 1] = #list; return 1, 0 end
+    local b = B.new(f.io)
+    local p = plan_for(f, {})
+    p.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    local ok, msg = b:start(p, {})
+    check(ok and msg == "ok dock names" and b:status().state == "done" and b:status().text == "dock names: renamed 1, 0 not applied" and #calls == 1,
+          "dock names only: sent and finished with rename text (" .. b:status().text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f2.io.send_renames = function() return 0, 0 end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, {})
+    p2.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    local ok2, msg2 = b2:start(p2, {})
+    check(ok2 and msg2 == "ok dock names" and b2:status().text == "dock names already set", "dock names only: all already set -> 'dock names already set'")
+    local f3 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f3.io.send_renames = function() error("must not be called") end
+    local b3 = B.new(f3.io)
+    local ok3, msg3 = b3:start(plan_for(f3, {}), {})
+    check(ok3 and msg3 == "ok nothing to build" and b3:status().text == "nothing to build", "no renames: still 'nothing to build'")
+end
+
+-- normal path: a placement with live named docks sends the renames once, in the changes send
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local calls = {}
+    f.io.send_renames = function(list) calls[#calls + 1] = #list; return 1, 0 end
+    local b = B.new(f.io)
+    local p = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "done" and #calls == 1 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil, "dock names: normal path sends the live renames once (" .. st.text .. ")")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)

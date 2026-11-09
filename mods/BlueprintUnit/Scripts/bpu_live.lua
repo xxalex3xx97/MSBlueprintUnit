@@ -812,6 +812,11 @@ function L.make_io(ctx)
         print(("[BPUnit] dock names: %d renamed, %d not applied"):format(okn, failn))
         return okn, failn, why
     end
+    -- Station Build dock names: true when the dock child for rn shows in the fresh read (no rename, no count)
+    function io.dock_found(rn)
+        local okd, d = pcall(L.dock_for, U.station, rn)
+        return okd and d ~= nil
+    end
     function io.send_changes(chg)
         local okc, failc = 0, 0
         for _, c in ipairs(chg) do

@@ -32,6 +32,8 @@ local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the playe
 local DRAIN_MS = 2000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
 local POLL_MS = 250
+local DOCK_POLL_MS = 500     -- Station Build named docks: dock child polled this often (it shows a few ticks after the block)
+local DOCK_WAIT_MS = 10000   -- ... and given up after this per dock: reported as 'dock not found', never guessed
 local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
 local RESTORE_CMD_PER_TICK = 1000 -- restore pipeline: TRANSFER commands sent per tick (FIFO, no waits between them)
 local PIPE_POLL_MS = 2000    -- restore pipeline: verify poll (unit read + unconfirmed containers only), not every 250 ms
@@ -345,6 +347,7 @@ local function new_run(plan)
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false, chg_failed = 0,
+        ren_ok = 0, ren_failed = 0, ren_nf = 0, bren = {},   -- dock names: renamed, not applied, of those dock not found; pending Station Build names
         rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
         drain = {}, costs = {}, emp = nil,   -- rem_list = { {id, bcls, refund = cost map} } in removal order; batch = rem_pos..last sent
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
@@ -459,12 +462,28 @@ function B.new(io)
             local _, failc = io.send_changes(R.plan.chg)
             R.chg_failed = failc or 0
             -- dock names (Blocks[].Name): only when the blueprint has any, so old JSONs never reach it
-            R.ren_ok, R.ren_failed = 0, 0
             if io.send_renames and R.plan.renames and #R.plan.renames > 0 then
                 local okr, a, b = pcall(io.send_renames, R.plan.renames)
-                if okr then R.ren_ok, R.ren_failed = a, b else R.ren_failed = #R.plan.renames end
+                if okr then R.ren_ok, R.ren_failed = R.ren_ok + a, R.ren_failed + b else R.ren_failed = R.ren_failed + #R.plan.renames end
             end
             R.chg_sent = true
+        end
+    end
+
+    -- Station Build named docks: the placed blocks are in the fresh read (all shown). Each named block resolves to its live
+    -- block by key (class|gx|gy|h) and gets its BlockID; the dock child is renamed in stage 19 once it shows. A block that is
+    -- not live (should not happen after the poll) is counted as dock not found.
+    local function resolve_new_renames(ex, now)
+        local byk = {}
+        for _, b in ipairs(ex) do byk[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = b end
+        R.bren = {}
+        for _, rn in ipairs(R.plan.block_renames or {}) do
+            local lb = byk[rn.bcls .. "|" .. rn.gx .. "|" .. rn.gy .. "|" .. rn.h]
+            if lb then
+                R.bren[#R.bren + 1] = { cls = rn.cls, gx = rn.gx, gy = rn.gy, h = rn.h, name = rn.name, id = lb.id, t0 = now }
+            else
+                R.ren_failed, R.ren_nf = R.ren_failed + 1, R.ren_nf + 1
+            end
         end
     end
 
@@ -473,7 +492,10 @@ function B.new(io)
         local s = ""
         if R.chg_failed > 0 then s = ("; %d recipe/port change(s) failed"):format(R.chg_failed) end
         if (R.ren_ok or 0) > 0 then s = s .. ("; renamed %d dock(s)"):format(R.ren_ok) end
-        if (R.ren_failed or 0) > 0 then s = s .. ("; %d dock name(s) not applied"):format(R.ren_failed) end
+        if (R.ren_failed or 0) > 0 then
+            s = s .. ("; %d dock name(s) not applied"):format(R.ren_failed)
+            if R.ren_nf == R.ren_failed then s = s .. ": dock not found" end
+        end
         return s
     end
 
@@ -1474,6 +1496,28 @@ function B.new(io)
         set_status("working", ("placing %d station block(s) and removing %d in the way"):format(#P.blocks, #P.remove))
     end
 
+    -- stage 19: rename each pending Station Build dock once its dock child shows (io.dock_found), give up after DOCK_WAIT_MS
+    local function dock_wait(now)
+        local left = {}
+        for _, rn in ipairs(R.bren) do
+            if io.dock_found and io.dock_found(rn) then
+                local okp, okn, failn = pcall(io.send_renames, { rn })
+                if okp then R.ren_ok, R.ren_failed = R.ren_ok + okn, R.ren_failed + failn else R.ren_failed = R.ren_failed + 1 end
+            elseif now - rn.t0 >= DOCK_WAIT_MS then
+                R.ren_failed, R.ren_nf = R.ren_failed + 1, R.ren_nf + 1
+                trace(("dock name %s at %s,%s: dock not found in %d ms"):format(rn.name, tostring(rn.gx), tostring(rn.gy), DOCK_WAIT_MS))
+            else
+                left[#left + 1] = rn
+            end
+        end
+        R.bren = left
+        if #left > 0 then
+            R.stage, R.t_next = 19, now + DOCK_POLL_MS
+            return
+        end
+        first_step(now)
+    end
+
     -- stage 18: poll the live station until every block shows (POLL_MS). BLOCKS_MS from the send -> STALL, no resend.
     local function blocks_wait(now)
         local P = R.plan
@@ -1487,7 +1531,13 @@ function B.new(io)
             miss = #left
             if miss == 0 then
                 trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, now - R.t_blocks))
-                first_step(now)
+                resolve_new_renames(ex, now)
+                if #R.bren > 0 then
+                    R.stage = 19
+                    dock_wait(now)
+                else
+                    first_step(now)
+                end
                 return
             end
             trace(("station blocks: %d of %d still missing"):format(miss, #P.blocks))
@@ -1540,6 +1590,8 @@ function B.new(io)
             recChanged = plan.recChanged or 0,
             blocks = plan.blocks or {},   -- station blocks to add (one send, stage 18)
             remove = plan.block_remove or {},   -- live station blocks in the way (removed in the same send)
+            renames = plan.renames or {},   -- dock names of live blocks (sent with the changes, or alone)
+            block_renames = plan.block_renames or {},   -- Station Build named docks placed by this run (stage 19)
         }
         R.plan = P
         R.state = "working"
@@ -1602,6 +1654,19 @@ function B.new(io)
             R.rem_list[#R.rem_list + 1] = { id = m.id, bcls = m.bcls, refund = m.refund }
         end
         if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 then
+            -- dock names only (live named docks, nothing else to change): sent here, the normal path sends them in send_changes_once
+            if #(P.renames or {}) > 0 and io.send_renames then
+                local okr, nok, nf = pcall(io.send_renames, P.renames)
+                if not okr then nok, nf = 0, #P.renames end
+                R.state = "done"
+                if nok == 0 and nf == 0 then
+                    R.text = "dock names already set"
+                else
+                    R.text = ("dock names: renamed %d, %d not applied"):format(nok, nf)
+                end
+                release_redirect()
+                return true, "ok dock names"
+            end
             R.state = "done"
             R.text = "nothing to build"
             release_redirect()
@@ -1666,6 +1731,7 @@ function B.new(io)
         elseif s == 8 then drain_wait(now)
         elseif s == 10 then empty_wait(now)
         elseif s == 18 then blocks_wait(now)
+        elseif s == 19 then dock_wait(now)
         else fail("internal: unknown stage " .. s) end
     end
 
