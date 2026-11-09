@@ -5,7 +5,8 @@
 -- API:  P.plan(text, live, F) -> plan | nil, err
 --       P.summary(plan) -> "place N, keep K, remove R (refund Name xN, ..., +M more), recipe changes C"
 --       P.removes_text(plan) -> "removes: 3 belts, 1 splitter" ("" when none)
---       P.cost_rows(plan) -> sorted { {name=ITEM_raw, need=, refund=, net=}, ... } (need>0 or refund>0)
+--       P.cost_rows(plan, opts) -> sorted { {name=ITEM_raw, need=, refund=, net=}, ... } (need>0 or refund>0)
+--       opts.restore == false leaves out container contents (plan.restore) from need; nil/true keeps them
 --       P.fingerprint(existing) -> FNV-1a 32-bit over id,bcls,x,y,h,rot (plan staleness check)
 --       opts (optional) = { trace = fn(text) }: called with diagnostics (missing blocks, keep split, placed-validation failure); never changes the plan
 --       opts.station_build = true: missing station blocks classified by bpu_blocks (no "not on the grid" refusal). Needs
@@ -1046,11 +1047,13 @@ function P.removes_text(plan)
     return "removes: " .. table.concat(parts, ", ")
 end
 
--- one row per item: need = machine cost + container contents to restore, refund = removed machines + their contents, net = need - refund
-function P.cost_rows(plan)
+-- one row per item: need = machine cost + container contents to restore (opts.restore == false: no contents), refund = removed machines + their contents, net = need - refund
+function P.cost_rows(plan, opts)
     local need = {}
     for name, n in pairs(plan.need or {}) do need[name] = n end
-    for name, n in pairs(plan.restore or {}) do need[name] = (need[name] or 0) + n end
+    if not (opts and opts.restore == false) then
+        for name, n in pairs(plan.restore or {}) do need[name] = (need[name] or 0) + n end
+    end
     local refund = {}
     for name, n in pairs(plan.refund or {}) do refund[name] = n end
     for name, n in pairs(plan.block_need or {}) do need[name] = (need[name] or 0) + n end

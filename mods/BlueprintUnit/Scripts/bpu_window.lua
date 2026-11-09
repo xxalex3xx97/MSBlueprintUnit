@@ -38,6 +38,7 @@ local S = { h = nil, w = nil, p = nil, U = nil, player = nil, ctl = nil, tc = ni
 -- are collapsed (empty): no text above the buttons.
 local KEPT = { has = false, rows = {}, pinned = false }
 local NOTE = { status = "", summary = "", removes = "", list = "" }
+local readRestoreBox   -- forward: impOk / finishBuild read Chk_Restore before its definition (below buildClick)
 
 -- ESlateVisibility: 0 Visible, 1 Collapsed
 local function setVis(o, shown) if ok(o) then try("vis", function() o:SetVisibility(shown and 0 or 1) end) end end
@@ -281,14 +282,18 @@ local function impOk()
     NOTE.list = table.concat(lines, "\n")
     setStatus("Blueprint: " .. (plan.name or "Ready"))
     t0 = os.clock()
-    local rows = Plan.cost_rows(plan)
+    local rows = Plan.cost_rows(plan, { restore = readRestoreBox() })
     fillCost(rows)
     Live.trace(("impOk fillCost %.1f ms rows=%d"):format((os.clock() - t0) * 1000, #rows))
     M.impClose()
     Live.trace("impOk done")
-  end, function(e) pcall(function() local f = io.open("Mods/BlueprintUnit/bpu_last_import.json", "wb"); if f then f:write(S.lastText or ""); f:close() end end); Live.trace("impOk ERROR " .. tostring(e) .. " | " .. (tostring(debug.traceback("", 2)):gsub("\n", " ; "))); return e end)
+  end, tostring)
   collectgarbage("restart")
-  if not okRun then L("import failed: " .. tostring(err)); setStatus("error: import failed: " .. tostring(err)) end
+  if not okRun then
+    pcall(function() local f = io.open("Mods/BlueprintUnit/bpu_last_import.json", "wb"); if f then f:write(S.lastText or ""); f:close() end end)
+    Live.trace("impOk ERROR " .. tostring(err))
+    L("import failed: " .. tostring(err)); setStatus("error: import failed: " .. tostring(err))
+  end
 end
 
 -- end of a build run: buttons back, result line, cost list re-planned from the saved text (what is still missing)
@@ -305,35 +310,44 @@ local function finishBuild(run)
       return
     end
     S.plan = plan
-    fillCost(Plan.cost_rows(plan))
+    fillCost(Plan.cost_rows(plan, { restore = readRestoreBox() }))
   end)
   if not okR then L("refresh after build failed: " .. tostring(err)) end
 end
 
--- polls the builder every 300 ms on the game thread. Stops (returns true) when the run was replaced or closed.
+-- game-thread timer. UE4SS LoopAsync runs its Lua lambda on the async thread inside this Lua state and corrupts it while the game thread runs long Lua (impOk, plan, build).
+-- LoopInGameThreadWithDelay runs on the game thread only. fn returns true = stop. Old UE4SS without it: LoopAsync + ExecuteInGameThread as before.
+function M.loopGT(ms, fn)
+  if LoopInGameThreadWithDelay and CancelDelayedAction then
+    local h
+    local okL, res = pcall(LoopInGameThreadWithDelay, ms, function() if fn() then pcall(CancelDelayedAction, h) end end)
+    if okL then h = res; return end
+  end
+  local stop = false
+  LoopAsync(ms, function()
+    if stop then return true end
+    pcall(ExecuteInGameThread, function() if not stop and fn() then stop = true end end)
+    return false
+  end)
+end
+
+-- polls the builder every 300 ms on the game thread (M.loopGT). Stops (returns true) when the run was replaced or closed.
 -- A Lua error in a tick ends the run (finishBuild sets S.run = nil, the next poll returns true); S.plan / S.text stay.
 local function buildLoop(run)
   return function()
     if S.run ~= run then return true end
-    pcall(ExecuteInGameThread, function()
-      local okT, errT = xpcall(function()
-        if S.run ~= run then return end
-        S.builder:tick(S.io.now())
-        local st = S.builder:status()
-        setStatus(st.text)
-        if st.state == "done" or st.state == "error" then finishBuild(run) end
-      end, function(e)
-        -- full traceback to bpu_trace.log; the short error (returned) still goes to the Notes panel
-        Live.trace("build tick traceback: " .. (debug.traceback(tostring(e), 2):gsub("\n", " ; ")))
-        return tostring(e)
-      end)
-      if not okT then
-        Live.trace("build tick ERROR " .. tostring(errT))
-        NOTE.status = "error: " .. tostring(errT)
-        renderNotes()
-        finishBuild(run)
-      end
-    end)
+    local okT, errT = xpcall(function()
+      S.builder:tick(S.io.now())
+      local st = S.builder:status()
+      setStatus(st.text)
+      if st.state == "done" or st.state == "error" then finishBuild(run) end
+    end, tostring)
+    if not okT then
+      Live.trace("build tick ERROR " .. tostring(errT))
+      NOTE.status = "error: " .. tostring(errT)
+      renderNotes()
+      finishBuild(run)
+    end
     return false
   end
 end
@@ -347,7 +361,7 @@ local function checkedOf(c)
 end
 
 -- Chk_Restore (optional CheckBox, read on every Build press): true / false, nil when the widget is missing (restore on)
-local function readRestoreBox()
+readRestoreBox = function()
   local c = w("Chk_Restore")
   if not ok(c) then return nil end
   return checkedOf(c)
@@ -379,7 +393,7 @@ local function buildClick()
     S.run = run
     setBuildBtns(false)
     setStatus(S.builder:status().text)
-    LoopAsync(300, buildLoop(run))
+    M.loopGT(300, buildLoop(run))
   end)
   if not okRun then
     L("build failed: " .. tostring(err))
@@ -387,6 +401,23 @@ local function buildClick()
     setBuildBtns(true)
     setStatus("error: build failed: " .. tostring(err))
   end
+end
+
+-- Chk_Restore toggled: refresh the cost list from the saved plan (no replan). Ignored while a build runs or before any import.
+local function restoreToggled()
+  if S.run or not S.plan then return end
+  local okR, err = pcall(function() fillCost(Plan.cost_rows(S.plan, { restore = readRestoreBox() })) end)
+  if not okR then L("cost refresh after Chk_Restore failed: " .. tostring(err)) end
+end
+-- Chk_Restore has no OnClicked. Reuse MSCore.ui.onClick with a proxy whose OnClicked.Add hooks OnCheckStateChanged instead.
+-- NEEDS an in-game check.
+local function bindCheck(chk, fn)
+  local proxy = {
+    IsValid = function() return chk:IsValid() end,
+    GetFullName = function() return chk:GetFullName() end,
+    OnClicked = { Add = function(_, _, fname) chk.OnCheckStateChanged:Add(chk, fname) end },
+  }
+  MSCore.ui.onClick(proxy, fn)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -538,6 +569,8 @@ local function openWindow(block, player, ctl)
   bind("Btn_ImportCancel", impCancel)
   bind("Btn_ImportOk", impOk)
   bind("Btn_CostPin", pinClick)
+  local chkR = w("Chk_Restore")
+  if ok(chkR) then try("bind Chk_Restore", function() bindCheck(chkR, restoreToggled) end) end
 
   setVis(w("Pnl_ImportModal"), false)
   showText("Txt_Status", "")    -- collapsed: the text lives in the Notes panel

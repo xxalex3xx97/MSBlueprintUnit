@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- **Chk_Restore** unchecked: the cost list leaves out the container contents, and toggling the box refreshes the list at once from the last plan (no replan).
+
 ## [0.2.0] - 2026-11-08
 
 Requires **MSCore 0.7.6 or newer** (the split native). Needs MSCore 0.7.6 for machine configs (splitters, refineries, enrichment, recipes): older MSCore truncated config bytes. Place a NEW unit for the bigger inventory: existing 1000-slot and 300-slot units keep their size. Station Build needs **MSCore 0.8.0 or newer**; the hand-deconstruction refund fix needs **MSCore 0.8.1**.

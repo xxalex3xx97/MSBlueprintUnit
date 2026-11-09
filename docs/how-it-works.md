@@ -53,6 +53,10 @@ Off unless the **Station Build** checkbox is ticked. Needs MSCore 0.8.0 or newer
 
 The unit has a hidden container machine with 120 slots and a +1,000,000% stack size. It holds the refunds and the staged items.
 
+## Chk_Restore (container contents)
+
+Chk_Restore unchecked: the cost list (need, shortfall) leaves out the container contents that would be restored. Refunds are unchanged. Toggling refreshes the list at once from the last plan, no replan. Build restore is off.
+
 ## Registration and window
 
 - The block and its research are shipped in the pak (`pakchunk100-BlueprintUnit_P`: registry + research). `main.lua` does not call `MSCore.blocks.register`.
