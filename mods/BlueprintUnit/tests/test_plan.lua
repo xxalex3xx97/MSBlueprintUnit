@@ -99,6 +99,25 @@ check("ug: entrance at -7, exit at -3", p and p.place[1].x == -7 and p.cells[1].
 check("ug: cfg 01 00 Length 3", p and p.place[1].cfg == "\1\0\3\0\0\0")
 check("ug: cost of one machine", p and p.need.ITEM_A == 4)
 
+-- stacked floors: same x,y at h0 and h8, different Length per floor. Each entrance pairs with the exit on its own floor.
+do
+    local stacked = '{"Version":2,"Blocks":[],"DefaultMachines":[' ..
+        '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":-7,"Y":1},"Height":0,"GridRotation":0}},' ..
+        '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":-7,"Y":1},"Height":8,"GridRotation":0}},' ..
+        '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":-3,"Y":1},"Height":0,"GridRotation":0}},' ..
+        '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2","Transform":{"GridLocation":{"X":-1,"Y":1},"Height":8,"GridRotation":0}}]}'
+    local ps, es = P.plan(stacked, live(), F)
+    check("stacked ug: plan ok, no bail", ps ~= nil and es == nil)
+    check("stacked ug: 2 entrances, 2 exit cells", ps and ps.counts.place == 2 and #ps.cells == 2)
+    local e0, e8
+    for _, m in ipairs(ps and ps.place or {}) do if m.h == 0 then e0 = m elseif m.h == 8 then e8 = m end end
+    check("stacked ug: h0 entrance Length 3", e0 ~= nil and e0.cfg == "\1\0\3\0\0\0")
+    check("stacked ug: h8 entrance Length 4", e8 ~= nil and e8.cfg == "\1\0\4\0\0\0")
+    local c0, c8
+    for _, c in ipairs(ps and ps.cells or {}) do if c.h == 0 then c0 = c elseif c.h == 8 then c8 = c end end
+    check("stacked ug: h0 exit at -3, h8 exit at -1", c0 ~= nil and c0.x == -3 and c8 ~= nil and c8.x == -1)
+end
+
 -- ConfigHex recipe: verbatim bytes, recipe not looked up
 p = plan_of("refinery_hex.json", { recipes = {} })
 check("confighex: verbatim cfg, no recipe lookup", p and p.place[1].cfg == "\1\0\255")
