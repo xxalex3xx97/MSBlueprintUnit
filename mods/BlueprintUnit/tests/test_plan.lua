@@ -510,6 +510,28 @@ check("names: old JSON -> no renames", nn and #nn.renames == 0)
 check("names: rename_due decision", P.rename_due("A", "B") and not P.rename_due("A", "A") and not P.rename_due(nil, "B")
     and not P.rename_due("", "B") and P.rename_due("A", nil))
 
+-- dock Name cleanup: control chars stripped, ASCII whitespace trimmed, max 200 characters (UTF-8 safe), empty = no name
+local function name_plan(name_json)
+    return P.plan('{"Version":2,"Blocks":[{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,"Name":'
+        .. name_json .. '}],"DefaultMachines":[]}', live({ blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 } } }), F)
+end
+local function name_of(p) return p and p.renames and p.renames[1] and p.renames[1].name end
+check("name cleanup: tab, CR, LF and other control chars stripped, then trimmed", name_of(name_plan('"\\tA\\r\\nB \\u0001 "')) == "AB")
+check("name cleanup: 250 ASCII chars cut to 200", #(name_of(name_plan('"' .. string.rep("A", 250) .. '"')) or "") == 200)
+check("name cleanup: cut never splits a UTF-8 sequence (199 ASCII + one 2-byte char + more)",
+    name_of(name_plan('"' .. string.rep("A", 199) .. "\u{C4}x\"")) == string.rep("A", 199) .. "\u{C4}")
+check("name cleanup: 201 two-byte chars -> 200 chars, valid UTF-8", name_of(name_plan('"' .. string.rep("\u{C4}", 201) .. '"')) == string.rep("\u{C4}", 200)
+    and utf8.len(name_of(name_plan('"' .. string.rep("\u{C4}", 201) .. '"'))) == 200)
+local pe = name_plan('"\\t \\r\\n"')
+check("name cleanup: empty after cleanup = no name, no rename", pe and #pe.renames == 0)
+-- two blocks with the same key and different names: the first wins, the second gets a plan note
+local pdup = P.plan('{"Version":2,"Blocks":[{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,"Name":"A"},'
+    .. '{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,"Name":"B"}],"DefaultMachines":[]}',
+    live({ blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 } } }), F)
+local dupnote = false
+for _, n in ipairs(pdup and pdup.notes or {}) do if n:find('dock name "B" ignored', 1, true) then dupnote = true end end
+check("names: duplicate key, different name -> first kept, note added", pdup and #pdup.renames == 1 and pdup.renames[1].name == "A" and dupnote)
+
 -- Station Build dock names: a named dock that is live gets a rename (with its id); a named dock this run places goes to
 -- block_renames (no id, bpu_build resolves it after the placement). Summary counts both.
 local function sb_dock(x, name)

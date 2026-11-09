@@ -570,27 +570,39 @@ function L.item_by_name(name)
 end
 
 -- Dock child machine of a named live block, from FN.read_docks rows {machine_id, block_id, parent_id, class, name, raw_id}.
--- Candidates: class = rn.cls and parent_id = station. With rn.mids (the block's child machine ids): the one candidate whose
--- machine_id is in rn.mids. Without mids: the candidate with block_id = rn.id (rn.id >= 0 and block_id >= 0).
--- Exactly one match, else nil + reason. Never guesses among several docks. Older MSCore (no read_docks) = nil + reason.
+-- Candidates: class = rn.cls and parent_id = station. Matched by the block's child machine ids (rn.mids); when none match
+-- and rn.id >= 0, by block_id = rn.id. Exactly one match -> the row. Otherwise nil + reason: L.DOCK_NOT_YET (no match yet,
+-- or rows unreadable: the caller polls again), or a permanent reason (no MSCore support, no ids, two or more matches).
+-- Never guesses among several docks.
+L.DOCK_NOT_YET = "not found yet"
 function L.dock_for(station, rn)
     local FN = L.mscore and L.mscore.factory_native
     if not (FN and FN.read_docks) then return nil, "dock names need MSCore >= 0.8.3" end
     local rows, err = FN.read_docks(station)
-    if not rows then return nil, tostring(err) end
+    if not rows then
+        TRACE("read_docks failed: " .. tostring(err))
+        return nil, L.DOCK_NOT_YET
+    end
     local mset, has_mids = {}, false
     for _, m in ipairs(rn.mids or {}) do mset[m] = true; has_mids = true end
     local byid = type(rn.id) == "number" and rn.id >= 0
     if not has_mids and not byid then return nil, "block has no child machine ids (needs MSCore 0.8.3 build with mids)" end
-    local hit, n = nil, 0
-    for _, r in ipairs(rows) do
-        if short(r.class) == rn.cls and r.parent_id == station then
-            local ok
-            if has_mids then ok = mset[r.machine_id] == true
-            else ok = type(r.block_id) == "number" and r.block_id >= 0 and r.block_id == rn.id end
-            if ok then n = n + 1; hit = r end
+    local function match(by_mids)
+        local hit, n = nil, 0
+        for _, r in ipairs(rows) do
+            if short(r.class) == rn.cls and r.parent_id == station then
+                local ok
+                if by_mids then ok = mset[r.machine_id] == true
+                else ok = type(r.block_id) == "number" and r.block_id >= 0 and r.block_id == rn.id end
+                if ok then n = n + 1; hit = r end
+            end
         end
+        return hit, n
     end
+    local hit, n = nil, 0
+    if has_mids then hit, n = match(true) end
+    if n == 0 and byid then hit, n = match(false) end
+    if n == 0 then return nil, L.DOCK_NOT_YET end
     if n ~= 1 then return nil, n .. " dock matches for block" end
     return hit
 end
@@ -805,6 +817,7 @@ function L.make_io(ctx)
         for _, rn in ipairs(list or {}) do
             local okd, d, err = pcall(L.dock_for, U.station, rn)
             if not okd then d, err = nil, tostring(d) end
+            if err == L.DOCK_NOT_YET then err = "dock not found" end
             local mid = d and d.machine_id
             if not d or mid == nil then
                 failn = failn + 1; why = why or err or "dock machine id not readable"
@@ -819,10 +832,13 @@ function L.make_io(ctx)
         print(("[BPUnit] dock names: %d renamed, %d not applied"):format(okn, failn))
         return okn, failn, why
     end
-    -- Station Build dock names: true when the dock child for rn shows in the fresh read (no rename, no count)
+    -- Station Build dock names: true when the dock child for rn shows in the fresh read (no rename, no count).
+    -- Not found: false + reason (L.DOCK_NOT_YET while it may still show, anything else is permanent).
     function io.dock_found(rn)
-        local okd, d = pcall(L.dock_for, U.station, rn)
-        return okd and d ~= nil
+        local okd, d, err = pcall(L.dock_for, U.station, rn)
+        if not okd then return false, tostring(d) end
+        if d then return true, nil end
+        return false, err
     end
     function io.send_changes(chg)
         local okc, failc = 0, 0

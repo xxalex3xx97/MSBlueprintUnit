@@ -188,9 +188,15 @@ check(#bl == 1 and bl[1].class == "BPO_Station_01" and bl[1].gx == 0 and bl[1].g
       "read_blocks: stand-in unwrapped, class, gx, gy")
 check(type(bl[1].mids) == "table" and #bl[1].mids == 0, "read_blocks: mids = {} when the native read has none")
 do   -- B row column 9 = child MachineIDs (MSCore 0.8.x contract); none -> {}
-    local pb = F.parse_station("B\tBPO_Dock\t0\t0\t0\t0\t77\t\t555,556\nB\tBPO_Station_01\t1\t1\t0\t0\t-1\t\t\n")
-    check(#pb == 2 and pb[1].mids[1] == 555 and pb[1].mids[2] == 556 and #pb[1].mids == 2 and pb[1].bid == 77, "parse_station: column 9 -> mids list")
-    check(type(pb[2].mids) == "table" and #pb[2].mids == 0, "parse_station: no column 9 -> mids = {}")
+    -- contract: 7 = class path, 8 = bid (-1 unreadable), 9 = mids
+    local pb = F.parse_station("B\tBPO_Dock\t0\t0\t0\t0\t/Game/BPO_Dock.BPO_Dock_C\t77\t555,556\nB\tBPO_Station_01\t1\t1\t0\t0\t/Game/BPO_Station_01.BPO_Station_01_C\t-1\t\n")
+    check(#pb == 2 and pb[1].mids[1] == 555 and pb[1].mids[2] == 556 and #pb[1].mids == 2 and pb[1].bid == 77, "parse_station: column 9 -> mids list, column 8 -> bid")
+    check(pb[1].path == "/Game/BPO_Dock.BPO_Dock_C" and pb[1].class == "BPO_Dock", "parse_station: column 7 -> path, column 2 -> class")
+    check(pb[2].bid == -1 and type(pb[2].mids) == "table" and #pb[2].mids == 0, "parse_station: bid -1 kept, empty column 9 -> mids = {}")
+    local pn = F.parse_station("B\tBPO_Dock\t0\t0\t0\t0\t/Game/X\t77\n")
+    check(#pn == 1 and pn[1].bid == 77 and type(pn[1].mids) == "table" and #pn[1].mids == 0, "parse_station: no column 9 -> mids = {}")
+    local pg = F.parse_station("B\tBPO_Dock\t0\t0\t0\t0\t/Game/X\t77\t555,abc, 556\n")
+    check(#pg[1].mids == 2 and pg[1].mids[1] == 555 and pg[1].mids[2] == 556, "parse_station: non-numeric mids pieces dropped")
 end
 
 local bd = Live.read_buildables(F)
@@ -647,9 +653,15 @@ do
     check(Live.dock_for(42, rnM) == d_old, "dock_for: matched by mids (block id ignored when mids are given)")
     check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 555 } }) == d_old, "dock_for: mids alone")
     local dm, dmw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 999 } })
-    check(dm == nil and dmw == "0 dock matches for block", "dock_for: mids match no dock -> nil")
+    check(dm == nil and dmw == Live.DOCK_NOT_YET and dmw == "not found yet", "dock_for: mids match no dock (no block id) -> not found yet")
     local dx, dxw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 557 } })
-    check(dx == nil and dxw == "0 dock matches for block", "dock_for: mids of a dock of another class -> nil")
+    check(dx == nil and dxw == "not found yet", "dock_for: mids of a dock of another class -> not found yet")
+    local dfb = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 77, mids = { 999 } })
+    check(dfb == d_old, "dock_for: mids match nothing, block id 77 -> falls back to block_id match")
+    local dfw, dfwr = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 79, mids = { 999 } })
+    check(dfw == nil and dfwr == "not found yet", "dock_for: mids and block id match nothing -> not found yet")
+    local dfm = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 77, mids = { 555 } })
+    check(dfm == d_old, "dock_for: mids match -> block id not needed (no fallback when mids match)")
     check(Live.dock_for(42, rn) == d_old, "dock_for: no mids, one native match by class, parent_id and block_id")
     local dnb, dnw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = -1 })
     check(dnb == nil and dnw == NOMIDS, "dock_for: no mids, block id -1 -> reason, nothing guessed")
@@ -664,6 +676,9 @@ do
     local dn4, dw4 = Live.dock_for(42, rn)
     check(dn4 == nil and dw4 == "2 dock matches for block", "dock_for: no mids, two docks with the block id -> nil")
     rows[4] = nil
+    Live.mscore = { factory_native = { read_docks = function() return nil, "boom" end } }
+    local dre, drw = Live.dock_for(42, rnM)
+    check(dre == nil and drw == "not found yet", "dock_for: rows unreadable -> not found yet (polled, not permanent)")
     Live.mscore = { factory_native = {} }
     local dn3, dw3 = Live.dock_for(42, rnM)
     check(dn3 == nil and dw3 == "dock names need MSCore >= 0.8.3", "dock_for: MSCore without read_docks -> refused with message")
@@ -695,6 +710,20 @@ do
     check(ok5 == false and r5 == "dock names need the MSCore build with native rename (rename_dock)", "send_rename: missing rename_dock -> refused with message")
     local o5, f5, w5 = ioR.send_renames({ rn })
     check(o5 == 0 and f5 == 1 and w5 == r5, "send_renames: missing rename_dock -> not applied, reason passed on")
+    Live.mscore = { factory_native = { read_docks = function() return rows end, rename_dock = FNR.rename_dock } }
+    local o6, f6, w6 = ioR.send_renames({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 999 } } })
+    check(o6 == 0 and f6 == 1 and w6 == "dock not found", "send_renames: no dock yet -> not applied, reason 'dock not found'")
+    -- io.dock_found: found / not found yet (keep polling) / permanent reason (fail at once)
+    local fd, fdw = ioR.dock_found(rnM)
+    check(fd == true and fdw == nil, "dock_found: dock shows -> true")
+    local fn1, fn1w = ioR.dock_found({ cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 999 } })
+    check(fn1 == false and fn1w == "not found yet", "dock_found: no dock yet -> false, not found yet")
+    local fn2, fn2w = ioR.dock_found(noid)
+    check(fn2 == false and fn2w == NOMIDS, "dock_found: no ids -> false, permanent reason")
+    rows[4] = row("BPO_StationBlockDock_C", 555, 79, 42, "Dup")
+    local fn3, fn3w = ioR.dock_found(rnM)
+    check(fn3 == false and fn3w == "2 dock matches for block", "dock_found: two docks -> false, permanent reason")
+    rows[4] = nil
     Live.mscore, StaticFindObject = savedMs, savedSFO3
 end
 

@@ -2263,7 +2263,9 @@ local function dock_fake(spec)
         return spec.ren_ok or #list, spec.ren_fail or 0
     end
     f.io.dock_found = function(rn)
-        return spec.dock_after ~= nil and f.clock >= f.sent_at + spec.dock_after and rn.id ~= nil
+        if spec.dock_reason then return false, spec.dock_reason end
+        if spec.dock_after ~= nil and f.clock >= f.sent_at + spec.dock_after and rn.id ~= nil then return true, nil end
+        return false, "not found yet"
     end
     local base_scan = f.io.scan_blocks
     f.io.scan_blocks = function()   -- live block ids: 500 + index; child machine ids (mids): 900 + index
@@ -2354,6 +2356,97 @@ do
     b:start(p, {})
     local st = run(b, f)
     check(st.state == "done" and #calls == 1 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil, "dock names: normal path sends the live renames once (" .. st.text .. ")")
+end
+
+-- permanent reason (io.dock_found): the dock fails at the first check, no polling, reason in the status, factory still runs
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_reason = "dock names need MSCore >= 0.8.3" })
+    local seen = {}
+    f.io.dock_found = function() seen[#seen + 1] = f.clock; return false, "dock names need MSCore >= 0.8.3" end
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 0 and st.text:find("; 1 dock name(s) not applied: dock names need MSCore >= 0.8.3", 1, true) ~= nil,
+          "dock names: permanent reason -> not applied with that reason (" .. st.text .. ")")
+    check(#seen == 1 and f.calls.pl == 1, "dock names: permanent reason checked once, no 10 s wait, factory still placed")
+end
+
+-- the block shows at once, its dock child machine ids come in later: every poll re-reads them, the dock is found then
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local base = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base()
+        for _, b2 in ipairs(out) do b2.mids = (f.clock >= f.sent_at + 1500) and { 999 } or {} end
+        return out
+    end
+    f.io.dock_found = function(rn)
+        if rn.mids and rn.mids[1] == 999 then return true, nil end
+        return false, "not found yet"
+    end
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 1 and f.ren_calls[1][1].mids[1] == 999 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil,
+          "dock names: mids re-read each poll, late dock child found (" .. st.text .. ")")
+end
+
+-- two named docks fail with different permanent reasons: the status names the first one, both counted
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local BLK2 = { class = "BPO_Dock", gx = 4, gy = 0, h = 0, rot = 0, name = "Two" }
+    local RN2 = { bcls = "BPO_Dock", cls = "BPO_StationBlockDock", gx = 4, gy = 0, h = 0, name = "Two" }
+    local p = with_blocks(f, { DOCK_BLK, BLK2 }, { ITEM_Plate = 2 })
+    p.block_renames = { DOCK_RN, RN2 }
+    f.io.dock_found = function(rn) if rn.gx == 2 then return false, "first reason" end; return false, "second reason" end
+    local b = B.new(f.io)
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "done" and st.text:find("; 2 dock name(s) not applied: first reason", 1, true) ~= nil, "dock names: two failures -> first reason in status (" .. st.text .. ")")
+end
+
+-- send_renames counts that are nil: no throw in the tick, nothing counted
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 0 })
+    f.io.send_renames = function() return nil, nil end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and not st.text:find("dock", 1, true), "dock names: nil counts in dock wait -> no throw, no dock text (" .. st.text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f2.io.send_renames = function() return nil end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p2.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b2:start(p2, {})
+    local st2 = run(b2, f2)
+    check(st2.state == "done" and not st2.text:find("dock", 1, true), "dock names: nil counts in the changes send -> no throw (" .. st2.text .. ")")
+end
+
+-- reasons in the rename-only and normal-path status texts
+do
+    local f = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f.io.send_renames = function() return 0, 1, "dock not found" end
+    local b = B.new(f.io)
+    local p = plan_for(f, {})
+    p.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b:start(p, {})
+    check(b:status().text == "dock names: renamed 0, 1 not applied: dock not found", "dock names only: reason in text (" .. b:status().text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f2.io.send_renames = function() return nil, nil end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, {})
+    p2.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b2:start(p2, {})
+    check(b2:status().text == "dock names already set", "dock names only: nil counts -> already set (" .. b2:status().text .. ")")
+    local f3 = fake({ player = inv({ S("ITEM_Plate", 5) }, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f3.io.send_renames = function() return 1, 1, "dock not found" end
+    local b3 = B.new(f3.io)
+    local p3 = plan_for(f3, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p3.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b3:start(p3, {})
+    local st3 = run(b3, f3)
+    check(st3.text:find("renamed 1 dock(s); 1 dock name(s) not applied: dock not found", 1, true) ~= nil, "dock names: normal path reason in text (" .. st3.text .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))
