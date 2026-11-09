@@ -2405,6 +2405,61 @@ do
     check(st.state == "done" and st.text:find("; 2 dock name(s) not applied: first reason", 1, true) ~= nil, "dock names: two failures -> first reason in status (" .. st.text .. ")")
 end
 
+-- placed block, mids not registered on polls 1-2 (no child machine ids yet), filled on poll 3: polled, renamed once
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local base = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base()
+        for _, b2 in ipairs(out) do b2.mids = (f.dock_polls or 0) >= 2 and { 901 } or {} end
+        return out
+    end
+    f.dock_polls = 0
+    f.io.dock_found = function(rn)
+        f.dock_polls = f.dock_polls + 1
+        if rn.mids and #rn.mids > 0 then return true, nil end
+        return false, "block has no child machine ids (needs MSCore 0.8.3 build with mids)"
+    end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and f.dock_polls == 3 and #f.ren_calls == 1 and f.ren_calls[1][1].mids[1] == 901,
+          "dock names: mids empty on polls 1-2, filled on 3 -> polled, renamed once (" .. st.text .. ")")
+    check(st.text:find("renamed 1 dock(s)", 1, true) ~= nil and f.calls.pl == 1, "dock names: mids late -> status renamed 1, factory placed")
+end
+
+-- placed block, mids never registered: polled until 10 s, then 'dock not found (block has no child machine ids)', nothing sent
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local base = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base()
+        for _, b2 in ipairs(out) do b2.mids = {} end
+        return out
+    end
+    local seen = 0
+    f.io.dock_found = function() seen = seen + 1; return false, "block has no child machine ids (needs MSCore 0.8.3 build with mids)" end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local t0 = f.clock
+    local st = run(b, f)
+    check(st.state == "done" and #f.ren_calls == 0 and seen > 1 and st.text:find("; 1 dock name(s) not applied: dock not found (block has no child machine ids)", 1, true) ~= nil,
+          "dock names: mids never filled -> dock not found after polling (" .. st.text .. ")")
+    check(f.clock - t0 >= 10000 and f.clock - t0 < 11000 and f.calls.pl == 1, "dock names: mids never filled -> given up after 10 s, factory still placed")
+end
+
+-- permanent reasons fail on the first check (no polling): MSCore without rename/read, two docks for one block
+for _, why in ipairs({ "dock names need MSCore >= 0.8.3", "2 dock matches for block" }) do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local seen = 0
+    f.io.dock_found = function() seen = seen + 1; return false, why end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and seen == 1 and #f.ren_calls == 0 and st.text:find("; 1 dock name(s) not applied: " .. why, 1, true) ~= nil,
+          "dock names: '" .. why .. "' -> immediate, not applied (" .. st.text .. ")")
+end
+
 -- send_renames counts that are nil: no throw in the tick, nothing counted
 do
     local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 0 })

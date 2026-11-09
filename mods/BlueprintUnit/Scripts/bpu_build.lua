@@ -35,6 +35,7 @@ local POLL_MS = 250
 local DOCK_POLL_MS = 500     -- Station Build named docks: dock child polled this often (it shows a few ticks after the block)
 local DOCK_WAIT_MS = 10000   -- ... and given up after this per dock: reported as 'dock not found', never guessed
 local DOCK_NOT_YET = "not found yet"   -- io.dock_found reason while the dock child may still show (bpu_live L.DOCK_NOT_YET); any other reason fails at once
+local DOCK_NOIDS = "block has no child machine ids"   -- io.dock_found reason prefix: placed block whose mids are not registered yet, polled like DOCK_NOT_YET
 local CMD_PER_TICK = 150         -- redirect flow: commands sent per tick (FIFO), never the whole plan in one frame
 local RESTORE_CMD_PER_TICK = 1000 -- restore pipeline: TRANSFER commands sent per tick (FIFO, no waits between them)
 local PIPE_POLL_MS = 2000    -- restore pipeline: verify poll (unit read + unconfirmed containers only), not every 250 ms
@@ -1507,7 +1508,7 @@ function B.new(io)
 
     -- stage 19: rename each pending Station Build dock once its dock child shows (io.dock_found), give up after DOCK_WAIT_MS.
     -- Every poll re-reads the station: the block's child machine ids (mids) and block id are the fresh ones, so a dock child
-    -- that registers late is still found. A permanent reason (anything but DOCK_NOT_YET) fails the dock at once.
+    -- that registers late is still found. A permanent reason fails the dock at once; DOCK_NOT_YET and DOCK_NOIDS keep polling.
     local function dock_wait(now)
         local okf, ex = pcall(io.scan_blocks, R.plan.station)
         if okf and type(ex) == "table" then
@@ -1524,11 +1525,13 @@ function B.new(io)
             if found then
                 local okp, okn, failn, whyn = pcall(io.send_renames, { rn })
                 if okp then ren_count(okn, failn, whyn) else ren_count(0, 1, okn) end
-            elseif why and why ~= DOCK_NOT_YET then
+            elseif why and why ~= DOCK_NOT_YET and why:find(DOCK_NOIDS, 1, true) ~= 1 then
                 ren_count(0, 1, why)
                 trace(("dock name %s at %s,%s: %s"):format(rn.name, tostring(rn.gx), tostring(rn.gy), why))
             elseif now - rn.t0 >= DOCK_WAIT_MS then
-                ren_count(0, 1, "dock not found")
+                local reason = "dock not found"
+                if why and why:find(DOCK_NOIDS, 1, true) == 1 then reason = reason .. " (" .. DOCK_NOIDS .. ")" end
+                ren_count(0, 1, reason)
                 trace(("dock name %s at %s,%s: dock not found in %d ms"):format(rn.name, tostring(rn.gx), tostring(rn.gy), DOCK_WAIT_MS))
             else
                 left[#left + 1] = rn
