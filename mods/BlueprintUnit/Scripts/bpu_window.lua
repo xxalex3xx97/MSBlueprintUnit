@@ -38,6 +38,7 @@ local S = { h = nil, w = nil, p = nil, U = nil, player = nil, ctl = nil, tc = ni
 -- are collapsed (empty): no text above the buttons.
 local KEPT = { has = false, rows = {}, pinned = false }
 local NOTE = { status = "", summary = "", removes = "", list = "" }
+local readRestoreBox   -- forward: impOk / finishBuild read Chk_Restore before its definition (below buildClick)
 
 -- ESlateVisibility: 0 Visible, 1 Collapsed
 local function setVis(o, shown) if ok(o) then try("vis", function() o:SetVisibility(shown and 0 or 1) end) end end
@@ -281,7 +282,7 @@ local function impOk()
     NOTE.list = table.concat(lines, "\n")
     setStatus("Blueprint: " .. (plan.name or "Ready"))
     t0 = os.clock()
-    local rows = Plan.cost_rows(plan)
+    local rows = Plan.cost_rows(plan, { restore = readRestoreBox() })
     fillCost(rows)
     Live.trace(("impOk fillCost %.1f ms rows=%d"):format((os.clock() - t0) * 1000, #rows))
     M.impClose()
@@ -309,7 +310,7 @@ local function finishBuild(run)
       return
     end
     S.plan = plan
-    fillCost(Plan.cost_rows(plan))
+    fillCost(Plan.cost_rows(plan, { restore = readRestoreBox() }))
   end)
   if not okR then L("refresh after build failed: " .. tostring(err)) end
 end
@@ -360,7 +361,7 @@ local function checkedOf(c)
 end
 
 -- Chk_Restore (optional CheckBox, read on every Build press): true / false, nil when the widget is missing (restore on)
-local function readRestoreBox()
+readRestoreBox = function()
   local c = w("Chk_Restore")
   if not ok(c) then return nil end
   return checkedOf(c)
@@ -400,6 +401,23 @@ local function buildClick()
     setBuildBtns(true)
     setStatus("error: build failed: " .. tostring(err))
   end
+end
+
+-- Chk_Restore toggled: refresh the cost list from the saved plan (no replan). Ignored while a build runs or before any import.
+local function restoreToggled()
+  if S.run or not S.plan then return end
+  local okR, err = pcall(function() fillCost(Plan.cost_rows(S.plan, { restore = readRestoreBox() })) end)
+  if not okR then L("cost refresh after Chk_Restore failed: " .. tostring(err)) end
+end
+-- Chk_Restore has no OnClicked. Reuse MSCore.ui.onClick with a proxy whose OnClicked.Add hooks OnCheckStateChanged instead.
+-- NEEDS an in-game check.
+local function bindCheck(chk, fn)
+  local proxy = {
+    IsValid = function() return chk:IsValid() end,
+    GetFullName = function() return chk:GetFullName() end,
+    OnClicked = { Add = function(_, _, fname) chk.OnCheckStateChanged:Add(chk, fname) end },
+  }
+  MSCore.ui.onClick(proxy, fn)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -551,6 +569,8 @@ local function openWindow(block, player, ctl)
   bind("Btn_ImportCancel", impCancel)
   bind("Btn_ImportOk", impOk)
   bind("Btn_CostPin", pinClick)
+  local chkR = w("Chk_Restore")
+  if ok(chkR) then try("bind Chk_Restore", function() bindCheck(chkR, restoreToggled) end) end
 
   setVis(w("Pnl_ImportModal"), false)
   showText("Txt_Status", "")    -- collapsed: the text lives in the Notes panel

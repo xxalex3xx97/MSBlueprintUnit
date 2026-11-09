@@ -269,6 +269,10 @@ check("contents: restore IronOre 120 on the placed container", pc and pc.restore
 check("contents: need stays machine cost only", pc and next(pc.need) == nil)
 local rr = pc and row_of(P.cost_rows(pc), "ITEM_IronOre")
 check("contents: cost row need 120 refund 0 net 120", rr and rr.need == 120 and rr.refund == 0 and rr.net == 120)
+local roff = pc and P.cost_rows(pc, { restore = false })
+check("contents: cost_rows restore=false drops container contents", roff and row_of(roff, "ITEM_IronOre") == nil)
+local ron = pc and P.cost_rows(pc, { restore = true })
+check("contents: cost_rows restore=true keeps container contents", ron and row_of(ron, "ITEM_IronOre") and row_of(ron, "ITEM_IronOre").net == 120)
 
 local pn, nerr = P.plan(cont_doc('[{"Item":"unobtainium","Count":5}]', 2, 2), live({ items = ITEMS }), F)
 check("contents: unknown item skipped with a note, plan ok", pn ~= nil and nerr == nil and tostring(table.concat(pn.notes, ";")):find("Contents item skipped (unknown): unobtainium", 1, true) ~= nil)
