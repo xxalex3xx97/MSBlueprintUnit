@@ -519,7 +519,7 @@ local function build(text, live, F, opts)
         local lb = blockset[key]
         if jb.name and lb and not seen_rn[key] then
             seen_rn[key] = true
-            renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = jb.name, id = lb.id }
+            renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = jb.name, id = lb.id, mids = lb.mids }
         end
     end
 

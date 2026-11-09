@@ -2266,9 +2266,9 @@ local function dock_fake(spec)
         return spec.dock_after ~= nil and f.clock >= f.sent_at + spec.dock_after and rn.id ~= nil
     end
     local base_scan = f.io.scan_blocks
-    f.io.scan_blocks = function()   -- live block ids: 500 + index
+    f.io.scan_blocks = function()   -- live block ids: 500 + index; child machine ids (mids): 900 + index
         local out = base_scan()
-        for i, b in ipairs(out) do b.id = 500 + i end
+        for i, b in ipairs(out) do b.id = 500 + i; b.mids = { 900 + i } end
         return out
     end
     return f
@@ -2290,6 +2290,8 @@ do
     check(ok and st.state == "done" and #f.ren_calls == 1 and #f.ren_calls[1] == 1, "dock names: one rename sent (" .. st.text .. ")")
     check(f.ren_calls[1] and f.ren_calls[1][1].id == 501 and f.ren_calls[1][1].name == "Gate" and f.ren_calls[1][1].cls == "BPO_StationBlockDock",
           "dock names: id is the fresh live block id, class is the dock child")
+    check(f.ren_calls[1] and type(f.ren_calls[1][1].mids) == "table" and f.ren_calls[1][1].mids[1] == 901,
+          "dock names: mids come from the fresh live block (Station Build placed block resolves via mids)")
     check(st.text:find("renamed 1 dock(s)", 1, true) ~= nil and f.sent_blocks == 1 and f.calls.pl == 1,
           "dock names: status says renamed 1 dock(s), one send, factory still runs after")
 end

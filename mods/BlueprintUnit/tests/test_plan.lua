@@ -502,6 +502,9 @@ check("names: no live BlockID -> id nil", dn and dn.renames[1].id == nil)
 local dn2 = plan_of("dock_names.json", { blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 },
     { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
 check("names: live block id carried to the rename", dn2 and dn2.renames[1].id == 77)
+local dn3 = plan_of("dock_names.json", { blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77, mids = { 555 } },
+    { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
+check("names: live block child mids carried to the rename", dn3 and dn3.renames[1].mids and dn3.renames[1].mids[1] == 555 and #dn3.renames[1].mids == 1)
 local nn = plan_of("empty.json")
 check("names: old JSON -> no renames", nn and #nn.renames == 0)
 check("names: rename_due decision", P.rename_due("A", "B") and not P.rename_due("A", "A") and not P.rename_due(nil, "B")

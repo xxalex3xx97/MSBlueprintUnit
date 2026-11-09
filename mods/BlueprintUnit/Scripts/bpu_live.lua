@@ -219,8 +219,12 @@ local function station_data(st)
     TRACE("read_station native sid=" .. tostring(sid))
     local b, m = FN.read_station(sid)
     if not b then error("read_station: " .. tostring(m), 0) end
-    -- bid = live BlockID (MSCore 0.8.3), -1/nil when unreadable. id = bid: the dock rename matches on it (bpu_plan renames).
-    for _, x in ipairs(b) do if type(x.bid) == "number" and x.bid >= 0 then x.id = x.bid end end
+    -- bid = live BlockID (MSCore 0.8.3), -1/nil when unreadable. id = bid (bpu_plan renames).
+    -- mids = MachineIDs of the block's child machines (MSCore B row column 9): the dock rename matches on them.
+    for _, x in ipairs(b) do
+        if type(x.bid) == "number" and x.bid >= 0 then x.id = x.bid end
+        x.mids = x.mids or {}
+    end
     cache = { sid = sid, blocks = b, machines = m }
     TRACE("read_station done blocks=" .. #b .. " machines=" .. #m)
     return cache
@@ -565,23 +569,29 @@ function L.item_by_name(name)
     return ITEMS[name]
 end
 
--- Dock child machine of a named live block, from MSCore 0.8.3 FN.read_docks rows {machine_id, block_id, parent_id, class, name, raw_id}:
--- the row with class = rn.cls, parent_id = station and block_id = rn.id. Exactly one match, else nil + reason.
--- rn.id nil (block id not read) = nil: a dock is never guessed. Older MSCore (no read_docks) = nil + reason, never a silent no-op.
+-- Dock child machine of a named live block, from FN.read_docks rows {machine_id, block_id, parent_id, class, name, raw_id}.
+-- Candidates: class = rn.cls and parent_id = station. With rn.mids (the block's child machine ids): the one candidate whose
+-- machine_id is in rn.mids. Without mids: the candidate with block_id = rn.id (rn.id >= 0 and block_id >= 0).
+-- Exactly one match, else nil + reason. Never guesses among several docks. Older MSCore (no read_docks) = nil + reason.
 function L.dock_for(station, rn)
     local FN = L.mscore and L.mscore.factory_native
     if not (FN and FN.read_docks) then return nil, "dock names need MSCore >= 0.8.3" end
-    if rn.id == nil then return nil, "block id not in the live read" end
     local rows, err = FN.read_docks(station)
     if not rows then return nil, tostring(err) end
+    local mset, has_mids = {}, false
+    for _, m in ipairs(rn.mids or {}) do mset[m] = true; has_mids = true end
+    local byid = type(rn.id) == "number" and rn.id >= 0
+    if not has_mids and not byid then return nil, "block has no child machine ids (needs MSCore 0.8.3 build with mids)" end
     local hit, n = nil, 0
     for _, r in ipairs(rows) do
-        if short(r.class) == rn.cls and r.parent_id == station and r.block_id == rn.id then
-            n = n + 1
-            hit = r
+        if short(r.class) == rn.cls and r.parent_id == station then
+            local ok
+            if has_mids then ok = mset[r.machine_id] == true
+            else ok = type(r.block_id) == "number" and r.block_id >= 0 and r.block_id == rn.id end
+            if ok then n = n + 1; hit = r end
         end
     end
-    if n ~= 1 then return nil, n .. " dock matches" end
+    if n ~= 1 then return nil, n .. " dock matches for block" end
     return hit
 end
 

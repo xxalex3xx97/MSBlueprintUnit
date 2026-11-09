@@ -480,7 +480,7 @@ function B.new(io)
         for _, rn in ipairs(R.plan.block_renames or {}) do
             local lb = byk[rn.bcls .. "|" .. rn.gx .. "|" .. rn.gy .. "|" .. rn.h]
             if lb then
-                R.bren[#R.bren + 1] = { cls = rn.cls, gx = rn.gx, gy = rn.gy, h = rn.h, name = rn.name, id = lb.id, t0 = now }
+                R.bren[#R.bren + 1] = { cls = rn.cls, gx = rn.gx, gy = rn.gy, h = rn.h, name = rn.name, id = lb.id, mids = lb.mids, t0 = now }
             else
                 R.ren_failed, R.ren_nf = R.ren_failed + 1, R.ren_nf + 1
             end

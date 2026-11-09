@@ -186,6 +186,12 @@ end
 local bl = Live.read_blocks(W.station)
 check(#bl == 1 and bl[1].class == "BPO_Station_01" and bl[1].gx == 0 and bl[1].gy == 0 and bl[1].h == 0 and bl[1].rot == 0,
       "read_blocks: stand-in unwrapped, class, gx, gy")
+check(type(bl[1].mids) == "table" and #bl[1].mids == 0, "read_blocks: mids = {} when the native read has none")
+do   -- B row column 9 = child MachineIDs (MSCore 0.8.x contract); none -> {}
+    local pb = F.parse_station("B\tBPO_Dock\t0\t0\t0\t0\t77\t\t555,556\nB\tBPO_Station_01\t1\t1\t0\t0\t-1\t\t\n")
+    check(#pb == 2 and pb[1].mids[1] == 555 and pb[1].mids[2] == 556 and #pb[1].mids == 2 and pb[1].bid == 77, "parse_station: column 9 -> mids list")
+    check(type(pb[2].mids) == "table" and #pb[2].mids == 0, "parse_station: no column 9 -> mids = {}")
+end
 
 local bd = Live.read_buildables(F)
 check(bd.DAT_ConveyorBelt and bd.DAT_ConveyorBelt.bcls == "BP_ConveyorBeltObject" and bd.DAT_ConveyorBelt.cost.ITEM_A == 2, "read_buildables: bcls + cost")
@@ -635,16 +641,31 @@ do
     local d_old = rows[1]
     Live.mscore = { factory_native = { read_docks = function() return rows end } }
     local rn = { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 77 }
-    check(Live.dock_for(42, rn) == d_old, "dock_for: one native match by class, parent_id and block_id")
-    check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" }) == nil, "dock_for: no block id -> nil")
-    check(Live.dock_for(99, rn) == nil, "dock_for: other station -> nil")
+    local rnM = { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 79, mids = { 555 } }
+    local noid = { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" }
+    local NOMIDS = "block has no child machine ids (needs MSCore 0.8.3 build with mids)"
+    check(Live.dock_for(42, rnM) == d_old, "dock_for: matched by mids (block id ignored when mids are given)")
+    check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 555 } }) == d_old, "dock_for: mids alone")
+    local dm, dmw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 999 } })
+    check(dm == nil and dmw == "0 dock matches for block", "dock_for: mids match no dock -> nil")
+    local dx, dxw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 557 } })
+    check(dx == nil and dxw == "0 dock matches for block", "dock_for: mids of a dock of another class -> nil")
+    check(Live.dock_for(42, rn) == d_old, "dock_for: no mids, one native match by class, parent_id and block_id")
+    local dnb, dnw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = -1 })
+    check(dnb == nil and dnw == NOMIDS, "dock_for: no mids, block id -1 -> reason, nothing guessed")
+    local dnn, dnnw = Live.dock_for(42, noid)
+    check(dnn == nil and dnnw == NOMIDS, "dock_for: no mids, no block id -> reason")
+    check(Live.dock_for(99, rnM) == nil, "dock_for: other station -> nil")
     check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 79 }) == nil, "dock_for: no match -> nil")
-    rows[4] = row("BPO_StationBlockDock_C", 558, 77, 42, "Dup")
-    local dn2, dw2 = Live.dock_for(42, rn)
-    check(dn2 == nil and dw2 == "2 dock matches", "dock_for: two matches -> nil")
+    rows[4] = row("BPO_StationBlockDock_C", 555, 79, 42, "Dup")   -- same child machine claimed by a second dock
+    local dn2, dw2 = Live.dock_for(42, rnM)
+    check(dn2 == nil and dw2 == "2 dock matches for block", "dock_for: two docks with the mids machine -> nil")
+    rows[4] = row("BPO_StationBlockDock_C", 558, 77, 42, "Dup")   -- no mids: two docks with the block id -> nil
+    local dn4, dw4 = Live.dock_for(42, rn)
+    check(dn4 == nil and dw4 == "2 dock matches for block", "dock_for: no mids, two docks with the block id -> nil")
     rows[4] = nil
     Live.mscore = { factory_native = {} }
-    local dn3, dw3 = Live.dock_for(42, rn)
+    local dn3, dw3 = Live.dock_for(42, rnM)
     check(dn3 == nil and dw3 == "dock names need MSCore >= 0.8.3", "dock_for: MSCore without read_docks -> refused with message")
     Live.mscore = { factory_native = { read_docks = function() return rows end } }
     local made, sentc = {}, {}
