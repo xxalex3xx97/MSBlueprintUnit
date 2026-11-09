@@ -219,6 +219,12 @@ local function station_data(st)
     TRACE("read_station native sid=" .. tostring(sid))
     local b, m = FN.read_station(sid)
     if not b then error("read_station: " .. tostring(m), 0) end
+    -- bid = live BlockID (MSCore 0.8.3), -1/nil when unreadable. id = bid (bpu_plan renames).
+    -- mids = MachineIDs of the block's child machines (MSCore B row column 9): the dock rename matches on them.
+    for _, x in ipairs(b) do
+        if type(x.bid) == "number" and x.bid >= 0 then x.id = x.bid end
+        x.mids = x.mids or {}
+    end
     cache = { sid = sid, blocks = b, machines = m }
     TRACE("read_station done blocks=" .. #b .. " machines=" .. #m)
     return cache
@@ -563,6 +569,56 @@ function L.item_by_name(name)
     return ITEMS[name]
 end
 
+-- Dock child machine of a named live block, from FN.read_docks rows {machine_id, block_id, parent_id, class, name, raw_id}.
+-- Candidates: class = rn.cls and parent_id = station. Matched by the block's child machine ids (rn.mids); when none match
+-- and rn.id >= 0, by block_id = rn.id. Exactly one match -> the row. Otherwise nil + reason: L.DOCK_NOT_YET (no match yet,
+-- or rows unreadable: the caller polls again), or a permanent reason (no MSCore support, no ids, two or more matches).
+-- Never guesses among several docks.
+L.DOCK_NOT_YET = "not found yet"
+function L.dock_for(station, rn)
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.read_docks) then return nil, "dock names need MSCore >= 0.8.3" end
+    local rows, err = FN.read_docks(station)
+    if not rows then
+        TRACE("read_docks failed: " .. tostring(err))
+        return nil, L.DOCK_NOT_YET
+    end
+    local mset, has_mids = {}, false
+    for _, m in ipairs(rn.mids or {}) do mset[m] = true; has_mids = true end
+    local byid = type(rn.id) == "number" and rn.id >= 0
+    if not has_mids and not byid then return nil, "block has no child machine ids (needs MSCore 0.8.3 build with mids)" end
+    local function match(by_mids)
+        local hit, n = nil, 0
+        for _, r in ipairs(rows) do
+            if short(r.class) == rn.cls and r.parent_id == station then
+                local ok
+                if by_mids then ok = mset[r.machine_id] == true
+                else ok = type(r.block_id) == "number" and r.block_id >= 0 and r.block_id == rn.id end
+                if ok then n = n + 1; hit = r end
+            end
+        end
+        return hit, n
+    end
+    local hit, n = nil, 0
+    if has_mids then hit, n = match(true) end
+    if n == 0 and byid then hit, n = match(false) end
+    if n == 0 then return nil, L.DOCK_NOT_YET end
+    if n ~= 1 then return nil, n .. " dock matches for block" end
+    return hit
+end
+
+-- rename a dock through MSCore's native rename (factory_native.rename_dock(machine_id, text) -> true | nil, reason).
+-- No FText/SetTextInputCommand from Lua: a Lua-built command crashed the game. Returns ok, reason|nil.
+function L.send_rename(ctl, mid, text)
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.rename_dock) then return false, "dock names need the MSCore build with native rename (rename_dock)" end
+    local okc, a, b = pcall(FN.rename_dock, mid, text)
+    TRACE(("rename_dock receiver=%s text=%s -> ok=%s ret=%s reason=%s"):format(tostring(mid), tostring(text), tostring(okc), tostring(a), tostring(b)))
+    if not okc then return false, tostring(a) end
+    if a then return true end
+    return false, tostring(b or "rename_dock failed")
+end
+
 -- pin the modification cost in the game's own HUD: SetPinnedCostInput.CreateInputSetPinnedCost(ItemStack[]) -> ctl:AddInputCommand(player.ID, cmd).
 -- stacks = { {name="ITEM_x", n=amount}, ... }; {} = unpin. Returns ok, err|ret. Every call is traced (UNKNOWNs settle from the trace).
 function L.send_pin(ctl, player, stacks)
@@ -733,7 +789,7 @@ function L.make_io(ctx)
             local fn = split_fn()
             if not fn then return false, "inv_split gone" end
             local ok, r = call(fn, unw(inv), src0, amount, dst0)
-            TRACE(("inv_split inv=%s src0=%d amount=%d dst0=%d -> ok=%s ret=%s"):format(tostring(unw(inv)), src0, amount, dst0,
+            TRACE(("inv_split inv=%s src0=%d amount=%d dst0=%d -> ok=%s ret=%s"):format(tostring(unw(inv)), src0, math.floor((tonumber(amount) or 0) + 0.5), dst0,
                 tostring(ok), tostring(r)))
             return ok, r
         end
@@ -752,6 +808,37 @@ function L.make_io(ctx)
     end
     function io.send_place(m)
         return call(native.place, U.station, m.bdat, m.x, m.y, m.h, m.rot, m.cfg)
+    end
+    -- Dock names (Blocks[].Name): per named block, the dock child is renamed once when its live name differs.
+    -- Returns renamed, not applied (count), first reason. A dock that is not found is never renamed.
+    function io.send_renames(list)
+        local okn, failn, why = 0, 0, nil
+        local sent = {}
+        for _, rn in ipairs(list or {}) do
+            local okd, d, err = pcall(L.dock_for, U.station, rn)
+            if not okd then d, err = nil, tostring(d) end
+            if err == L.DOCK_NOT_YET then err = "dock not found" end
+            local mid = d and d.machine_id
+            if not d or mid == nil then
+                failn = failn + 1; why = why or err or "dock machine id not readable"
+            elseif sent[mid] or not Plan.rename_due(rn.name, d.name) then
+                -- already has this name, or sent in this run: nothing to do
+            else
+                sent[mid] = true
+                local oks, r = L.send_rename(ctx.ctl, mid, rn.name)
+                if oks then okn = okn + 1 else failn = failn + 1; why = why or tostring(r) end
+            end
+        end
+        print(("[BPUnit] dock names: %d renamed, %d not applied"):format(okn, failn))
+        return okn, failn, why
+    end
+    -- Station Build dock names: true when the dock child for rn shows in the fresh read (no rename, no count).
+    -- Not found: false + reason (L.DOCK_NOT_YET while it may still show, anything else is permanent).
+    function io.dock_found(rn)
+        local okd, d, err = pcall(L.dock_for, U.station, rn)
+        if not okd then return false, tostring(d) end
+        if d then return true, nil end
+        return false, err
     end
     function io.send_changes(chg)
         local okc, failc = 0, 0

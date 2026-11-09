@@ -2249,5 +2249,278 @@ do
     check(R.redirect_ours == false and count(f.rd_log, "enable:false") == 2, "safety net: idle tick releases the leftover flag once")
 end
 
+-- ===== dock names: Station Build named docks are renamed after the block and its dock child show (stage 19) =====
+-- spec.dock_after: the dock child shows this many ms after the station send (nil = never)
+local function dock_fake(spec)
+    local f = blocks_fake(spec)
+    f.ren_calls, f.sent_at = {}, 0
+    local send0 = f.io.send_blocks
+    f.io.send_blocks = function(...) f.sent_at = f.clock; return send0(...) end
+    f.io.send_renames = function(list)
+        local copy = {}
+        for i, rn in ipairs(list) do copy[i] = rn end
+        f.ren_calls[#f.ren_calls + 1] = copy
+        return spec.ren_ok or #list, spec.ren_fail or 0
+    end
+    f.io.dock_found = function(rn)
+        if spec.dock_reason then return false, spec.dock_reason end
+        if spec.dock_after ~= nil and f.clock >= f.sent_at + spec.dock_after and rn.id ~= nil then return true, nil end
+        return false, "not found yet"
+    end
+    local base_scan = f.io.scan_blocks
+    f.io.scan_blocks = function()   -- live block ids: 500 + index; child machine ids (mids): 900 + index
+        local out = base_scan()
+        for i, b in ipairs(out) do b.id = 500 + i; b.mids = { 900 + i } end
+        return out
+    end
+    return f
+end
+local DOCK_BLK = { class = "BPO_Dock", gx = 2, gy = 0, h = 0, rot = 0, name = "Gate" }
+local DOCK_RN = { bcls = "BPO_Dock", cls = "BPO_StationBlockDock", gx = 2, gy = 0, h = 0, name = "Gate" }
+local function dock_plan(f)
+    local p = with_blocks(f, { DOCK_BLK }, { ITEM_Plate = 2 })
+    p.block_renames = { DOCK_RN }
+    return p
+end
+
+-- block shows at the first poll, dock child 1 s later (2 dock polls): renamed once with the live block id
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 1000 })
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 1 and #f.ren_calls[1] == 1, "dock names: one rename sent (" .. st.text .. ")")
+    check(f.ren_calls[1] and f.ren_calls[1][1].id == 501 and f.ren_calls[1][1].name == "Gate" and f.ren_calls[1][1].cls == "BPO_StationBlockDock",
+          "dock names: id is the fresh live block id, class is the dock child")
+    check(f.ren_calls[1] and type(f.ren_calls[1][1].mids) == "table" and f.ren_calls[1][1].mids[1] == 901,
+          "dock names: mids come from the fresh live block (Station Build placed block resolves via mids)")
+    check(st.text:find("renamed 1 dock(s)", 1, true) ~= nil and f.sent_blocks == 1 and f.calls.pl == 1,
+          "dock names: status says renamed 1 dock(s), one send, factory still runs after")
+end
+
+-- dock child never shows: 'not applied: dock not found' after 10 s, nothing sent, the run still finishes
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local t0 = f.clock
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 0 and st.text:find("; 1 dock name(s) not applied: dock not found", 1, true) ~= nil,
+          "dock names: dock never shows -> not applied, dock not found (" .. st.text .. ")")
+    check(f.clock - t0 >= 10000 and f.clock - t0 < 11000 and f.calls.pl == 1, "dock names: given up after 10 s, factory still placed")
+end
+
+-- name already equal in the game: the rename reports nothing applied, so no dock text in the status
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 0, ren_ok = 0, ren_fail = 0 })
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and #f.ren_calls == 1 and not st.text:find("dock", 1, true),
+          "dock names: name already equal -> no dock text (" .. st.text .. ")")
+end
+
+-- rename-only run (nothing else to change): start sends the renames and finishes with the rename text
+do
+    local f = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    local calls = {}
+    f.io.send_renames = function(list) calls[#calls + 1] = #list; return 1, 0 end
+    local b = B.new(f.io)
+    local p = plan_for(f, {})
+    p.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    local ok, msg = b:start(p, {})
+    check(ok and msg == "ok dock names" and b:status().state == "done" and b:status().text == "dock names: renamed 1, 0 not applied" and #calls == 1,
+          "dock names only: sent and finished with rename text (" .. b:status().text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f2.io.send_renames = function() return 0, 0 end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, {})
+    p2.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    local ok2, msg2 = b2:start(p2, {})
+    check(ok2 and msg2 == "ok dock names" and b2:status().text == "dock names already set", "dock names only: all already set -> 'dock names already set'")
+    local f3 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f3.io.send_renames = function() error("must not be called") end
+    local b3 = B.new(f3.io)
+    local ok3, msg3 = b3:start(plan_for(f3, {}), {})
+    check(ok3 and msg3 == "ok nothing to build" and b3:status().text == "nothing to build", "no renames: still 'nothing to build'")
+end
+
+-- normal path: a placement with live named docks sends the renames once, in the changes send
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local calls = {}
+    f.io.send_renames = function(list) calls[#calls + 1] = #list; return 1, 0 end
+    local b = B.new(f.io)
+    local p = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "done" and #calls == 1 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil, "dock names: normal path sends the live renames once (" .. st.text .. ")")
+end
+
+-- fractional ms clock (io.now is a float ms clock): the station-block trace used %d on now - t_blocks and raised, aborting the tick
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 1000, block_delay = 1000 })
+    f.clock = 678.123
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local err
+    for _ = 1, 80 do
+        f.clock = f.clock + 333.3
+        local okt, e = pcall(b.tick, b, f.clock)
+        if not okt then err = e break end
+        if b:status().state ~= "working" then break end
+    end
+    local st = b:status()
+    check(ok and not err and st.state == "done" and #f.ren_calls == 1 and f.calls.pl == 1,
+          "fractional ms: no error in the station block stage, dock rename sent (" .. tostring(err or st.text) .. ")")
+end
+
+-- permanent reason (io.dock_found): the dock fails at the first check, no polling, reason in the status, factory still runs
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_reason = "dock names need MSCore >= 0.8.3" })
+    local seen = {}
+    f.io.dock_found = function() seen[#seen + 1] = f.clock; return false, "dock names need MSCore >= 0.8.3" end
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 0 and st.text:find("; 1 dock name(s) not applied: dock names need MSCore >= 0.8.3", 1, true) ~= nil,
+          "dock names: permanent reason -> not applied with that reason (" .. st.text .. ")")
+    check(#seen == 1 and f.calls.pl == 1, "dock names: permanent reason checked once, no 10 s wait, factory still placed")
+end
+
+-- the block shows at once, its dock child machine ids come in later: every poll re-reads them, the dock is found then
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local base = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base()
+        for _, b2 in ipairs(out) do b2.mids = (f.clock >= f.sent_at + 1500) and { 999 } or {} end
+        return out
+    end
+    f.io.dock_found = function(rn)
+        if rn.mids and rn.mids[1] == 999 then return true, nil end
+        return false, "not found yet"
+    end
+    local b = B.new(f.io)
+    local ok = b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(ok and st.state == "done" and #f.ren_calls == 1 and f.ren_calls[1][1].mids[1] == 999 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil,
+          "dock names: mids re-read each poll, late dock child found (" .. st.text .. ")")
+end
+
+-- two named docks fail with different permanent reasons: the status names the first one, both counted
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local BLK2 = { class = "BPO_Dock", gx = 4, gy = 0, h = 0, rot = 0, name = "Two" }
+    local RN2 = { bcls = "BPO_Dock", cls = "BPO_StationBlockDock", gx = 4, gy = 0, h = 0, name = "Two" }
+    local p = with_blocks(f, { DOCK_BLK, BLK2 }, { ITEM_Plate = 2 })
+    p.block_renames = { DOCK_RN, RN2 }
+    f.io.dock_found = function(rn) if rn.gx == 2 then return false, "first reason" end; return false, "second reason" end
+    local b = B.new(f.io)
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "done" and st.text:find("; 2 dock name(s) not applied: first reason", 1, true) ~= nil, "dock names: two failures -> first reason in status (" .. st.text .. ")")
+end
+
+-- placed block, mids not registered on polls 1-2 (no child machine ids yet), filled on poll 3: polled, renamed once
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local base = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base()
+        for _, b2 in ipairs(out) do b2.mids = (f.dock_polls or 0) >= 2 and { 901 } or {} end
+        return out
+    end
+    f.dock_polls = 0
+    f.io.dock_found = function(rn)
+        f.dock_polls = f.dock_polls + 1
+        if rn.mids and #rn.mids > 0 then return true, nil end
+        return false, "block has no child machine ids (needs MSCore 0.8.3 build with mids)"
+    end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and f.dock_polls == 3 and #f.ren_calls == 1 and f.ren_calls[1][1].mids[1] == 901,
+          "dock names: mids empty on polls 1-2, filled on 3 -> polled, renamed once (" .. st.text .. ")")
+    check(st.text:find("renamed 1 dock(s)", 1, true) ~= nil and f.calls.pl == 1, "dock names: mids late -> status renamed 1, factory placed")
+end
+
+-- placed block, mids never registered: polled until 10 s, then 'dock not found (block has no child machine ids)', nothing sent
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local base = f.io.scan_blocks
+    f.io.scan_blocks = function()
+        local out = base()
+        for _, b2 in ipairs(out) do b2.mids = {} end
+        return out
+    end
+    local seen = 0
+    f.io.dock_found = function() seen = seen + 1; return false, "block has no child machine ids (needs MSCore 0.8.3 build with mids)" end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local t0 = f.clock
+    local st = run(b, f)
+    check(st.state == "done" and #f.ren_calls == 0 and seen > 1 and st.text:find("; 1 dock name(s) not applied: dock not found (block has no child machine ids)", 1, true) ~= nil,
+          "dock names: mids never filled -> dock not found after polling (" .. st.text .. ")")
+    check(f.clock - t0 >= 10000 and f.clock - t0 < 11000 and f.calls.pl == 1, "dock names: mids never filled -> given up after 10 s, factory still placed")
+end
+
+-- permanent reasons fail on the first check (no polling): MSCore without rename/read, two docks for one block
+for _, why in ipairs({ "dock names need MSCore >= 0.8.3", "2 dock matches for block" }) do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local seen = 0
+    f.io.dock_found = function() seen = seen + 1; return false, why end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and seen == 1 and #f.ren_calls == 0 and st.text:find("; 1 dock name(s) not applied: " .. why, 1, true) ~= nil,
+          "dock names: '" .. why .. "' -> immediate, not applied (" .. st.text .. ")")
+end
+
+-- send_renames counts that are nil: no throw in the tick, nothing counted
+do
+    local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 0 })
+    f.io.send_renames = function() return nil, nil end
+    local b = B.new(f.io)
+    b:start(dock_plan(f), {})
+    local st = run(b, f)
+    check(st.state == "done" and not st.text:find("dock", 1, true), "dock names: nil counts in dock wait -> no throw, no dock text (" .. st.text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f2.io.send_renames = function() return nil end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p2.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b2:start(p2, {})
+    local st2 = run(b2, f2)
+    check(st2.state == "done" and not st2.text:find("dock", 1, true), "dock names: nil counts in the changes send -> no throw (" .. st2.text .. ")")
+end
+
+-- reasons in the rename-only and normal-path status texts
+do
+    local f = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f.io.send_renames = function() return 0, 1, "dock not found" end
+    local b = B.new(f.io)
+    local p = plan_for(f, {})
+    p.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b:start(p, {})
+    check(b:status().text == "dock names: renamed 0, 1 not applied: dock not found", "dock names only: reason in text (" .. b:status().text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    f2.io.send_renames = function() return nil, nil end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, {})
+    p2.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b2:start(p2, {})
+    check(b2:status().text == "dock names already set", "dock names only: nil counts -> already set (" .. b2:status().text .. ")")
+    local f3 = fake({ player = inv({ S("ITEM_Plate", 5) }, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f3.io.send_renames = function() return 1, 1, "dock not found" end
+    local b3 = B.new(f3.io)
+    local p3 = plan_for(f3, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p3.renames = { { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "A", id = 77 } }
+    b3:start(p3, {})
+    local st3 = run(b3, f3)
+    check(st3.text:find("renamed 1 dock(s); 1 dock name(s) not applied: dock not found", 1, true) ~= nil, "dock names: normal path reason in text (" .. st3.text .. ")")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)

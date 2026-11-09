@@ -490,5 +490,69 @@ check("sb off: still refused", off == nil and off_err:find("These blocks are not
 local off2 = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F)
 check("sb default (no opts): refused", off2 == nil)
 
+-- dock names (Blocks[].Name): trimmed, dock classes only, blank ignored; old JSON (empty.json) gives no renames
+local dn = plan_of("dock_names.json", { blocks = {
+    { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0 },
+    { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 },
+    { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
+check("names: plan valid", dn and dn.valid)
+check("names: one rename (blank and non-dock ignored), trimmed UTF-8 name", dn and #dn.renames == 1 and dn.renames[1].name == "Dock Ä 1")
+check("names: dock child class, grid", dn and dn.renames[1].cls == "BPO_StationBlockDock" and dn.renames[1].gx == 0 and dn.renames[1].gy == 0)
+check("names: no live BlockID -> id nil", dn and dn.renames[1].id == nil)
+local dn2 = plan_of("dock_names.json", { blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 },
+    { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
+check("names: live block id carried to the rename", dn2 and dn2.renames[1].id == 77)
+local dn3 = plan_of("dock_names.json", { blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77, mids = { 555 } },
+    { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
+check("names: live block child mids carried to the rename", dn3 and dn3.renames[1].mids and dn3.renames[1].mids[1] == 555 and #dn3.renames[1].mids == 1)
+local nn = plan_of("empty.json")
+check("names: old JSON -> no renames", nn and #nn.renames == 0)
+check("names: rename_due decision", P.rename_due("A", "B") and not P.rename_due("A", "A") and not P.rename_due(nil, "B")
+    and not P.rename_due("", "B") and P.rename_due("A", nil))
+
+-- dock Name cleanup: control chars stripped, ASCII whitespace trimmed, max 200 characters (UTF-8 safe), empty = no name
+local function name_plan(name_json)
+    return P.plan('{"Version":2,"Blocks":[{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,"Name":'
+        .. name_json .. '}],"DefaultMachines":[]}', live({ blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 } } }), F)
+end
+local function name_of(p) return p and p.renames and p.renames[1] and p.renames[1].name end
+check("name cleanup: tab, CR, LF and other control chars stripped, then trimmed", name_of(name_plan('"\\tA\\r\\nB \\u0001 "')) == "AB")
+check("name cleanup: 250 ASCII chars cut to 200", #(name_of(name_plan('"' .. string.rep("A", 250) .. '"')) or "") == 200)
+check("name cleanup: cut never splits a UTF-8 sequence (199 ASCII + one 2-byte char + more)",
+    name_of(name_plan('"' .. string.rep("A", 199) .. "\u{C4}x\"")) == string.rep("A", 199) .. "\u{C4}")
+check("name cleanup: 201 two-byte chars -> 200 chars, valid UTF-8", name_of(name_plan('"' .. string.rep("\u{C4}", 201) .. '"')) == string.rep("\u{C4}", 200)
+    and utf8.len(name_of(name_plan('"' .. string.rep("\u{C4}", 201) .. '"'))) == 200)
+local pe = name_plan('"\\t \\r\\n"')
+check("name cleanup: empty after cleanup = no name, no rename", pe and #pe.renames == 0)
+-- two blocks with the same key and different names: the first wins, the second gets a plan note
+local pdup = P.plan('{"Version":2,"Blocks":[{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,"Name":"A"},'
+    .. '{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,"Name":"B"}],"DefaultMachines":[]}',
+    live({ blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 } } }), F)
+local dupnote = false
+for _, n in ipairs(pdup and pdup.notes or {}) do if n:find('dock name "B" ignored', 1, true) then dupnote = true end end
+check("names: duplicate key, different name -> first kept, note added", pdup and #pdup.renames == 1 and pdup.renames[1].name == "A" and dupnote)
+
+-- Station Build dock names: a named dock that is live gets a rename (with its id); a named dock this run places goes to
+-- block_renames (no id, bpu_build resolves it after the placement). Summary counts both.
+local function sb_dock(x, name)
+    return '{"Class":"/Game/B/BPO_Dock.BPO_Dock_C","GridLocation":{"X":' .. x .. ',"Y":0},"Height":0,"GridRotation":0,"Name":"' .. name .. '"}'
+end
+local SB_DOCK_INFO = function(cls)
+    if cls == "BPO_Dock" then return { station = true, unlocked = true, bounds = SB_BOUNDS, cost = { ITEM_B = 1 } } end
+    return sb_info(cls)
+end
+local dk = sb_plan(sb_json(sb_dock(0, "Main"), sb_dock(2, "Gate")), { block_info = SB_DOCK_INFO, blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 } } })
+check("sb names: plan valid, one block placed", dk and dk.valid and dk.block_count == 1)
+check("sb names: live named dock -> rename with its live id", dk and #dk.renames == 1 and dk.renames[1].id == 77 and dk.renames[1].gx == 0
+    and dk.renames[1].cls == "BPO_StationBlockDock")
+check("sb names: missing named dock -> not in renames, in block_renames", dk and #dk.block_renames == 1 and dk.block_renames[1].gx == 2
+    and dk.block_renames[1].name == "Gate" and dk.block_renames[1].bcls == "BPO_Dock" and dk.block_renames[1].cls == "BPO_StationBlockDock")
+check("sb names: summary dock names 2", dk and P.summary(dk) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, dock names 2")
+local dk0 = sb_plan(sb_json(sb_dock(2, "Gate")), { block_info = SB_DOCK_INFO, blocks = {} })
+check("sb names: nothing live -> no renames, summary dock names 1 (new dock only)", dk0 and #dk0.renames == 0 and #dk0.block_renames == 1
+    and P.summary(dk0) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, dock names 1")
+check("summary: no renames, text unchanged", P.summary({ counts = { place = 0, keep = 0, remove = 0, recipe = 0 }, refund = {}, renames = {} })
+    == "place 0, keep 0, remove 0, recipe changes 0")
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
