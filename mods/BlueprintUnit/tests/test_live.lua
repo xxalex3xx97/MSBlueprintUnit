@@ -632,7 +632,7 @@ end
 
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
 
--- dock names: MSCore 0.8.3 read_docks rows; one match by class, parent_id and block_id; rename = CreateInputSetText(text, 0) then AddInputCommand(machine_id)
+-- dock names: MSCore 0.8.3 read_docks rows; one match by class, parent_id and block_id; rename = factory_native.rename_dock(machine_id, text)
 do
     local savedMs, savedSFO3 = Live.mscore, StaticFindObject
     local function row(cls, mid, bid, parent, name) return { machine_id = mid, block_id = bid, parent_id = parent, class = cls, name = name, raw_id = mid } end
@@ -667,22 +667,34 @@ do
     Live.mscore = { factory_native = {} }
     local dn3, dw3 = Live.dock_for(42, rnM)
     check(dn3 == nil and dw3 == "dock names need MSCore >= 0.8.3", "dock_for: MSCore without read_docks -> refused with message")
-    Live.mscore = { factory_native = { read_docks = function() return rows end } }
+    -- the rename path must never touch Lua-built FText/SetTextInputCommand (that crashed the game)
+    local function forbidden(what) return function() error("rename path must not call " .. what) end end
+    StaticFindObject = forbidden("StaticFindObject")
     local made, sentc = {}, {}
-    StaticFindObject = function(_) return { CreateInputSetText = function(_, text, cfg)
-        made[#made + 1] = { text = text, cfg = cfg }
-        return named("SetTextInputCommand")
-    end } end
-    local ctlR = { IsValid = alive, AddInputCommand = function(_, id, cmd) sentc[#sentc + 1] = { id = id, cmd = cmd } end }
+    local FNR = { read_docks = function() return rows end,
+        rename_dock = function(mid, text) made[#made + 1] = { mid = mid, text = text }; return true end }
+    Live.mscore = { factory_native = FNR }
+    local ctlR = { IsValid = alive, AddInputCommand = forbidden("ctl:AddInputCommand"), CreateInputSetText = forbidden("CreateInputSetText") }
     local ioR = Live.make_io({ unit = { station = 42 }, ctl = ctlR, F = F, native = {}, plan_mod = P, buildables = {} })
     local okR, failR = ioR.send_renames({ rn })
-    check(okR == 1 and failR == 0 and #sentc == 1 and sentc[1].id == 555, "send_renames: one AddInputCommand to the dock MachineID")
-    check(#made == 1 and made[1].text == "New" and made[1].cfg == 0, "send_renames: CreateInputSetText(name, 0)")
+    check(okR == 1 and failR == 0 and #made == 1 and made[1].mid == 555, "send_renames: rename_dock(dock machine_id 555)")
+    check(#made == 1 and made[1].text == "New", "send_renames: rename_dock(machine_id, name)")
     d_old.name = "New"
     local o2, f2 = ioR.send_renames({ rn })
-    check(o2 == 0 and f2 == 0 and #sentc == 1, "send_renames: live name already equal -> nothing sent")
+    check(o2 == 0 and f2 == 0 and #made == 1, "send_renames: live name already equal -> nothing sent")
     local o3, f3 = ioR.send_renames({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" } })
-    check(o3 == 0 and f3 == 1 and #sentc == 1, "send_renames: no block id -> not applied, nothing sent")
+    check(o3 == 0 and f3 == 1 and #made == 1, "send_renames: no block id -> not applied, nothing sent")
+    -- rename_dock returns nil, reason -> counted as not applied with that reason
+    d_old.name = "Old"
+    FNR.rename_dock = function() return nil, "x" end
+    local o4, f4, w4 = ioR.send_renames({ rn })
+    check(o4 == 0 and f4 == 1 and w4 == "x", "send_renames: rename_dock nil,'x' -> not applied, reason x")
+    -- MSCore without rename_dock -> refused with message, nothing sent
+    Live.mscore = { factory_native = { read_docks = function() return rows end } }
+    local ok5, r5 = Live.send_rename(ctlR, 555, "New")
+    check(ok5 == false and r5 == "dock names need the MSCore build with native rename (rename_dock)", "send_rename: missing rename_dock -> refused with message")
+    local o5, f5, w5 = ioR.send_renames({ rn })
+    check(o5 == 0 and f5 == 1 and w5 == r5, "send_renames: missing rename_dock -> not applied, reason passed on")
     Live.mscore, StaticFindObject = savedMs, savedSFO3
 end
 

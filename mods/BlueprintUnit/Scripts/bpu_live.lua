@@ -595,19 +595,16 @@ function L.dock_for(station, rn)
     return hit
 end
 
--- rename a dock with the game's own two steps: SetTextInputCommand.CreateInputSetText(text, 0), then
--- ctl:AddInputCommand(machine MachineID, cmd) (what the rename popup sends). Returns ok, err|ret.
+-- rename a dock through MSCore's native rename (factory_native.rename_dock(machine_id, text) -> true | nil, reason).
+-- No FText/SetTextInputCommand from Lua: a Lua-built command crashed the game. Returns ok, reason|nil.
 function L.send_rename(ctl, mid, text)
-    if not valid(ctl) then ctl = FindFirstOf("DMSPlayerController") end
-    if not valid(ctl) then return false, "no controller" end
-    local okc, cmd = pcall(function()
-        return StaticFindObject("/Script/MainSequence.Default__SetTextInputCommand"):CreateInputSetText(text, 0)
-    end)
-    TRACE(("rename create text=%s -> ok=%s cmd=%s"):format(tostring(text), tostring(okc), tostring(cmd)))
-    if not okc or not valid(cmd) then return false, "CreateInputSetText failed: " .. tostring(cmd) end
-    local oks, r = pcall(function() ctl:AddInputCommand(mid, cmd) return true end)
-    TRACE(("rename send receiver=%s -> ok=%s ret=%s"):format(tostring(mid), tostring(oks), tostring(r)))
-    return oks, r
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.rename_dock) then return false, "dock names need the MSCore build with native rename (rename_dock)" end
+    local okc, a, b = pcall(FN.rename_dock, mid, text)
+    TRACE(("rename_dock receiver=%s text=%s -> ok=%s ret=%s reason=%s"):format(tostring(mid), tostring(text), tostring(okc), tostring(a), tostring(b)))
+    if not okc then return false, tostring(a) end
+    if a then return true end
+    return false, tostring(b or "rename_dock failed")
 end
 
 -- pin the modification cost in the game's own HUD: SetPinnedCostInput.CreateInputSetPinnedCost(ItemStack[]) -> ctl:AddInputCommand(player.ID, cmd).
