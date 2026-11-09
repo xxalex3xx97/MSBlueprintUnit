@@ -624,5 +624,37 @@ do
 end
 
 check(fakeCalls >= 1, "read_station: native read used (calls: " .. fakeCalls .. ")")
+
+-- dock names: dock child found by class + ParentID + BlockID (exactly one); rename = CreateInputSetText(text, 0) then AddInputCommand(MachineID)
+do
+    local function dock(cls, mid, bid, parent, name)
+        return named("Dock_" .. mid, { Class = named(cls), ParentID = parent, BlockID = { ID = bid }, MachineID = { ID = mid },
+            DisplayName = { ToString = function() return name end } })
+    end
+    local savedDocks, savedSFO3 = world.Dock, StaticFindObject
+    local d_old = dock("BPO_StationBlockDock_C", 555, 77, 42, "Old")
+    world.Dock = { d_old, dock("BPO_StationBlockDock_C", 556, 78, 42, "Other"), dock("BPO_IndustrialDock_C", 557, 77, 42, "X") }
+    local rn = { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", id = 77 }
+    check(Live.dock_for(42, rn) == d_old, "dock_for: one match by class, ParentID and BlockID")
+    check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" }) == nil, "dock_for: no block id -> nil")
+    check(Live.dock_for(99, rn) == nil, "dock_for: other station -> nil")
+    local made, sentc = {}, {}
+    StaticFindObject = function(_) return { CreateInputSetText = function(_, text, cfg)
+        made[#made + 1] = { text = text, cfg = cfg }
+        return named("SetTextInputCommand")
+    end } end
+    local ctlR = { IsValid = alive, AddInputCommand = function(_, id, cmd) sentc[#sentc + 1] = { id = id, cmd = cmd } end }
+    local ioR = Live.make_io({ unit = { station = 42 }, ctl = ctlR, F = F, native = {}, plan_mod = P, buildables = {} })
+    local okR, failR = ioR.send_renames({ rn })
+    check(okR == 1 and failR == 0 and #sentc == 1 and sentc[1].id == 555, "send_renames: one AddInputCommand to the dock MachineID")
+    check(#made == 1 and made[1].text == "New" and made[1].cfg == 0, "send_renames: CreateInputSetText(name, 0)")
+    d_old.DisplayName = { ToString = function() return "New" end }
+    local o2, f2 = ioR.send_renames({ rn })
+    check(o2 == 0 and f2 == 0 and #sentc == 1, "send_renames: live name already equal -> nothing sent")
+    local o3, f3 = ioR.send_renames({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New" } })
+    check(o3 == 0 and f3 == 1 and #sentc == 1, "send_renames: no block id -> not applied, nothing sent")
+    world.Dock, StaticFindObject = savedDocks, savedSFO3
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -563,6 +563,55 @@ function L.item_by_name(name)
     return ITEMS[name]
 end
 
+-- id of a MachineID / BlockID / ParentID value: a number, or the .ID of its struct wrapper; nil when neither
+local function id_val(v)
+    if type(v) == "number" then return v end
+    local a = unw(rd(v, "ID"))
+    if type(a) == "number" then return a end
+    local b = unw(v)
+    if type(b) == "number" then return b end
+    return nil
+end
+
+-- Dock child machine of a named live block: the Dock object of the block's class with ParentID = station and BlockID = rn.id.
+-- Exactly one match, else nil + reason. rn.id nil (live read has no BlockID) = nil: a dock is never guessed.
+function L.dock_for(station, rn)
+    if rn.id == nil then return nil, "block id not in the live read" end
+    local hit, n = nil, 0
+    for _, d in ipairs(FindAllOf("Dock") or {}) do
+        if valid(d) and clsname(d) == rn.cls and id_val(rd(d, "ParentID")) == station and id_val(rd(d, "BlockID")) == rn.id then
+            n = n + 1
+            hit = d
+        end
+    end
+    if n ~= 1 then return nil, n .. " dock matches" end
+    return hit
+end
+
+-- DisplayName of a dock: FText (ToString) or FString. nil when unreadable.
+local function dock_name(d)
+    local okT, t = pcall(function() return rd(d, "DisplayName"):ToString() end)
+    if okT and type(t) == "string" then return t end
+    local v = unw(rd(d, "DisplayName"))
+    if type(v) == "string" then return v end
+    return nil
+end
+
+-- rename a dock with the game's own two steps: SetTextInputCommand.CreateInputSetText(text, 0), then
+-- ctl:AddInputCommand(machine MachineID, cmd) (what the rename popup sends). Returns ok, err|ret.
+function L.send_rename(ctl, mid, text)
+    if not valid(ctl) then ctl = FindFirstOf("DMSPlayerController") end
+    if not valid(ctl) then return false, "no controller" end
+    local okc, cmd = pcall(function()
+        return StaticFindObject("/Script/MainSequence.Default__SetTextInputCommand"):CreateInputSetText(text, 0)
+    end)
+    TRACE(("rename create text=%s -> ok=%s cmd=%s"):format(tostring(text), tostring(okc), tostring(cmd)))
+    if not okc or not valid(cmd) then return false, "CreateInputSetText failed: " .. tostring(cmd) end
+    local oks, r = pcall(function() ctl:AddInputCommand(mid, cmd) return true end)
+    TRACE(("rename send receiver=%s -> ok=%s ret=%s"):format(tostring(mid), tostring(oks), tostring(r)))
+    return oks, r
+end
+
 -- pin the modification cost in the game's own HUD: SetPinnedCostInput.CreateInputSetPinnedCost(ItemStack[]) -> ctl:AddInputCommand(player.ID, cmd).
 -- stacks = { {name="ITEM_x", n=amount}, ... }; {} = unpin. Returns ok, err|ret. Every call is traced (UNKNOWNs settle from the trace).
 function L.send_pin(ctl, player, stacks)
@@ -752,6 +801,28 @@ function L.make_io(ctx)
     end
     function io.send_place(m)
         return call(native.place, U.station, m.bdat, m.x, m.y, m.h, m.rot, m.cfg)
+    end
+    -- Dock names (Blocks[].Name): per named block, the dock child is renamed once when its live name differs.
+    -- Returns renamed, not applied (count), first reason. A dock that is not found is never renamed.
+    function io.send_renames(list)
+        local okn, failn, why = 0, 0, nil
+        local sent = {}
+        for _, rn in ipairs(list or {}) do
+            local okd, d, err = pcall(L.dock_for, U.station, rn)
+            if not okd then d, err = nil, tostring(d) end
+            local mid = d and id_val(rd(d, "MachineID"))
+            if not d or mid == nil then
+                failn = failn + 1; why = why or err or "dock machine id not readable"
+            elseif sent[mid] or not Plan.rename_due(rn.name, dock_name(d)) then
+                -- already has this name, or sent in this run: nothing to do
+            else
+                sent[mid] = true
+                local oks, r = L.send_rename(ctx.ctl, mid, rn.name)
+                if oks then okn = okn + 1 else failn = failn + 1; why = why or tostring(r) end
+            end
+        end
+        print(("[BPUnit] dock names: %d renamed, %d not applied"):format(okn, failn))
+        return okn, failn, why
     end
     function io.send_changes(chg)
         local okc, failc = 0, 0

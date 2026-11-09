@@ -458,14 +458,23 @@ function B.new(io)
         if not R.chg_sent then
             local _, failc = io.send_changes(R.plan.chg)
             R.chg_failed = failc or 0
+            -- dock names (Blocks[].Name): only when the blueprint has any, so old JSONs never reach it
+            R.ren_ok, R.ren_failed = 0, 0
+            if io.send_renames and R.plan.renames and #R.plan.renames > 0 then
+                local okr, a, b = pcall(io.send_renames, R.plan.renames)
+                if okr then R.ren_ok, R.ren_failed = a, b else R.ren_failed = #R.plan.renames end
+            end
             R.chg_sent = true
         end
     end
 
     -- config part of the status text: "; N recipe/port change(s) failed". Empty when all changes went through.
     local function chg_suffix()
-        if R.chg_failed > 0 then return ("; %d recipe/port change(s) failed"):format(R.chg_failed) end
-        return ""
+        local s = ""
+        if R.chg_failed > 0 then s = ("; %d recipe/port change(s) failed"):format(R.chg_failed) end
+        if (R.ren_ok or 0) > 0 then s = s .. ("; renamed %d dock(s)"):format(R.ren_ok) end
+        if (R.ren_failed or 0) > 0 then s = s .. ("; %d dock name(s) not applied"):format(R.ren_failed) end
+        return s
     end
 
     -- restore part of the status text: "; restore: restored N items into K container(s); notes". Empty when no restore ran.

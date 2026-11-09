@@ -274,6 +274,12 @@ local function resolve_recipe(site, crafter, live_recipes)
     return matches[1]
 end
 
+-- dock block classes that take a name (Blocks[].Name) -> the game's dock child machine class (short name, no _C)
+local DOCK_NAME_CLS = {
+    BPO_Dock = "BPO_StationBlockDock", BPO_Dock_2 = "BPO_IndustrialDock",
+    BPO_ShipyardCore = "BPO_ShipyardBlockDock", BPO_ShipyardCore_02 = "BPO_ShipyardBlockDock_02",
+}
+
 ---------------------------------------------------------------- JSON -> records
 local function parse_doc(text)
     local root, err = JSON.decode(text)
@@ -288,7 +294,11 @@ local function parse_doc(text)
         local c = type(e) == "table" and e.Class or nil
         if type(c) ~= "string" then bail("bad JSON: block without Class") end
         local x, y, h, rot = grid(e, "block")
-        doc.blocks[#doc.blocks + 1] = { class = short(c), gx = x, gy = y, h = h, rot = rot, path = c }
+        local sc = short(c)
+        -- optional Name: non-empty after trim, dock classes only; anything else is ignored (old JSONs: nil)
+        local name = type(e.Name) == "string" and e.Name:match("^%s*(.-)%s*$") or ""
+        doc.blocks[#doc.blocks + 1] = { class = sc, gx = x, gy = y, h = h, rot = rot, path = c,
+            name = (DOCK_NAME_CLS[sc] and name ~= "") and name or nil }
     end
     local dm = root.DefaultMachines
     if dm ~= nil and (type(dm) ~= "table" or not is_array(dm)) then bail("bad JSON: DefaultMachines not an array") end
@@ -468,12 +478,13 @@ local function build(text, live, F, opts)
     -- Blocks must be on the live station Blueprint. Station Build (opts.station_build): missing blocks are classified and
     -- placed by plan_blocks instead of refused here
     local bplan
+    local renames = {}   -- dock names for matched live blocks (Station Build placements are not renamed yet)
     if opts and opts.station_build then
         bplan = plan_blocks(doc, blocks, live, opts)
         for _, n in ipairs(bplan.notes) do notes[#notes + 1] = n end
     else
         local blockset = {}
-        for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = true end
+        for _, b in ipairs(blocks) do blockset[b.class .. "|" .. b.gx .. "|" .. b.gy .. "|" .. b.h] = b end
         local missing, missing_jb = {}, {}
         for _, jb in ipairs(doc.blocks) do
             if not blockset[jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h] then
@@ -494,6 +505,17 @@ local function build(text, live, F, opts)
             for i = 1, math.min(#missing_jb, 5) do places[i] = B.place_text(missing_jb[i]) end
             bail(("These blocks are not on the station grid: %s. Fix them in the blueprint or tick Station Build."):format(
                 B.listing(places, #missing_jb)))
+        end
+        -- Named docks: one rename per named JSON block, on the live block it matched (same key as above). id = live BlockID
+        -- when the live read has it (nil: bpu_live cannot find the dock child and reports it). Plan never sends anything.
+        local seen_rn = {}
+        for _, jb in ipairs(doc.blocks) do
+            local key = jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h
+            if jb.name and not seen_rn[key] then
+                seen_rn[key] = true
+                local lb = blockset[key]
+                renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = jb.name, id = lb and lb.id }
+            end
         end
     end
 
@@ -962,6 +984,7 @@ local function build(text, live, F, opts)
         notes = notes,
         counts = { place = #machines, keep = #kept, remove = #removed, recipe = recN, port = portN, block_remove = bplan and #bplan.remove or nil },
         removes = removes,
+        renames = renames,
         fp = P.fingerprint(existing),
         valid = true,
         -- Station Build only (nil when off): accepted block records, their cost, removed live blocks and their refund, count, refusal list
@@ -972,6 +995,11 @@ local function build(text, live, F, opts)
         block_count = bplan and bplan.count,
         block_refuse = bplan and bplan.refuse,
     }
+end
+
+-- rename decision (dock Name from the JSON): true when the name is set and differs from the live DisplayName (nil = unreadable)
+function P.rename_due(want, live_name)
+    return type(want) == "string" and want ~= "" and want ~= live_name
 end
 
 function P.plan(text, live, F, opts)

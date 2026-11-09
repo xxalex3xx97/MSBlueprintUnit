@@ -490,5 +490,22 @@ check("sb off: still refused", off == nil and off_err:find("These blocks are not
 local off2 = P.plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), live({ block_info = sb_info }), F)
 check("sb default (no opts): refused", off2 == nil)
 
+-- dock names (Blocks[].Name): trimmed, dock classes only, blank ignored; old JSON (empty.json) gives no renames
+local dn = plan_of("dock_names.json", { blocks = {
+    { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0 },
+    { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 },
+    { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
+check("names: plan valid", dn and dn.valid)
+check("names: one rename (blank and non-dock ignored), trimmed UTF-8 name", dn and #dn.renames == 1 and dn.renames[1].name == "Dock Ä 1")
+check("names: dock child class, grid", dn and dn.renames[1].cls == "BPO_StationBlockDock" and dn.renames[1].gx == 0 and dn.renames[1].gy == 0)
+check("names: no live BlockID -> id nil", dn and dn.renames[1].id == nil)
+local dn2 = plan_of("dock_names.json", { blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77 },
+    { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
+check("names: live block id carried to the rename", dn2 and dn2.renames[1].id == 77)
+local nn = plan_of("empty.json")
+check("names: old JSON -> no renames", nn and #nn.renames == 0)
+check("names: rename_due decision", P.rename_due("A", "B") and not P.rename_due("A", "A") and not P.rename_due(nil, "B")
+    and not P.rename_due("", "B") and P.rename_due("A", nil))
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
