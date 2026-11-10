@@ -4,8 +4,18 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-10
+
+Requires **MSCore 0.7.6 or newer** (dock names still need 0.8.3).
+
+### Fixed
+- A container that is already in place (kept) is now topped up to the blueprint's contents. Before, only newly placed containers were filled, so a running factory's half-empty containers were never refilled.
+
 ### Changed
-- Kept/placed container top-up now takes missing items from the unit first, then the player inventory (notes show unit/player amounts and the remaining short).
+- Missing container items come from the unit inventory first, then from your own inventory (partial fill; the notes show how much came from the unit, from you, and what is still short).
+
+### Notes
+- Tested in game (2026-11-10): a kept container filled from the unit, and the rest from the player inventory.
 
 ## [0.3.0] - 2026-11-10
 
