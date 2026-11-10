@@ -556,12 +556,6 @@ function B.new(io)
         return ("sent: placed %d, removed %d (the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed)
     end
 
-    -- last command sent (legacy, no restore): the run is done at once (no charge poll, no verify)
-    local function finish()
-        send_changes_once()
-        end_run(legacy_text())
-    end
-
     -- all placements sent: with containers that have contents to restore, wait for their new ids (stage 12); else done
     local function after_place(now, base)
         send_changes_once()
@@ -629,7 +623,7 @@ function B.new(io)
     local function chunk_start(now)
         local P = R.plan
         local n_place = #P.place
-        if R.chunk_from > n_place then return finish() end
+        if R.chunk_from > n_place then return after_place(now, legacy_text()) end
         local ps, us, err = read_both()
         if not ps then return fail(err) end
         local n = R.creative and (n_place - R.chunk_from + 1) or chunk_len(R.costs, R.chunk_from, ps, capmap(io, ps, us))
