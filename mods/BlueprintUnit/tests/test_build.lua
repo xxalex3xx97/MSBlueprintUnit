@@ -362,8 +362,9 @@ local function fake(spec)
         f.splits = {}
         function io.split(inv, src0, amount, dst0)
             f.splits[#f.splits + 1] = { inv, src0, amount, dst0 }
-            if inv ~= 202 then f.violations[#f.violations + 1] = "split on a non-unit inventory"; return false, "inv" end
-            local src, dst = f.inv.unit.slots[src0 + 1], f.inv.unit.slots[dst0 + 1]
+            local slots = (inv == 202 and f.inv.unit.slots) or (inv == 101 and f.inv.player.slots)
+            if not slots then f.violations[#f.violations + 1] = "split on an unregistered inventory"; return false, "inv" end
+            local src, dst = slots[src0 + 1], slots[dst0 + 1]
             if not src or not dst then f.violations[#f.violations + 1] = "split slot out of range"; return false, "range" end
             if (f.split_fail_n or 0) > 0 then f.split_fail_n = f.split_fail_n - 1; return false, "split refused" end
             if f.split_noop then return true end
@@ -1782,6 +1783,61 @@ do
     check(cid and cont_plate(f, cid) == 30 and #f.violations == 0
           and st.text:find("plan reduced: unit has 30 of 50 for Plate (short 20)", 1, true) ~= nil
           and st.text:find("not restored (unit has", 1, true) == nil, "plan reduced: 30 in, note 'unit has 30 of 50 (short 20)' (" .. st.text .. ")")
+end
+
+-- top-up from the player inventory after the unit: unit 30 whole, then 90 split out of the player's 100 stack
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and tot(f.inv.player.slots, "ITEM_Plate") == 10
+          and #f.splits == 1 and f.splits[1][1] == 101 and f.splits[1][3] == 90 and #f.violations == 0
+          and st.text:find("Plate x120: 30 from unit, 90 from player", 1, true) ~= nil and st.text:find("short", 1, true) == nil,
+          "player top-up: 30 from unit, 90 split from player, no short (" .. st.text .. ")")
+end
+
+-- unit 30 + player 50 < 120: container 80, both emptied, note with the remaining short
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 50, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 80 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and tot(f.inv.player.slots, "ITEM_Plate") == 0
+          and #f.splits == 0 and #f.violations == 0 and st.text:find("Plate x120: 30 from unit, 50 from player, short 40", 1, true) ~= nil,
+          "player top-up short: 80 in, both empty, note short 40 (" .. st.text .. ")")
+end
+
+-- unit has enough (100 + 100 for need 120): the player stack is not touched, no "from player" note
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 4), player = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 120 and tot(f.inv.player.slots, "ITEM_Plate") == 100 and #f.violations == 0
+          and st.text:find("from player", 1, true) == nil, "unit first: 120 from the unit, player untouched (" .. st.text .. ")")
+end
+
+-- rounded route (no io.split): unit only, the player stack is not used
+do
+    local f = whole_fake({ player = inv({ S("ITEM_Plate", 100) }, 3), unit = inv({ S("ITEM_Plate", 50) }, 3) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 0 and tot(f.inv.player.slots, "ITEM_Plate") == 100 and #f.violations == 0
+          and st.text:find("not restored (unit has 50)", 1, true) ~= nil, "rounded route: unit only, player untouched (" .. st.text .. ")")
+end
+
+-- every split refused: the split is skipped (its TRANSFER passed), the unit part lands, no stall
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 100, 100) }, 3) })
+    f.split_fail_n = 99
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 30 and tot(f.inv.player.slots, "ITEM_Plate") == 100 and #f.violations == 0
+          and st.text:find("1 command(s) skipped (refused)", 1, true) ~= nil and st.text:find("stalled", 1, true) == nil,
+          "player split refused: 30 in, player kept, skipped note, no stall (" .. st.text .. ")")
 end
 
 -- container room 50 (one slot, cap 50), unit 40 + 40, need 80 -> 40 direct, 10 split, container 50, unit keeps 30, full note
