@@ -1840,6 +1840,45 @@ do
           "player split refused: 30 in, player kept, skipped note, no stall (" .. st.text .. ")")
 end
 
+-- player whole-stack TRANSFER refused (command 2, the player's 90): skipped, not counted in skip_u, so the unit verify still passes
+-- (refuse_after = 2: the SORT is logged first, then the unit TRANSFER goes through, the player TRANSFER is refused)
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 90, 100) }, 3) })
+    f.refuse_after = 2
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid and cont_plate(f, cid) == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 0
+          and tot(f.inv.player.slots, "ITEM_Plate") == 90 and #f.violations == 0, "player TRANSFER refused: 30 in, player kept (" .. st.text .. ")")
+    check(st.text:find("1 command(s) skipped (refused)", 1, true) ~= nil and st.text:find("stalled", 1, true) == nil
+          and st.text:find("mismatch", 1, true) == nil, "player TRANSFER refused: skipped note, no stall or mismatch (" .. st.text .. ")")
+end
+
+-- player has no free slot for the split: unit 30 in, player 100 + Gear stack fill it -> 90 not restored, note names the player slot
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Gear", 10, 50) }, 2) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 30 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and tot(f.inv.player.slots, "ITEM_Plate") == 100
+          and #f.splits == 0 and #f.violations == 0, "player no free slot: 30 in, player kept (" .. st.text .. ")")
+    check(st.text:find("Plate x90 not restored (no free player slot)", 1, true) ~= nil, "player no free slot: note (" .. st.text .. ")")
+end
+
+-- container room 50 (one slot), unit 30 whole + player 100 split 20 (room left) -> container 50, note from unit and player, full note
+do
+    local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 100, 100) }, 3),
+                    raw = { ITEM_Plate = 50 }, max = { ITEM_Plate = 50 }, cont_slots = 1 })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and tot(f.inv.player.slots, "ITEM_Plate") == 80
+          and #f.splits == 1 and f.splits[1][1] == 101 and f.splits[1][3] == 20 and #f.violations == 0,
+          "player room: container 50, player split 20 (" .. st.text .. ")")
+    check(st.text:find("Plate x120: 30 from unit, 20 from player", 1, true) ~= nil
+          and st.text:find("container " .. tostring(cid) .. " full: Plate x70", 1, true) ~= nil, "player room: note 30/20 and full note x70 (" .. st.text .. ")")
+end
+
 -- container room 50 (one slot, cap 50), unit 40 + 40, need 80 -> 40 direct, 10 split, container 50, unit keeps 30, full note
 do
     local f = spl({ unit = inv({ S("ITEM_Plate", 40, 100), S("ITEM_Plate", 40, 100) }, 4), raw = { ITEM_Plate = 50 }, max = { ITEM_Plate = 50 }, cont_slots = 1 })
