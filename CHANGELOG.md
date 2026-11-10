@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-11-10
+
+Dock names need **MSCore 0.8.3 or newer**. Without it everything else works and the names are skipped with a message.
+
+### Added
+- **Dock names.** A blueprint JSON can name docks, industrial docks and shipyard cores (an optional `Name` on the block, written by the Factory Blueprint site). Check shows "dock names N". Build renames the docks that have a different name, for docks already on the station and for docks Station Build places in the same run.
+- The status line says how many docks were renamed, and why some were not (for example "needs MSCore 0.8.3", "dock not found"). A dock is never renamed on a guess: no match or more than one match means it is skipped.
+- A run that only renames docks (nothing else to build) now sends the names and finishes, instead of stopping at "nothing to build".
+
+### Fixed
+- Build no longer aborts in the middle of a Station Build run when a time value in a log line has decimals.
+
+### Notes
+- Tested in game (2026-11-10): docks on a real station renamed, including a dock placed by Station Build in the same run.
 ## [0.2.1] - 2026-11-09
 
 Requires **MSCore 0.7.6 or newer**.
