@@ -335,6 +335,11 @@ local pk4 = kept_cont({ { name = "ITEM_Plate", count = 7 } }, '[{"Item":"ironore
 check("topup: other live item ignored", pk4 and pk4.kept[1].restore[1].count == 120 and pk4.restore.ITEM_IronOre == 120)
 local pk5 = kept_cont({}, '[{"Item":"ironore","Count":120}]')
 check("topup: empty live container gets all", pk5 and pk5.restore.ITEM_IronOre == 120)
+-- two JSON rows of one item (60 + 60) = one target 120: live 60 -> deficit 60 once (was 0), live 120 -> nothing
+local pk6 = kept_cont({ { name = "ITEM_IronOre", count = 60 } }, '[{"Item":"ironore","Count":60},{"Item":"ironore","Count":60}]')
+check("topup dup rows: live 60 of 2x60 -> deficit 60 once", pk6 and pk6.kept[1].restore and #pk6.kept[1].restore == 1 and pk6.kept[1].restore[1].count == 60 and pk6.restore.ITEM_IronOre == 60)
+local pk7 = kept_cont({ { name = "ITEM_IronOre", count = 120 } }, '[{"Item":"ironore","Count":60},{"Item":"ironore","Count":60}]')
+check("topup dup rows: live 120 of 2x60 -> nothing", pk7 and pk7.kept[1].restore == nil and next(pk7.restore) == nil)
 
 -- off-floor underground pair: placed anyway (one machine + exit cell), note counts the machine.
 -- A live Dock on the exit cell refused the plan (never-removed machine in the way), so the case has no live Dock.

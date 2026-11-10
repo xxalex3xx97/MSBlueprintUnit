@@ -2648,6 +2648,16 @@ do
     local st = run(b, f, 400)
     check(ok and st.state == "done" and cont_plate(f, 303) == 120, "topup kept, legacy flow: 120 Plate into kept container 303 (" .. st.text .. ")")
 end
+-- start gate: a kept NON-container with a restore list does not count as a top-up (nothing to build, nothing sent)
+do
+    local f = whole_fake({ containers = { [303] = { slots = inv({}, 4) } } })
+    local b = B.new(f.io)
+    local p = plan_for(f, { need = {}, refund = {} })
+    p.kept = { { bcls = "BP_Smelter_1", x = 5, y = 0, id = 303, restore = { { name = "ITEM_Plate", count = 120 } } } }
+    local ok, msg = b:start(p, {})
+    local st = run(b, f, 400)
+    check(ok and msg == "ok nothing to build" and st.state == "done" and #f.cmd_log == 0, "topup gate: non-container kept restore ignored (" .. tostring(msg) .. ")")
+end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)
