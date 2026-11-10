@@ -2522,5 +2522,37 @@ do
     check(st3.text:find("renamed 1 dock(s); 1 dock name(s) not applied: dock not found", 1, true) ~= nil, "dock names: normal path reason in text (" .. st3.text .. ")")
 end
 
+-- kept container top-up (no placement): restore job runs on the kept container id (303), unit shortage gives a note
+local function kept_topup(f, restore)
+    local b = B.new(f.io)
+    local p = plan_for(f, { need = {}, refund = {} })
+    p.kept = { { bcls = "BP_ContainerObject_2", x = 5, y = 0, id = 303, restore = restore } }
+    return b, b:start(p, {})
+end
+do
+    local f = whole_fake({ containers = { [303] = { slots = inv({}, 4) } } })
+    local traces = tracer(f)
+    local b, ok = kept_topup(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    check(ok and st.state == "done" and cont_plate(f, 303) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0 and #f.violations == 0
+          and #f.cmd_log == 3 and f.cmd_log[1][2] == 303 + 5000,
+          "topup kept: 120 Plate into kept container 303 (job id = kept id), 3 TRANSFERs (" .. st.text .. ")")
+    check(starts(traces, "restore plan: container id=303 item=ITEM_Plate count=120"), "topup kept: restore plan trace names id 303")
+end
+do
+    local f = whole_fake({ unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50) }, 3), containers = { [303] = { slots = inv({}, 4) } } })
+    local b, ok = kept_topup(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    check(ok and st.state == "done" and cont_plate(f, 303) == 0 and #f.cmd_log == 0 and st.text:find("; restore: Plate x120 not restored (unit has 100)", 1, true) ~= nil,
+          "topup kept: unit shortage -> nothing sent, note (" .. st.text .. ")")
+end
+-- legacy flow (redirect off), top-up only, no placements/removals: must still run the restore for the kept container
+do
+    local f = whole_fake({ redirect = "off", containers = { [303] = { slots = inv({}, 4) } } })
+    local b, ok = kept_topup(f, { { name = "ITEM_Plate", count = 120 } })
+    local st = run(b, f, 400)
+    check(ok and st.state == "done" and cont_plate(f, 303) == 120, "topup kept, legacy flow: 120 Plate into kept container 303 (" .. st.text .. ")")
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, failn))
 os.exit(failn == 0 and 0 or 1)
