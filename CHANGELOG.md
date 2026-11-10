@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- Kept/placed container top-up now takes missing items from the unit first, then the player inventory (notes show unit/player amounts and the remaining short).
+
 ## [0.3.0] - 2026-11-10
 
 Dock names need **MSCore 0.8.3 or newer**. Without it everything else works and the names are skipped with a message.

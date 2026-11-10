@@ -324,6 +324,10 @@ end
 local function is_container(bcls)
     return tostring(bcls or ""):find("Container", 1, true) ~= nil
 end
+-- a kept container with items to top up from the unit: shared by the start gate, after_place and the restore job list
+local function kept_has_restore(k)
+    return is_container(k.bcls) and k.restore ~= nil and #k.restore > 0
+end
 
 -- cell key of container memory: bcls|x|y|h|rot (same format as bpu_plan)
 local function ckey(e)
@@ -556,12 +560,6 @@ function B.new(io)
         return ("sent: placed %d, removed %d (the game updates its blueprint view in about 30 s)"):format(R.placed, R.removed)
     end
 
-    -- last command sent (legacy, no restore): the run is done at once (no charge poll, no verify)
-    local function finish()
-        send_changes_once()
-        end_run(legacy_text())
-    end
-
     -- all placements sent: with containers that have contents to restore, wait for their new ids (stage 12); else done
     local function after_place(now, base)
         send_changes_once()
@@ -573,6 +571,9 @@ function B.new(io)
                 R.cplaced[#R.cplaced + 1] = pl
                 if pl.restore and #pl.restore > 0 then want = want + 1 end
             end
+        end
+        for _, k in ipairs(R.plan.kept or {}) do
+            if kept_has_restore(k) then want = want + 1 end
         end
         if want == 0 then return end_run(base) end
         local mode = io.restore_mode and io.restore_mode() or "on"
@@ -626,7 +627,7 @@ function B.new(io)
     local function chunk_start(now)
         local P = R.plan
         local n_place = #P.place
-        if R.chunk_from > n_place then return finish() end
+        if R.chunk_from > n_place then return after_place(now, legacy_text()) end
         local ps, us, err = read_both()
         if not ps then return fail(err) end
         local n = R.creative and (n_place - R.chunk_from + 1) or chunk_len(R.costs, R.chunk_from, ps, capmap(io, ps, us))
@@ -992,6 +993,9 @@ function B.new(io)
             for i, pl in ipairs(R.cplaced) do
                 if pl.restore and #pl.restore > 0 then jobs[#jobs + 1] = { id = new[i], items = pl.restore } end
             end
+            for _, k in ipairs(R.plan.kept or {}) do
+                if kept_has_restore(k) then jobs[#jobs + 1] = { id = k.id, items = k.restore } end
+            end
             R.rjobs, R.jobs_set = jobs, true
         end
         local ready = true
@@ -1101,10 +1105,40 @@ function B.new(io)
     -- stage 15 plan, split route (same shape as pipe_build). Per container item: need = count (the unit total caps it).
     -- Unit slots in slot order: take = min(slot amount, need, container room). take == slot -> one TRANSFER of that slot.
     -- take < slot -> split { src0, take, dst0 } into a free empty unit slot, then one TRANSFER of dst0 (pair links them).
-    local function pipe_build_split(us)
+    -- Sources: unit first, then the player inventory (split route only; the rounded route is unit-only).
+    local function pipe_build_split(us, ps)
         local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, split = true, full = {} }
         local um = pm.unit
         local used, npair = {}, 0
+        local pl, usedp = copy_slots(ps), {}
+        local function draw(src, src_inv, src_used, job, cid, cn, item, cap, need)
+            local moved, nsplit, why = 0, 0, nil
+            for i, s in ipairs(src) do
+                if need <= 0 or why then break end
+                if s.item == item and s.amount > 0 then
+                    local room = room_of(cn, item, cap)
+                    if room <= 0 then break end
+                    local take = math.min(s.amount, need, room)
+                    local dst = i
+                    if take < s.amount then
+                        dst = empty_dst(src, src_used)
+                        if not dst then why = "noslot"; break end
+                        src_used[dst] = true
+                        npair, nsplit = npair + 1, nsplit + 1
+                        pq[#pq + 1] = { kind = "split", inv = src_inv, src = i - 1, amount = take, dst = dst - 1, pair = npair,
+                            job = job.id, item = item, moved = take, from_player = (src_inv == R.player_inv) or nil }
+                    end
+                    pq[#pq + 1] = { kind = "transfer", prim = src_inv, sec = cid, slot0 = dst - 1, action = 2,
+                        pair = (dst ~= i) and npair or nil, job = job.id, item = item, moved = take, from_player = (src_inv == R.player_inv) or nil }
+                    src_used[dst] = true
+                    sim_apply(cn, item, sim_put(cn, item, take, cap))
+                    s.amount = s.amount - take
+                    if s.amount <= 0 then s.item, s.amount = "", 0 end
+                    need, moved = need - take, moved + take
+                end
+            end
+            return moved, nsplit, why
+        end
         for _, job in ipairs(R.rjobs) do
             local map, _, cinv = contents_of(job)
             local cid = cinv and cinv.id
@@ -1119,51 +1153,32 @@ function B.new(io)
                 local jm = { id = job.id, slots = cn, short = {}, moved = 0 }
                 pm.jobs[#pm.jobs + 1] = jm
                 for _, it in ipairs(job.items) do
-                    local need = it.count
-                    local have = get(totals(um), it.name)
-                    if have < need then
-                        rs_note(("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have), commas(it.count), shortname(it.name), commas(it.count - have)))
-                        jm.short[#jm.short + 1] = { name = it.name, count = need - have }
-                        need = have
-                    end
+                    local have_u, have_p = get(totals(um), it.name), get(totals(pl), it.name)
+                    local short = math.max(it.count - have_u - have_p, 0)
+                    local need = it.count - short
+                    if short > 0 then jm.short[#jm.short + 1] = { name = it.name, count = short } end
                     pm.touched[it.name] = true
-                    local cap, moved_item, nsplit, why = cmax[it.name], 0, 0, nil
-                    for i, s in ipairs(um) do
-                        if need <= 0 or why then break end
-                        if s.item == it.name and s.amount > 0 then
-                            local room = room_of(cn, it.name, cap)
-                            if room <= 0 then break end
-                            local take = math.min(s.amount, need, room)
-                            local dst = i
-                            if take < s.amount then
-                                dst = empty_dst(um, used)
-                                if not dst then why = "noslot"; break end
-                                used[dst] = true
-                                npair, nsplit = npair + 1, nsplit + 1
-                                pq[#pq + 1] = { kind = "split", src = i - 1, amount = take, dst = dst - 1, pair = npair,
-                                    job = job.id, item = it.name, moved = take }
-                            end
-                            pq[#pq + 1] = { kind = "transfer", prim = R.unit_inv, sec = cid, slot0 = dst - 1, action = 2,
-                                pair = (dst ~= i) and npair or nil, job = job.id, item = it.name, moved = take }
-                            -- the TRANSFER empties dst only when the game ticks, but io.split acts at once: a slot a queued
-                            -- TRANSFER touches is never a split destination in this pass (else "split into a non-empty slot")
-                            used[dst] = true
-                            sim_apply(cn, it.name, sim_put(cn, it.name, take, cap))
-                            s.amount = s.amount - take   -- the staged part left the slot (split), or the whole slot went (TRANSFER)
-                            if s.amount <= 0 then s.item, s.amount = "", 0 end
-                            need, moved_item = need - take, moved_item + take
-                        end
+                    local cap = cmax[it.name]
+                    local mu, su, whyu = draw(um, R.unit_inv, used, job, cid, cn, it.name, cap, need)
+                    local mp, sp, whyp = 0, 0, nil
+                    if need - mu > 0 then mp, sp, whyp = draw(pl, R.player_inv, usedp, job, cid, cn, it.name, cap, need - mu) end
+                    local left = need - mu - mp
+                    jm.moved = jm.moved + mu + mp
+                    if mp > 0 then
+                        rs_note(("%s x%s: %s from unit, %s from player%s"):format(shortname(it.name), commas(it.count), commas(mu), commas(mp),
+                            short > 0 and (", short " .. commas(short)) or ""))
+                    elseif short > 0 then
+                        rs_note(("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have_u), commas(it.count), shortname(it.name), commas(short)))
                     end
-                    jm.moved = jm.moved + moved_item
-                    if need > 0 then
-                        if why == "noslot" then
-                            rs_note(("%s x%s not restored (no free unit slot)"):format(shortname(it.name), need))
+                    if left > 0 then
+                        if whyu == "noslot" or whyp == "noslot" then
+                            rs_note(("%s x%s not restored (no free %s slot)"):format(shortname(it.name), left, whyp == "noslot" and "player" or "unit"))
                         elseif room_of(cn, it.name, cap) <= 0 then
-                            pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = need }
+                            pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = left }
                         end
                     end
-                    trace(("restore plan (split): container id=%s item=%s count=%s splits=%s moved=%s short=%s"):format(
-                        tostring(job.id), it.name, tostring(it.count), tostring(nsplit), tostring(moved_item), tostring(math.max(need, 0))))
+                    trace(("restore plan (split): container id=%s item=%s count=%s splits=%s moved=%s short=%s from_player=%s"):format(
+                        tostring(job.id), it.name, tostring(it.count), tostring(su + sp), tostring(mu + mp), tostring(math.max(left, 0) + short), tostring(mp)))
                 end
             end
         end
@@ -1172,8 +1187,8 @@ function B.new(io)
 
     -- stage 15 plan: TRANSFER commands from one fresh read (models of the unit and of each container). Nothing is sent here.
     -- pm = { unit = model slots, touched = { item = true }, jobs = { {id, slots = model, short = {}, moved = n} } }
-    local function pipe_build(us)
-        if io.split then return pipe_build_split(us) end
+    local function pipe_build(us, ps)
+        if io.split then return pipe_build_split(us, ps) end
         local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, full = {} }
         local um = pm.unit
         local function add(prim, sec, slot0, job_id, item, moved)
@@ -1334,7 +1349,7 @@ function B.new(io)
             local ps, us, err = read_both()
             if not ps then return fail(err) end
             trace("restore unit stacks (start): " .. slots_text(us))
-            R.pq, R.pm = pipe_build(us)
+            R.pq, R.pm = pipe_build(us, ps)
             full_notes(R.pm.full)
             R.qpos = 1
             trace(("restore pipeline: %s command(s) for %s container(s), %s per tick"):format(
@@ -1348,7 +1363,7 @@ function B.new(io)
             if c.kind == "split" then
                 local t0 = io.now()
                 trace(("restore split: before src0=%s amount=%s dst0=%s at %s ms"):format(tostring(c.src), tostring(c.amount), tostring(c.dst), tostring(t0)))
-                ok, err = io.split(R.unit_inv, c.src, c.amount, c.dst)
+                ok, err = io.split(c.inv or R.unit_inv, c.src, c.amount, c.dst)
                 trace(("restore split: after sent=%s err=%s, %s ms"):format(tostring(ok), tostring(err), tostring(io.now() - t0)))
             elseif c.pair and R.dead and R.dead[c.pair] then
                 ok = true   -- its split was skipped: nothing is staged, so this TRANSFER is passed (not sent, not counted)
@@ -1369,8 +1384,7 @@ function B.new(io)
                 end
                 -- retries used up: skip it (its move never happened, the model drops it), the restore goes on
                 R.skipped = (R.skipped or 0) + 1
-                R.skip_u = R.skip_u or {}
-                R.skip_u[c.item] = get(R.skip_u, c.item) + c.moved
+                if not c.from_player then R.skip_u = R.skip_u or {}; R.skip_u[c.item] = get(R.skip_u, c.item) + c.moved end
                 R.skip_c = R.skip_c or {}
                 R.skip_c[c.job] = R.skip_c[c.job] or {}
                 R.skip_c[c.job][c.item] = get(R.skip_c[c.job], c.item) + c.moved
@@ -1682,7 +1696,9 @@ function B.new(io)
             if type(m.refund) ~= "table" then return start_fail("refund unknown for " .. tostring(m.bcls) .. ", import again") end
             R.rem_list[#R.rem_list + 1] = { id = m.id, bcls = m.bcls, refund = m.refund }
         end
-        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 then
+        local has_topup = false
+        for _, m in ipairs(P.kept or {}) do if kept_has_restore(m) then has_topup = true end end
+        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 and not has_topup then
             -- dock names only (live named docks, nothing else to change): sent here, the normal path sends them in send_changes_once
             if #(P.renames or {}) > 0 and io.send_renames then
                 local okr, nok, nf, why = pcall(io.send_renames, P.renames)
@@ -1718,6 +1734,9 @@ function B.new(io)
         end
         local want_restore = false
         for _, m in ipairs(P.place) do
+            if is_container(m.bcls) and m.restore and #m.restore > 0 then want_restore = true end
+        end
+        for _, m in ipairs(P.kept or {}) do
             if is_container(m.bcls) and m.restore and #m.restore > 0 then want_restore = true end
         end
         if want_restore and io.container_ids then
