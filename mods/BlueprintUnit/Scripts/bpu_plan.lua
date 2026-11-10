@@ -762,6 +762,7 @@ local function build(text, live, F, opts)
             k2.id = existing[found].id
             k2.hasLive = existing[found].cfg ~= nil
             k2.live = existing[found].cfg
+            k2.live_contents = existing[found].contents
             kept[#kept + 1] = k2
         else
             if rej and not found then splitN = splitN + 1 end
@@ -989,6 +990,25 @@ local function build(text, live, F, opts)
             if list and #list > 0 then
                 m.restore = list
                 for _, c in ipairs(list) do restore[c.name] = (restore[c.name] or 0) + c.count end
+            end
+        end
+    end
+    -- kept containers: top up to JSON Contents from the unit (deficit only). JSON only, no memory.
+    for _, m in ipairs(kept) do
+        if is_container(m.bcls) and m.contents then
+            if not m.live_contents then
+                notes[#notes + 1] = ("Contents not checked (live container unreadable): %s@(%d,%d)"):format(m.cls or m.bcls, math.floor(m.x + 0.5), math.floor(m.y + 0.5))
+            else
+                local have, list = {}, {}
+                for _, c in ipairs(m.live_contents) do have[c.name] = (have[c.name] or 0) + c.count end
+                for _, c in ipairs(m.contents) do
+                    local d = c.count - (have[c.name] or 0)
+                    if d > 0 then
+                        list[#list + 1] = { name = c.name, count = d }
+                        restore[c.name] = (restore[c.name] or 0) + d
+                    end
+                end
+                if #list > 0 then m.restore = list end
             end
         end
     end

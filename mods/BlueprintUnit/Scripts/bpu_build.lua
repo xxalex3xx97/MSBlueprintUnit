@@ -574,6 +574,9 @@ function B.new(io)
                 if pl.restore and #pl.restore > 0 then want = want + 1 end
             end
         end
+        for _, k in ipairs(R.plan.kept or {}) do
+            if is_container(k.bcls) and k.restore and #k.restore > 0 then want = want + 1 end
+        end
         if want == 0 then return end_run(base) end
         local mode = io.restore_mode and io.restore_mode() or "on"
         if R.ui_restore == false and mode == "on" then mode = "off" end   -- Chk_Restore unchecked
@@ -991,6 +994,9 @@ function B.new(io)
             local jobs = {}
             for i, pl in ipairs(R.cplaced) do
                 if pl.restore and #pl.restore > 0 then jobs[#jobs + 1] = { id = new[i], items = pl.restore } end
+            end
+            for _, k in ipairs(R.plan.kept or {}) do
+                if is_container(k.bcls) and k.restore and #k.restore > 0 then jobs[#jobs + 1] = { id = k.id, items = k.restore } end
             end
             R.rjobs, R.jobs_set = jobs, true
         end
@@ -1682,7 +1688,9 @@ function B.new(io)
             if type(m.refund) ~= "table" then return start_fail("refund unknown for " .. tostring(m.bcls) .. ", import again") end
             R.rem_list[#R.rem_list + 1] = { id = m.id, bcls = m.bcls, refund = m.refund }
         end
-        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 then
+        local has_topup = false
+        for _, m in ipairs(P.kept or {}) do if m.restore and #m.restore > 0 then has_topup = true end end
+        if #P.place == 0 and #P.removed == 0 and #P.chg == 0 and #P.blocks == 0 and not has_topup then
             -- dock names only (live named docks, nothing else to change): sent here, the normal path sends them in send_changes_once
             if #(P.renames or {}) > 0 and io.send_renames then
                 local okr, nok, nf, why = pcall(io.send_renames, P.renames)
@@ -1718,6 +1726,9 @@ function B.new(io)
         end
         local want_restore = false
         for _, m in ipairs(P.place) do
+            if is_container(m.bcls) and m.restore and #m.restore > 0 then want_restore = true end
+        end
+        for _, m in ipairs(P.kept or {}) do
             if is_container(m.bcls) and m.restore and #m.restore > 0 then want_restore = true end
         end
         if want_restore and io.container_ids then

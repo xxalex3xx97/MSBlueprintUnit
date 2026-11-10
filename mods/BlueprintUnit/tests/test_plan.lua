@@ -316,6 +316,26 @@ local ri, rp = row_of(rows, "ITEM_IronOre"), row_of(rows, "ITEM_Plate")
 check("cost rows: IronOre need 120 net 120", ri and ri.need == 120 and ri.net == 120)
 check("cost rows: Plate refund 7 net -7", rp and rp.refund == 7 and rp.net == -7)
 
+-- kept (identical live) container: top up to JSON Contents with the deficit only
+local function kept_cont(live_list, json)
+    local e = ex(70, "BP_ContainerObject_2", "DAT_Container_2", 2, 2)
+    e.contents = live_list
+    return P.plan(cont_doc(json, 2, 2), live({ items = ITEMS, existing = { e } }), F)
+end
+local pk = kept_cont({ { name = "ITEM_IronOre", count = 100 } }, '[{"Item":"ironore","Count":120}]')
+check("topup: container kept, not placed", pk and pk.counts.keep == 1 and pk.counts.place == 0)
+check("topup: deficit 20 on the kept entry", pk and pk.kept[1].restore and #pk.kept[1].restore == 1 and pk.kept[1].restore[1].name == "ITEM_IronOre" and pk.kept[1].restore[1].count == 20)
+check("topup: plan.restore IronOre 20, need unchanged", pk and pk.restore.ITEM_IronOre == 20 and next(pk.need) == nil)
+check("topup: cost row need 20", pk and row_of(P.cost_rows(pk), "ITEM_IronOre") and row_of(P.cost_rows(pk), "ITEM_IronOre").need == 20)
+local pk2 = kept_cont({ { name = "ITEM_IronOre", count = 120 } }, '[{"Item":"ironore","Count":120}]')
+check("topup: live equals JSON -> nothing", pk2 and pk2.kept[1].restore == nil and next(pk2.restore) == nil)
+local pk3 = kept_cont({ { name = "ITEM_IronOre", count = 150 } }, '[{"Item":"ironore","Count":120}]')
+check("topup: live over JSON -> nothing", pk3 and pk3.kept[1].restore == nil and next(pk3.restore) == nil)
+local pk4 = kept_cont({ { name = "ITEM_Plate", count = 7 } }, '[{"Item":"ironore","Count":120}]')
+check("topup: other live item ignored", pk4 and pk4.kept[1].restore[1].count == 120 and pk4.restore.ITEM_IronOre == 120)
+local pk5 = kept_cont({}, '[{"Item":"ironore","Count":120}]')
+check("topup: empty live container gets all", pk5 and pk5.restore.ITEM_IronOre == 120)
+
 -- off-floor underground pair: placed anyway (one machine + exit cell), note counts the machine.
 -- A live Dock on the exit cell refused the plan (never-removed machine in the way), so the case has no live Dock.
 do
