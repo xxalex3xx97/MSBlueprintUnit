@@ -151,9 +151,10 @@ local function stationBlocked()
   setStatus(STATION_OLD)
   return true
 end
--- options for bpu_plan and bpu_live (Station Build only when ticked; off = the plan and snapshot as before)
-local function planOpts() return { trace = Live.trace, station_build = S.stationBuild } end
-local function snapOpts() return { station_build = S.stationBuild, player = S.player } end
+-- options for bpu_plan and bpu_live. Station Build is ON whenever MSCore can do it (forced build), or when ticked
+local function sbOn() return S.stationBuild or (Live.station_build_capable()) end
+local function planOpts() return { trace = Live.trace, station_build = sbOn() } end
+local function snapOpts() return { station_build = sbOn(), player = S.player } end
 
 -- outer chain of a widget reaches our window (UserWidget): WidgetTree -> UserWidget
 local function owned(e)

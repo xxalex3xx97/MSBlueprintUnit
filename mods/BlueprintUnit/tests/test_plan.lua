@@ -474,17 +474,16 @@ local sp = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), nil, function(t
 check("sb: valid plan, one block accepted", sp and sp.valid and sp.block_count == 1 and sp.blocks[1].gx == 2)
 check("sb: block cost in need rows", sp and sp.block_need.ITEM_A == 2 and #P.cost_rows(sp) == 1 and P.cost_rows(sp)[1].need == 2)
 check("sb: summary adds blocks N", sp and P.summary(sp) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1")
-check("sb: no refusal when enough", sp and sp.block_refuse == nil)
+check("sb: no skipped blocks when enough", sp and #sp.block_unplaced == 0)
 local self_line = false
 for _, t in ipairs(trace_lines) do if t == "station blocks self overlaps: 0" then self_line = true end end
 check("sb: trace self overlaps 0", self_line)
 
--- shortfall: refused only when not creative
+-- shortfall: a note only, the build goes on (creative: no note)
 local sh = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 } })
-check("sb: shortfall list", sh and sh.block_refuse and #sh.block_refuse == 1 and sh.block_refuse[1].item == "ITEM_A"
-    and sh.block_refuse[1].need == 2 and sh.block_refuse[1].have == 1)
+check("sb: shortfall note, still builds", sh and sh.block_count == 1 and has_note(sh, "Not enough items for the station blocks: A x1; building anyway."))
 local cr = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0)), { have = { ITEM_A = 1 }, creative = true })
-check("sb: creative skips refusal", cr and cr.block_refuse == nil and cr.block_count == 1)
+check("sb: creative: no shortfall note, block_count 1", cr and not has_note(cr, "building anyway") and cr.block_count == 1)
 
 -- live BPO_Station_01 at 0,0 is not in the file: removed for BPO_Station_02 at 0,0 (refund 2 ITEM_A, cost 1 ITEM_B)
 local oc = sb_plan(sb_json(sb_block("BPO_Station_02", 0, 0, 0), sb_block("BPO_Gone", 5, 0, 0)))
@@ -495,12 +494,13 @@ check("sb: summary adds removed 1", P.summary(oc) == "place 0, keep 0, remove 0,
 check("sb: removed block refund in cost rows, net", P.cost_rows(oc)[1].name == "ITEM_A" and P.cost_rows(oc)[1].refund == 2
     and P.cost_rows(oc)[1].net == -2 and P.cost_rows(oc)[2].name == "ITEM_B" and P.cost_rows(oc)[2].need == 1)
 check("sb: unknown class note", has_note(oc, "Skipped Gone: this block type is not in this game."))
+check("sb: unknown class listed as unplaced", #oc.block_unplaced == 1 and oc.block_unplaced[1].class == "BPO_Gone")
 
--- live block that IS in the file is never removed: file overlaps itself, the second block is skipped as occupied
+-- live block that IS in the file is never removed: the new block is forced in its place (no occupied skip)
 local inf = sb_plan(sb_json(sb_block("BPO_Station_01", 0, 0, 0), sb_block("BPO_Station_02", 0, 0, 0)))
-check("sb: in-file live block not removed, overlapping block skipped", inf and inf.block_count == 0 and #inf.block_remove == 0
-    and has_note(inf, "Skipped Station 02: another block of the blueprint already occupies that spot."))
-check("sb: no removed count in summary when none", inf and P.summary(inf) == "place 0, keep 0, remove 0, recipe changes 0, blocks 0")
+check("sb: in-file live block not removed, overlapping block still built", inf and inf.block_count == 1 and #inf.block_remove == 0
+    and not has_note(inf, "already occupies"))
+check("sb: no removed count in summary when none", inf and P.summary(inf) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1")
 
 -- research state unknown for every class: one note for the run, nothing placed
 local unk = sb_plan(sb_json(sb_block("BPO_Station_01", 2, 0, 0), sb_block("BPO_Station_02", 4, 0, 0)),

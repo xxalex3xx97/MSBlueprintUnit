@@ -11,7 +11,7 @@
 --       opts (optional) = { trace = fn(text) }: called with diagnostics (missing blocks, keep split, placed-validation failure); never changes the plan
 --       opts.station_build = true: missing station blocks classified by bpu_blocks (no "not on the grid" refusal). Needs
 --       live.block_info(class, path) -> info|nil, live.have = {ITEM=n}, live.creative = bool. Adds plan.blocks, block_need,
---       block_count (summary ", blocks N"), block_refuse (shortfall list when short and not creative)
+--       block_count (summary ", blocks N"), block_unplaced (station blocks skipped: no class, not station, locked, unknown)
 -- F = MSCore factory module (mscore_factory.lua), injected: F.tables, F.block_floor, F.floor_rects, F.validate_place,
 --     F.footprint, F.encode_cfg, F.decode_cfg, F.encode_ug. Tests pass a snapshot copy (tests/fixtures).
 -- live (injected by bpu_live, this file never touches the game):
@@ -409,8 +409,8 @@ end
 
 ---------------------------------------------------------------- station blocks (Station Build)
 -- Classifies the file's station blocks missing from the live station (bpu_blocks). live.block_info(class, path) -> info|nil.
--- Returns { blocks = accepted block records, need = cost, count = #accepted, notes = {...}, refuse = shortfall list or nil }.
--- refuse only when items are short and not creative. Nothing is sent here.
+-- Returns { blocks = accepted block records, need = cost, count = #accepted, notes = {...}, unplaced = skipped records }.
+-- Items short and not creative: a note, never a refusal. Nothing is sent here.
 local function plan_blocks(doc, blocks, live, opts)
     if type(live.block_info) ~= "function" then bail("plan: station build needs live.block_info") end
     local path_of = {}
@@ -438,8 +438,14 @@ local function plan_blocks(doc, blocks, live, opts)
     -- the natives need the FULL class path: fill it in from the known class paths when a record only has the short name
     for _, r in ipairs(res.remove) do r.path = r.path or path_of[r.class] end
     for _, a in ipairs(bl) do a.path = a.path or path_of[a.class] end
-    local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes }
-    if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
+    local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes, unplaced = res.skipped }
+    if #res.shortfall > 0 and not live.creative then
+        local parts = {}
+        for _, s in ipairs(res.shortfall) do
+            parts[#parts + 1] = ("%s x%d"):format((s.item:gsub("^ITEM_", "")), math.floor(s.need - s.have + 0.5))
+        end
+        res.notes[#res.notes + 1] = B.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; building anyway."
+    end
     if type(opts.trace) == "function" then
         opts.trace(("station blocks: doc %d, missing %d, accept %d, remove %d, skipped %d, locked %s"):format(#doc.blocks, #missing,
             #bl, #res.remove, #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
@@ -1050,7 +1056,7 @@ local function build(text, live, F, opts)
         block_refund = bplan and bplan.refund,
         block_need = bplan and bplan.need,
         block_count = bplan and bplan.count,
-        block_refuse = bplan and bplan.refuse,
+        block_unplaced = bplan and bplan.unplaced,
     }
 end
 

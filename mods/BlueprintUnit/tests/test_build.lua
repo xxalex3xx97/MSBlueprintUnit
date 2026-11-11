@@ -572,11 +572,11 @@ do
     local b = B.new(f.io)
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 3 }), M("BP_B", 5, 0, { ITEM_Plate = 2 }) }, need = { ITEM_Plate = 5 } }), {})
     b:tick(1250)
-    b:tick(1000 + 300001)
-    check(b:status().state == "error" and starts_with(b:status().text, "timeout after 300 s"), "timeout: 300 s cap")
+    b:tick(1000 + 31000)
+    check(b:status().state == "error" and starts_with(b:status().text, "staging stalled"), "timeout: staging stall (30 s) fires before the 300 s no-progress cap")
 end
 
--- staging never moves anything -> stalled after 10 s
+-- staging never moves anything -> stalled after 30 s
 do
     local f = fake({ player = inv({ S("ITEM_Plate", 1) }, 10), unit = inv({ S("ITEM_Plate", 4) }, 2), noop_moves = true })
     local b = B.new(f.io)
@@ -623,7 +623,7 @@ do
     b:start(plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 30 }), M("BP_B", 2, 0, { ITEM_Plate = 30 }) }, need = { ITEM_Plate = 60 } }), {})
     local st = run(b, f)
     check(st.state == "error" and st.text:find("chunk 1: items were not charged (sim did not accept the build)", 1, true)
-          and f.clock - t0 <= 6000, "chunk 1 not charged: error 'items were not charged' within 5 s (" .. st.text .. " at " .. (f.clock - t0) .. ")")
+          and f.clock - t0 <= 31000, "chunk 1 not charged: error 'items were not charged' within 30 s (" .. st.text .. " at " .. (f.clock - t0) .. ")")
 end
 
 -- charge appears: the station view is not needed, and a single chunk is done at once (drop_place: never on the station)
@@ -1365,16 +1365,16 @@ do
           "ice with room: 6 ice stacks + 3 plate stacks, 9 transfers, no note (" .. st.text .. ")")
 end
 
--- stall: nothing shows -> all 3 commands sent, no further command, STALL after STALL_MS (8000) with no change
+-- stall: nothing shows -> all 3 commands sent, no further command, STALL after STALL_MS (30000) with no change
 do
     local f = whole_fake({ stall_after = 0 })
     local b = start_cont(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
     local cid = new_cont(f)
     local last = f.cmd_log[#f.cmd_log] and f.cmd_log[#f.cmd_log][5] or 0
-    check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 0 and f.clock - last >= 8000 and f.clock - last <= 8250
-          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 8 s", 1, true) ~= nil,
-          "stall: no change for 8 s after the last send -> note, nothing more sent (" .. st.text .. ")")
+    check(st.state == "done" and #f.cmd_log == 3 and cid and cont_plate(f, cid) == 0 and f.clock - last >= 30000 and f.clock - last <= 30250
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 30 s", 1, true) ~= nil,
+          "stall: no change for 30 s after the last send -> note, nothing more sent (" .. st.text .. ")")
     check(#f.violations == 0, "stall: no violation")
 end
 
@@ -1443,8 +1443,8 @@ do
     local st = run(b, f, 400)
     local cid = new_cont(f)
     local last = f.cmd_log[#f.cmd_log] and f.cmd_log[#f.cmd_log][5] or 0
-    check(st.state == "done" and #f.cmd_log == 3 and f.clock - last >= 8000 and f.clock - last <= 8250
-          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 8 s", 1, true) ~= nil
+    check(st.state == "done" and #f.cmd_log == 3 and f.clock - last >= 30000 and f.clock - last <= 30250
+          and st.text:find("restore stalled at pipeline (3 of 3 commands sent), no change for 30 s", 1, true) ~= nil
           and cid and st.text:find("(first mismatch: unit: Plate exp 0 got 120 | container id " .. cid .. ": Plate exp ", 1, true) ~= nil,
           "stall with inflow: unit unchanged -> STALL after 8 s, first mismatch named (" .. st.text .. ")")
 end
@@ -2090,7 +2090,9 @@ local function blocks_fake(spec)
         f.sent_blocks = f.sent_blocks + 1
         f.block_ids = ids
         if spec.block_send_fail then return false, "add_block failed" end
-        f.blocks_out, f.shown_at = blocks, f.clock + (spec.block_delay or 0)
+        f.blocks_out = f.blocks_out or {}
+        for _, b in ipairs(blocks) do f.blocks_out[#f.blocks_out + 1] = b end
+        f.shown_at = f.clock + (spec.block_delay or 0)
         return true
     end
     f.io.scan_blocks = function()
@@ -2119,33 +2121,115 @@ do
     check(f.block_ids.primary == 202 and f.block_ids.player == 101 and f.block_ids.editing == 0, "station blocks: ids unit=primary, player, editing 0")
 end
 
--- shortfall in the plan: refused before any send
+-- shortfall in the plan: no refusal any more, blocks sent
 do
     local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local b = B.new(f.io)
-    local ok, msg = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }, { { item = "ITEM_Plate", need = 2, have = 0 } }), {})
-    check(not ok and f.sent_blocks == 0 and f.calls.pl == 0 and msg:find("Not enough items for the station blocks: need 2 Plate, have 0 (2 short); nothing was built.", 1, true),
-          "station blocks: shortfall refused, nothing sent (" .. msg .. ")")
+    local ok = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }, { { item = "ITEM_Plate", need = 2, have = 0 } }), {})
+    check(ok == true and f.sent_blocks == 1 and b:status().state == "working", "station blocks: shortage does not refuse, one send")
 end
 
--- total check at start counts machines + blocks: 3 + 2 needed, 4 held
+-- block cost is not in the total check: 3 machine + 2 block needed, 4 held -> started
 do
     local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 4) }, 2) })
     local b = B.new(f.io)
     local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
     p.need = { ITEM_Plate = 3 }
-    local ok, msg = b:start(p, {})
-    check(not ok and msg == "error: not enough items: Plate x1" and f.sent_blocks == 0 and f.calls.pl == 0, "station blocks: total check includes block cost (" .. msg .. ")")
+    local ok = b:start(p, {})
+    check(ok == true and f.sent_blocks == 1, "station blocks: block cost not in the total check, blocks sent")
 end
 
--- blocks never show: STALL after 10 s, not sent again
+-- unplaced floor: refused before any send, factory not built
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local b = B.new(f.io)
+    local p = with_blocks(f, { BLK }, { ITEM_Plate = 2 })
+    p.block_unplaced = { { class = "BPO_X", gx = 1, gy = 2, h = 0 } }
+    local ok, msg = b:start(p, {})
+    check(not ok and f.sent_blocks == 0 and msg:find("cannot be placed", 1, true) and msg:find("The factory was not built.", 1, true),
+          "station blocks: unplaced floor refused, nothing sent (" .. msg .. ")")
+end
+
+-- blocks never show: STALL after 30 s with no progress, not sent again
 do
     local f = blocks_fake({ block_never = true, player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local b = B.new(f.io)
+    local t0 = f.clock
     b:start(with_blocks(f, { BLK }, { ITEM_Plate = 2 }), {})
-    local st, waited = run(b, f)
-    check(st.state == "error" and st.text:find("The station blocks did not all appear within 10 s (1 still missing); nothing was resent.", 1, true)
-          and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: never shown -> stall after 10 s, no resend (" .. st.text .. ")")
+    local st = run(b, f)
+    local waited = f.clock - t0
+    check(st.state == "error" and st.text:find("The station blocks stopped appearing: no new block for 30 s (1 still missing); nothing was resent.", 1, true)
+          and waited >= 30000 and waited <= 31000 and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: never shown -> stall after 30 s, no resend (" .. st.text .. ")")
+end
+
+-- progress: one block more every 20 s (3 blocks) -> not a stall, done after 60 s
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f.io.scan_blocks = function()
+        local out = {}
+        if not f.blocks_out then return out end
+        local k = math.min(3, math.floor((f.clock - f.shown_at) / 20000))
+        for i = 1, k do local bb = f.blocks_out[i]; out[i] = { class = bb.class, gx = bb.gx, gy = bb.gy, h = bb.h, rot = bb.rot } end
+        return out
+    end
+    local b = B.new(f.io)
+    local t0 = f.clock
+    local ok = b:start(with_blocks(f, { BLK, { class = "BPO_Station_02", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_02", gx = 6, gy = 0, h = 0, rot = 0 } }, { ITEM_Plate = 2 }), {})
+    local st = run(b, f, 1200)
+    check(ok and st.state == "done" and f.calls.pl == 1 and f.clock - t0 >= 60000, "station blocks: slow progress (20 s per block) is not a stall (" .. st.text .. ")")
+end
+
+-- cap: one block every 20 s (no 30 s stall) but 100 blocks need ~2000 s -> the 10 min cap stops the block phase, no factory
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local many = {}
+    for i = 1, 100 do many[i] = { class = "BPO_Station_02", gx = 2 * i, gy = 0, h = 0, rot = 0 } end
+    f.io.scan_blocks = function()
+        local out = {}
+        if not f.blocks_out then return out end
+        local k = math.min(#f.blocks_out, math.floor((f.clock - f.shown_at) / 20000))
+        for i = 1, k do local bb = f.blocks_out[i]; out[i] = { class = bb.class, gx = bb.gx, gy = bb.gy, h = bb.h, rot = bb.rot } end
+        return out
+    end
+    local b = B.new(f.io)
+    local t0 = f.clock
+    local ok = b:start(with_blocks(f, many, { ITEM_Plate = 2 }), {})
+    local st = run(b, f, 6000)
+    local waited = f.clock - t0
+    check(ok and st.state == "error" and st.text:find("did not all appear within 10 min", 1, true) and waited >= 600000 and waited <= 601000
+          and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: progress never stalls, 10 min cap stops the block phase (" .. st.text .. ")")
+end
+
+-- batches: 250 blocks -> 3 sends (100, 100, 50); removals only with the first send
+do
+    local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local removes = {}
+    f.io.send_blocks = function(_, blocks, ids, rem)
+        f.sent_blocks = f.sent_blocks + 1
+        removes[#removes + 1] = #rem
+        f.blocks_out = f.blocks_out or {}
+        for _, bb in ipairs(blocks) do f.blocks_out[#f.blocks_out + 1] = bb end
+        f.shown_at = f.clock
+        return true
+    end
+    local many = {}
+    for i = 1, 250 do many[i] = { class = "BPO_Station_02", gx = i * 2, gy = 0, h = 0, rot = 0 } end
+    local b = B.new(f.io)
+    local p = with_blocks(f, many, { ITEM_Plate = 2 })
+    p.block_remove = { { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 } }
+    local ok = b:start(p, {})
+    local st = run(b, f, 2000)
+    check(ok and st.state == "done" and f.sent_blocks == 3 and removes[1] == 1 and removes[2] == 0 and removes[3] == 0 and f.calls.pl == 1,
+          "station blocks: 250 blocks in 3 batches, removes with the first only (" .. st.text .. ")")
+end
+
+-- forced shortage: block cost not in the total check, unit holds none, blocks still sent, factory placed
+do
+    local f = blocks_fake({ creative = false, player = inv({ S("ITEM_Plate", 10) }, 2), unit = inv({}, 2) })
+    local b = B.new(f.io)
+    local ok = b:start(with_blocks(f, { BLK }, { ITEM_Plate = 100 }), {})
+    local st = run(b, f)
+    check(ok and f.sent_blocks == 1 and st.state == "done", "station blocks: forced shortage, blocks sent, done (" .. st.text .. ")")
 end
 
 -- send fails: start refuses, no resend, no machine placed
@@ -2192,7 +2276,7 @@ do
           "station removes: waits until the removed block is gone, then factory (" .. st.text .. ")")
 end
 
--- removal never goes away: STALL after 10 s, not sent again, message as before
+-- removal never goes away: STALL after 30 s with no progress, not sent again, message as before
 do
     local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     f.io.send_blocks = function(_, blocks, ids, removes) f.sent_blocks = f.sent_blocks + 1; f.blocks_out, f.shown_at = blocks, f.clock; return true end
@@ -2203,7 +2287,7 @@ do
     p.block_remove = { { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 } }
     b:start(p, {})
     local st = run(b, f)
-    check(st.state == "error" and st.text:find("The station blocks did not all appear within 10 s (1 still missing); nothing was resent.", 1, true)
+    check(st.state == "error" and st.text:find("The station blocks stopped appearing: no new block for 30 s (1 still missing); nothing was resent.", 1, true)
           and f.sent_blocks == 1 and f.calls.pl == 0, "station removes: removed block never gone -> stall, no resend (" .. st.text .. ")")
 end
 

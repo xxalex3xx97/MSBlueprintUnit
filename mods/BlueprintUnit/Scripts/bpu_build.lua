@@ -27,9 +27,11 @@ local B = {}
 local TOTAL_MS = 300000   -- whole run
 -- %d takes integers only: game amounts and ms differences can be fractional (io.now() is a float ms clock)
 local function whole(x) return math.floor((tonumber(x) or 0) + 0.5) end
-local BLOCKS_MS = 10000   -- Station Build: the station blocks must all show within this after their one send, else STALL (never resent)
-local STAGE_MS = 3000     -- staging round stalls after this
-local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
+local BLOCKS_STALL_MS = 30000  -- Station Build: no new block shown for this long -> STALL (never resent)
+local BLOCKS_CAP_MS = 600000   -- Station Build: whole block phase cap
+local BLOCK_BATCH = 100        -- blocks per apply: one apply is all-or-nothing and can land late; batch makes progress visible
+local STAGE_MS = 30000    -- staging round stalls after this (no progress)
+local CHARGE_MS = 30000   -- chunk charge (needed before the next chunk only) must show within this
 local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the player inventory within this, else STALL
 local DRAIN_MS = 2000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
@@ -45,7 +47,7 @@ local RETRY_MAX = 5          -- restore: a refused send is retried on the next t
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
 local CONT_MS = 60000        -- restore: new container ids and ready containers must show within this after the last placement
-local STALL_MS = 8000       -- restore: no change in the restored items for this long after the last send -> STALL (never a fixed wait)
+local STALL_MS = 30000      -- restore: no change in the restored items for this long after the last send -> STALL (never a fixed wait)
 local CONT_READY_POLLS = 2   -- restore: container contents readable on this many polls in a row before the first step
 local RESTORE_MS = 300000    -- restore: whole restore phase cap
 local SORT_SETTLE_MS = 1500  -- split route: unit inventory unchanged for this long after the SORT -> settled
@@ -353,7 +355,7 @@ local function new_run(plan)
         restore_on = false, t_restore = 0, ui_restore = nil, t_progress = 0, pipe_sig = nil,
         queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
-        t_next = 0, t_start = 0, t_stage = 0,
+        t_next = 0, t_start = 0, t_stage = 0, alive_sig = nil, t_alive = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false, chg_failed = 0,
         ren_ok = 0, ren_failed = 0, ren_why = nil, bren = {},   -- dock names: renamed, not applied, first reason; pending Station Build names
         rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
@@ -391,6 +393,8 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
+    -- progress signature: any change = the run is alive (whole-run TOTAL_MS counts from the last change, not from the start)
+    local function alive_sig() return table.concat({ R.stage, R.qpos, R.rem_pos, R.chunk_from, R.placed, R.removed }, ":") end
     -- MSCore redirect is on only while our build runs: every run end calls this. Idempotent, never throws.
     local function release_redirect()
         if not R.redirect_ours then return end
@@ -658,7 +662,7 @@ function B.new(io)
         set_status("working", ("staging chunk %d: %d stacks from the unit"):format(R.chunks_done + 1, #R.issued))
     end
 
-    -- stage 5: once the player holds the chunk's items, place it. Slots moved -> back to stage 4 (max 6 rounds). Nothing moved for 10 s -> stalled.
+    -- stage 5: once the player holds the chunk's items, place it. Slots moved -> back to stage 4 (max 6 rounds). Nothing moved for STAGE_MS -> stalled.
     local function staging_wait(now)
         local ps, us, err = read_both()
         if not ps then return fail(err) end
@@ -1510,16 +1514,28 @@ function B.new(io)
         end
     end
 
-    -- Station Build: ONE send (pending reset, add_block each, pending apply; bpu_blocks). A failed send is not retried.
+    -- Station Build: batches of BLOCK_BATCH blocks, one send each (pending reset, add_block each, pending apply; bpu_blocks).
+    -- The removals go with the first batch. A failed send is not retried. Next batch only after the current one is all in place.
     local function blocks_send(now, ids)
         local P = R.plan
-        local ok, err = io.send_blocks(P.station, P.blocks, { primary = ids.unit_id, player = ids.player_id, editing = 0 }, P.remove)
+        if ids then R.bids = { primary = ids.unit_id, player = ids.player_id, editing = 0 } end
+        if not R.bq then
+            R.bq, R.bi, R.t_blocks0 = {}, 0, now
+            for i = 1, #P.blocks, BLOCK_BATCH do
+                R.bq[#R.bq + 1] = { blocks = table.move(P.blocks, i, math.min(i + BLOCK_BATCH - 1, #P.blocks), 1, {}),
+                                    remove = (#R.bq == 0) and P.remove or {} }
+            end
+        end
+        R.bi = R.bi + 1
+        local bt = R.bq[R.bi]
+        local ok, err = io.send_blocks(P.station, bt.blocks, R.bids, bt.remove)
         if not ok then
             trace("station blocks: send failed: " .. tostring(err))
             return fail(Blk.TEXT.sent_failed)
         end
         R.stage, R.t_blocks, R.t_next = 18, now, now + POLL_MS
-        set_status("working", ("placing %d station block(s) and removing %d in the way"):format(#P.blocks, #P.remove))
+        R.blk_best, R.blk_n, R.t_prog = nil, nil, now
+        set_status("working", ("placing station blocks, batch %d of %d (%d blocks, %d removed)"):format(R.bi, #R.bq, #bt.blocks, #bt.remove))
     end
 
     -- stage 19: rename each pending Station Build dock once its dock child shows (io.dock_found), give up after DOCK_WAIT_MS.
@@ -1561,33 +1577,42 @@ function B.new(io)
         first_step(now)
     end
 
-    -- stage 18: poll the live station until every block shows (POLL_MS). BLOCKS_MS from the send -> STALL, no resend.
+    -- stage 18: poll the live station until the current batch shows (POLL_MS). Progress = fewer missing or more blocks in the
+    -- station. No progress for BLOCKS_STALL_MS -> STALL, no resend. BLOCKS_CAP_MS for the whole block phase.
     local function blocks_wait(now)
         local P = R.plan
+        local bt = R.bq[R.bi]
         local ex, err = io.scan_blocks(P.station)
-        local miss = 0
+        local miss
         if not ex then
             trace("station blocks: station read failed: " .. tostring(err))
-            miss = #P.blocks
+            miss = #bt.blocks + #bt.remove
         else
-            local left = Blk.missing_after(P.blocks, ex, P.remove)
-            miss = #left
-            if miss == 0 then
-                trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, whole(now - R.t_blocks)))
-                resolve_new_renames(ex, now)
-                if #R.bren > 0 then
-                    R.stage = 19
-                    dock_wait(now)
-                else
-                    first_step(now)
-                end
-                return
-            end
-            trace(("station blocks: %d of %d still missing"):format(miss, #P.blocks))
+            miss = #Blk.missing_after(bt.blocks, ex, bt.remove)
         end
-        if now - R.t_blocks >= BLOCKS_MS then
-            trace(("station blocks: not placed in %d ms, %d missing"):format(BLOCKS_MS, miss))
-            return fail(Blk.TEXT.stalled:format(BLOCKS_MS // 1000, miss))
+        if miss == 0 then
+            trace(("station blocks: batch %d of %d done, after %d ms"):format(R.bi, #R.bq, whole(now - R.t_blocks)))
+            if R.bi < #R.bq then return blocks_send(now) end
+            trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, whole(now - R.t_blocks0)))
+            resolve_new_renames(ex, now)
+            if #R.bren > 0 then
+                R.stage = 19
+                dock_wait(now)
+            else
+                first_step(now)
+            end
+            return
+        end
+        local nex = ex and #ex or 0
+        if R.blk_best == nil or miss < R.blk_best or nex ~= R.blk_n then R.t_prog = now end
+        R.blk_best, R.blk_n = math.min(R.blk_best or miss, miss), nex
+        trace(("station blocks: batch %d of %d, %d still missing"):format(R.bi, #R.bq, miss))
+        if now - R.t_blocks0 >= BLOCKS_CAP_MS then
+            return fail(Blk.TEXT.stalled_cap:format(BLOCKS_CAP_MS // 60000, miss))
+        end
+        if now - R.t_prog >= BLOCKS_STALL_MS then
+            trace(("station blocks: no progress for %d ms, %d missing"):format(whole(now - R.t_prog), miss))
+            return fail(Blk.TEXT.stalled:format(BLOCKS_STALL_MS // 1000, miss))
         end
         R.t_next = now + POLL_MS
     end
@@ -1602,29 +1627,25 @@ function B.new(io)
         R = new_run(nil)
         if type(opts) == "table" then R.ui_restore = opts.restore end   -- Chk_Restore: true / false, nil = no checkbox (on)
         if not plan or not plan.valid then return start_fail("import first") end
-        -- Station Build (plan.block_count set): refused before any send when items are short, or when MSCore is too old
+        -- Station Build (plan.block_count set): refused before any send when MSCore is too old, or when a floor cannot be placed
+        -- (never build the factory over missing floors). Item shortage never refuses: the blocks are sent anyway.
         if plan.block_count then
             if io.station_build_capable then
                 local okc, why = io.station_build_capable()
                 if not okc then return start_fail(why) end
             end
-            if plan.block_refuse then
-                local parts = {}
-                for _, s in ipairs(plan.block_refuse) do
-                    local name = s.item:gsub("^ITEM_", "")
-                    parts[#parts + 1] = ("need %d %s, have %d (%d short)"):format(whole(s.need), name, whole(s.have), whole(s.need - s.have))
-                end
-                return start_fail(Blk.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; " .. Blk.TEXT.nothing_built .. ".")
+            if plan.block_unplaced and #plan.block_unplaced > 0 then
+                local names = {}
+                for i = 1, math.min(5, #plan.block_unplaced) do names[i] = Blk.place_text(plan.block_unplaced[i]) end
+                return start_fail(Blk.TEXT.unplaceable:format(Blk.listing(names, #plan.block_unplaced)))
             end
         end
-        -- machine need + station block cost: one total check (player + unit + refund)
+        -- machine need: one total check (player + unit + refund). Station block cost is not in it (blocks are forced).
         local need = {}
         for k, v in pairs(plan.need or {}) do need[k] = v end
-        for k, v in pairs(plan.block_need or {}) do need[k] = (need[k] or 0) + v end
         -- station blocks removed for the file: their cost comes back to the unit on the same apply (refund)
         local refund_cost = {}
         for k, v in pairs(plan.refund_cost or plan.refund or {}) do refund_cost[k] = v end
-        for k, v in pairs(plan.block_refund or {}) do refund_cost[k] = (refund_cost[k] or 0) + v end
         local P = {
             station = plan.station, fp = plan.fp,
             place = plan.place or {}, kept = plan.kept or {}, chg = plan.chg or {},
@@ -1641,6 +1662,7 @@ function B.new(io)
         R.text = "checking station"
         local now = io.now()
         R.t_start = now
+        R.alive_sig, R.t_alive = alive_sig(), now
         R.t_stage = now
         local ex, err = io.scan(P.station)
         if not ex then return start_fail(err or "live read fault") end
@@ -1766,7 +1788,10 @@ function B.new(io)
             return
         end
         if now < R.t_next then return end
-        if R.stage < 12 and now - R.t_start > TOTAL_MS then return fail("timeout after 300 s") end
+        -- whole-run timeout counts from the last progress change (big bases take long), not from the start
+        local sg = alive_sig()
+        if sg ~= R.alive_sig then R.alive_sig, R.t_alive = sg, now end
+        if R.stage < 12 and now - R.t_alive > TOTAL_MS then return fail("timeout after 300 s") end
         local s = R.stage
         if s == 11 then send_queue(now)
         elseif s == 12 then cont_wait(now)
