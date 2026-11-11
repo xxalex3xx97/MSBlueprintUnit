@@ -376,6 +376,15 @@ local function fake(spec)
             return true
         end
     end
+    if spec.give then
+        f.gives = {}
+        function io.give_creative(item, n)
+            f.gives[#f.gives + 1] = { item, n }
+            if f.give_fail then return false, "give refused" end
+            if not f.give_noop then put(f.inv.player.slots, item, n, mx(item)) end
+            return true
+        end
+    end
     f.io = io
     return f
 end
@@ -2101,6 +2110,92 @@ do
     local st3, waited = cfg_run({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), drop_place = true })
     check(st3.state == "done" and not st3.text:find("config", 1, true) and waited >= 120000 and waited < 130000,
           "config check: machine never shows -> no note after 120 s (" .. st3.text .. ")")
+end
+
+-- ===== creative restore rounds (io.give_creative): gives into the player in rounds sized to free slots, then the split pipeline =====
+do
+    -- a: 250 over 3 empty player slots -> gives 200 then 50
+    local f = spl({ creative = true, give = true, player = inv({}, 3), unit = inv({}, 4) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid ~= nil and cont_plate(f, cid) == 250 and #f.gives == 2 and f.gives[1][2] == 200 and f.gives[2][2] == 50
+          and #f.violations == 0 and tot(f.inv.player.slots, "ITEM_Plate") == 0
+          and st.text:find("restored 250 of 250 items into 1 of 1 container(s)", 1, true) ~= nil,
+          "creative rounds: 250 -> gives 200 then 50, container 250 (" .. st.text .. ")")
+end
+do
+    -- b: two containers of 100 in one round (6 free slots) -> one give of 200
+    local f = spl({ creative = true, give = true, player = inv({}, 6), unit = inv({}, 4) })
+    local b = B.new(f.io)
+    b:start(plan_for(f, { place = { cont_at(5, { { name = "ITEM_Plate", count = 100 } }), cont_at(7, { { name = "ITEM_Plate", count = 100 } }) }, need = {}, refund = {} }), {})
+    local st = run(b, f, 800)
+    local ids = {}
+    for id in pairs(f.containers) do if id > 500 then ids[#ids + 1] = id end end
+    table.sort(ids)
+    check(st.state == "done" and #f.gives == 1 and f.gives[1][2] == 200 and #ids == 2 and cont_plate(f, ids[1]) == 100 and cont_plate(f, ids[2]) == 100
+          and st.text:find("restored 200 of 200 items into 2 of 2", 1, true) ~= nil,
+          "creative rounds: two containers -> one give of 200, 100 each (" .. st.text .. ")")
+end
+do
+    -- c: non-creative with give present -> no give, old split route
+    local f = spl({ give = true, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 6) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and #f.gives == 0 and cid ~= nil and cont_plate(f, cid) == 250 and tot(f.inv.unit.slots, "ITEM_Plate") == 50,
+          "creative rounds: non-creative never gives (" .. st.text .. ")")
+end
+do
+    -- d: creative without io.give_creative -> old split route, no give
+    local f = spl({ creative = true, player = inv({}, 3), unit = inv({ S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100), S("ITEM_Plate", 100, 100) }, 6) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 400)
+    local cid = new_cont(f)
+    check(st.state == "done" and f.gives == nil and cid ~= nil and cont_plate(f, cid) == 250,
+          "creative rounds: no give_creative -> split route as before (" .. st.text .. ")")
+end
+do
+    -- e: give refused -> note, nothing restored
+    local f = spl({ creative = true, give = true, player = inv({}, 3), unit = inv({}, 4) })
+    f.give_fail = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(st.state == "done" and cid ~= nil and cont_plate(f, cid) == 0 and st.text:find("creative give failed: Plate x200 (give refused)", 1, true) ~= nil
+          and st.text:find("creative give failed: Plate x50 (give refused)", 1, true) ~= nil,
+          "creative rounds: refused gives -> one note per round, container 0 (" .. st.text .. ")")
+end
+do
+    -- f: give accepted but nothing shows -> STALL note after STALL_MS, run ends
+    local f = spl({ creative = true, give = true, player = inv({}, 3), unit = inv({}, 4) })
+    f.give_noop = true
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 800)
+    check(st.state == "done" and st.text:find("creative items did not show in the player inventory", 1, true) ~= nil,
+          "creative rounds: give shows nothing -> stall note, done (" .. st.text .. ")")
+end
+do
+    -- g: player full at the start -> nothing given, player items untouched
+    local f = spl({ creative = true, give = true, player = inv({ S("ITEM_Other", 100, 100), S("ITEM_Other", 100, 100), S("ITEM_Other", 100, 100) }, 3), unit = inv({}, 4) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    check(st.state == "done" and #f.gives == 0 and cid ~= nil and cont_plate(f, cid) == 0
+          and st.text:find("player inventory full, free some slots", 1, true) ~= nil and tot(f.inv.player.slots, "ITEM_Other") == 300,
+          "creative rounds: player full -> no give, note, player items kept (" .. st.text .. ")")
+end
+do
+    -- h: 2 free player slots (2 others hold 200) -> each give fits (free - 1 staging slot) * 100 = 100, 3 rounds
+    local f = spl({ creative = true, give = true, player = inv({ S("ITEM_Other", 100, 100), S("ITEM_Other", 100, 100), E(), E() }, 4), unit = inv({}, 4) })
+    local b = start_cont(f, { { name = "ITEM_Plate", count = 250 } })
+    local st = run(b, f, 800)
+    local cid = new_cont(f)
+    local fit = true
+    for _, g in ipairs(f.gives) do if g[2] > 100 then fit = false end end
+    check(st.state == "done" and fit and #f.gives >= 2 and cid ~= nil and cont_plate(f, cid) == 250 and #f.violations == 0
+          and tot(f.inv.player.slots, "ITEM_Other") == 200,
+          "creative rounds: partly full player -> every give <= 100, container 250 (" .. st.text .. ")")
 end
 
 -- ===== Station Build: station blocks go in first (one send, polled), then the factory; refusals before any send =====

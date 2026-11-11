@@ -981,6 +981,7 @@ function B.new(io)
     -- Stage 16: verify (restored items only). No change for STALL_MS after the last send -> STALL note, nothing more sent.
     -- Hard cap: RESTORE_MS from the start of the restore phase.
 
+    local rounds_start, give_round, give_wait   -- creative rounds (defined after agg_flush)
     -- stage 12: new container ids (not in cids_before, ascending) are matched to the placed containers in placement order.
     local function cont_wait(now)
         if not R.jobs_set then
@@ -1015,6 +1016,7 @@ function B.new(io)
         R.cready = ready and R.cready + 1 or 0
         if R.cready >= CONT_READY_POLLS then
             R.t_restore = now
+            if R.creative and io.give_creative and io.split then return rounds_start(now) end
             if io.split then
                 R.stage, R.t_stage = 13, now   -- split route: sort the unit first
                 R.t_next = now
@@ -1054,21 +1056,23 @@ function B.new(io)
     end
     -- expected vs delivered: JSON need (R.rjobs items) and the pipe's shortfall (R.pm.jobs short). Once, only when both exist.
     local function restore_expect()
-        if R.exp_cont or not R.pm or not R.rjobs or #R.rjobs == 0 then return end
+        local all = R.rall or R.rjobs
+        if R.exp_cont or not R.pm or not all or #all == 0 then return end
         local exp_items, short_items = 0, 0
-        for _, job in ipairs(R.rjobs) do
+        for _, job in ipairs(all) do
             for _, it in ipairs(job.items or {}) do exp_items = exp_items + (it.count or 0) end
         end
         for _, jm in ipairs(R.pm.jobs or {}) do
             for _, s in ipairs(jm.short or {}) do short_items = short_items + (s.count or 0) end
         end
-        R.exp_cont, R.exp_items, R.short_items = #R.rjobs, exp_items, short_items
+        R.exp_cont, R.exp_items, R.short_items = #all, exp_items, short_items
         local unreadable = #R.rjobs - #(R.pm.jobs or {})
         trace(("restore summary: expected %d items in %d containers, delivered %d items into %d containers, short %d, unreadable %d"):format(
             R.exp_items, R.exp_cont, R.rcount, R.rcont, R.short_items, unreadable))
     end
     -- end of the restore phase
     local function restore_end()
+        if R.pieces then return give_round(io.now()) end   -- creative: next round instead of the end
         restore_expect()
         -- unit stacks at the end (read only: a failed read is not an error here)
         if io.read_inv then
@@ -1077,6 +1081,76 @@ function B.new(io)
         end
         if (R.skipped or 0) > 0 then rs_note(("%s command(s) skipped (refused)"):format(R.skipped)) end
         end_run(R.base)
+    end
+    -- creative rounds: the restore pieces go to the player inventory (io.give_creative) in rounds sized to the free
+    -- player slots; each round then runs the split pipeline (stages 15/16) into the containers. Stack sizes from capmap.
+    rounds_start = function(now)
+        R.rall, R.pieces, R.round = R.rjobs, {}, 0
+        for _, job in ipairs(R.rjobs) do
+            for _, it in ipairs(job.items) do
+                if it.count > 0 then R.pieces[#R.pieces + 1] = { id = job.id, item = it.name, count = it.count } end
+            end
+        end
+        give_round(now)
+    end
+    give_round = function(now)
+        if #R.pieces == 0 then R.pieces = nil; return restore_end() end
+        local ps, _, err = read_both()
+        if not ps then return fail(err) end
+        local free = 0
+        for _, s in ipairs(ps) do if s.item == "" then free = free + 1 end end
+        local cap, jobs, byid, give, used = capmap(io, ps, ps), {}, {}, {}, 0
+        while #R.pieces > 0 do
+            local p = R.pieces[1]
+            local mx = math.max(cap[p.item] or 1, 1)
+            local n = math.min(p.count, (free - used - 1) * mx)
+            if n <= 0 then break end
+            used = used + math.ceil(n / mx) + 1
+            local j = byid[p.id]
+            if not j then j = { id = p.id, items = {} }; byid[p.id] = j; jobs[#jobs + 1] = j end
+            j.items[#j.items + 1] = { name = p.item, count = n }
+            give[p.item] = (give[p.item] or 0) + n
+            if n == p.count then table.remove(R.pieces, 1) else p.count = p.count - n end
+        end
+        if #jobs == 0 then
+            rs_note("player inventory full, free some slots (creative items not given, rest not restored)")
+            R.pieces = nil
+            return restore_end()
+        end
+        R.round = R.round + 1
+        local before, fails = totals(ps), {}
+        R.gwant, R.gsig, R.t_gprog = {}, nil, now
+        for _, item in ipairs(sorted_keys(give)) do
+            local ok, why = io.give_creative(item, give[item])
+            trace(("restore round %d: give %s x%s -> %s %s"):format(R.round, item, give[item], tostring(ok), ok and "" or tostring(why)))
+            if ok then R.gwant[item] = get(before, item) + give[item]
+            else fails[#fails + 1] = { text = ("creative give failed: %s x%s (%s)"):format(shortname(item), give[item], tostring(why)), n = give[item] } end
+        end
+        agg_flush(fails, "%s creative gives failed, %s items not given")
+        R.rjobs, R.pm, R.pq, R.qpos = jobs, nil, nil, 1   -- per-round pipeline state reset
+        R.pipe_sig, R.skip_u, R.skip_c, R.dead, R.last_detail, R.mis_last, R.fails = nil, nil, nil, nil, nil, nil, 0
+        R.t_restore, R.stage, R.t_next = now, 14, now
+        set_status("working", ("restoring container contents: round %d, %d item group(s) left"):format(R.round, #R.pieces))
+    end
+    local function give_go(now)
+        R.stage, R.t_next, R.t_restore = 15, now, now
+    end
+    give_wait = function(now)
+        local ps, _, err = read_both()
+        if not ps then return fail(err) end
+        local t, ok, parts = totals(ps), true, {}
+        for _, k in ipairs(sorted_keys(R.gwant)) do
+            parts[#parts + 1] = k .. "=" .. get(t, k)
+            if get(t, k) < R.gwant[k] then ok = false end
+        end
+        local sig = table.concat(parts, ";")
+        if sig ~= R.gsig then R.gsig, R.t_gprog = sig, now end
+        if ok then return give_go(now) end
+        if now - R.t_gprog >= STALL_MS then
+            rs_note("creative items did not show in the player inventory, restoring what is there")
+            return give_go(now)
+        end
+        R.t_next = now + POLL_MS
     end
     -- rcount / rcont (containers that got items, by container id)
     local function delivered(n, id)
@@ -1836,6 +1910,7 @@ function B.new(io)
         if s == 11 then send_queue(now)
         elseif s == 12 then cont_wait(now)
         elseif s == 13 then sort_wait(now)
+        elseif s == 14 then give_wait(now)
         elseif s == 15 then pipe_send(now)
         elseif s == 16 then pipe_wait(now)
         elseif s == 17 then cfg_wait(now)
