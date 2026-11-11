@@ -247,6 +247,22 @@ do
     check("stress: time under 2 s", dt < 2.0)
 end
 
+-- keep stress: 20000 json belts and 20000 identical live belts (one row, distinct cells) -> all kept, fast
+do
+    local jm, lm = {}, {}
+    for i = 0, 19999 do
+        jm[#jm + 1] = string.format('{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":%d,"Y":0},"Height":0,"GridRotation":0}}', i)
+        lm[#lm + 1] = ex(1000 + i, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", i, 0)
+    end
+    local text = '{"Version":2,"Blocks":[],"DefaultMachines":[' .. table.concat(jm, ",") .. "]}"
+    local t0 = os.clock()
+    local kp, kerr = P.plan(text, live({ existing = lm }), F)
+    local dt = os.clock() - t0
+    print(string.format("info: 20000 keep plan in %.3f s (%s)", dt, tostring(kerr)))
+    check("keep stress: 20000 kept, none placed", kp and kp.counts.keep == 20000 and kp.counts.place == 0)
+    check("keep stress: time under 3 s", dt < 3.0)
+end
+
 -- live list holding a non-table entry (a number): dropped once in build; the two real machines still match
 local okn, pn = pcall(P.plan, read("belts2.json"), live({ existing = { ex(10, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 1, 1), 5, ex(11, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 3, 1) } }), F)
 check("non-table live entry: no error, both belts kept", okn and pn and pn.valid and pn.counts.keep == 2 and pn.counts.place == 0)

@@ -1230,7 +1230,7 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 120 and tot(f.inv.unit.slots, "ITEM_Plate") == 0,
           "restore: 120 Plate back into the new container, unit empty (" .. st.text .. ")")
-    check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil, "restore: status text")
+    check(st.text:find("; restore: restored 120 of 120 items into 1 of 1 container(s)", 1, true) ~= nil, "restore: status text")
     check(#f.cmd_log == 3 and cmds_of(f, 2) == 3 and #f.violations == 0 and f.cmd_log[1][1] == 202 and f.cmd_log[1][2] == cid + 5000,
           "restore whole stacks: 3 TRANSFER (2) unit -> container INVENTORY id, no other action, no violation (" .. #f.cmd_log .. " sent)")
     check(starts(traces, "restore plan: container id=" .. cid .. " item=ITEM_Plate count=120 moves=3 moved=120 short=0"), "restore whole stacks: plan trace")
@@ -1283,7 +1283,7 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 5050 and #f.cmd_log == 0,
           "rounding skip: 300 of a 5050 stack -> nothing sent (" .. st.text .. ")")
-    check(st.text:find("; restore: Plate x300 left out (under half a unit stack)", 1, true) ~= nil, "rounding skip: note text")
+    check(st.text:find("; restore: restored 0 of 300 items into 0 of 1 container(s); Plate x300 left out (under half a unit stack)", 1, true) ~= nil, "rounding skip: note text")
 end
 
 -- two stacks, need 110 (30 then 100): 2 TRANSFERs, container 130 = 100 + 30 (slot 1 to 100, then slot 2)
@@ -1317,7 +1317,7 @@ do
     local st = run(b, f, 400)
     local cid = new_cont(f)
     check(st.state == "done" and cid and cont_plate(f, cid) == 50 and tot(f.inv.unit.slots, "ITEM_Plate") == 70
-          and st.text:find("restored 50 items into 1 container(s)", 1, true) ~= nil
+          and st.text:find("restored 50 of 120 items into 1 of 1 container(s)", 1, true) ~= nil
           and st.text:find("container " .. cid .. " full: Plate x70 left in the unit", 1, true) ~= nil, "restore full: 50 in, then container full (" .. st.text .. ")")
     check(#f.cmd_log == 1 and cmds_of(f, 2) == 1 and #f.violations == 0, "restore full: one TRANSFER, nothing else sent, no violation")
 end
@@ -1330,7 +1330,7 @@ do
     local cid = new_cont(f)
     check(ok and st.state == "done" and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.cmd_log == 0,
           "restore short: contents shortage does not block the Build, nothing sent (" .. st.text .. ")")
-    check(st.text:find("; restore: Plate x120 not restored (unit has 100)", 1, true) ~= nil, "restore short: note text")
+    check(st.text:find("; restore: restored 0 of 120 items into 0 of 1 container(s); Plate x120 not restored (unit has 100)", 1, true) ~= nil, "restore short: note text")
 end
 
 -- ICE REPRO (user test 2026-11-07): earlier items fill the container slots, later ice gets only the room left.
@@ -1737,7 +1737,7 @@ do
           "split exact: container 120 exact, unit keeps 80, no violation (" .. st.text .. ")")
     check(cmds_of(f, 5) == 1 and #f.splits == 1 and f.splits[1][3] == 20 and cmds_of(f, 2) == 2,
           "split exact: 1 SORT, 1 split of 20, 2 TRANSFERs")
-    check(st.text:find("; restore: restored 120 items into 1 container(s)", 1, true) ~= nil
+    check(st.text:find("; restore: restored 120 of 120 items into 1 of 1 container(s)", 1, true) ~= nil
           and starts(tr, "restore plan (split): container id=" .. cid .. " item=ITEM_Plate count=120 splits=1 moved=120 short=0"),
           "split exact: status text and plan trace")
 end
@@ -1896,7 +1896,7 @@ do
     local st = run(b, f, 400)
     local cid = new_cont(f)
     check(cid and cont_plate(f, cid) == 0 and tot(f.inv.unit.slots, "ITEM_Plate") == 100 and #f.splits == 0 and cmds_of(f, 2) == 0
-          and st.text:find("; restore: Plate x30 not restored (no free unit slot)", 1, true) ~= nil, "split no free slot: nothing moved, note (" .. st.text .. ")")
+          and st.text:find("; restore: restored 0 of 30 items into 0 of 1 container(s); Plate x30 not restored (no free unit slot)", 1, true) ~= nil, "split no free slot: nothing moved, note (" .. st.text .. ")")
 end
 
 -- split refused every time: 6 tries, skipped; its TRANSFER is not sent; the restore is done, nothing moved, no violation
@@ -2722,7 +2722,7 @@ do
     local f = whole_fake({ unit = inv({ S("ITEM_Plate", 50), S("ITEM_Plate", 50) }, 3), containers = { [303] = { slots = inv({}, 4) } } })
     local b, ok = kept_topup(f, { { name = "ITEM_Plate", count = 120 } })
     local st = run(b, f, 400)
-    check(ok and st.state == "done" and cont_plate(f, 303) == 0 and #f.cmd_log == 0 and st.text:find("; restore: Plate x120 not restored (unit has 100)", 1, true) ~= nil,
+    check(ok and st.state == "done" and cont_plate(f, 303) == 0 and #f.cmd_log == 0 and st.text:find("; restore: restored 0 of 120 items into 0 of 1 container(s); Plate x120 not restored (unit has 100)", 1, true) ~= nil,
           "topup kept: unit shortage -> nothing sent, note (" .. st.text .. ")")
 end
 -- legacy flow (redirect off), top-up only, no placements/removals: must still run the restore for the kept container
@@ -2741,6 +2741,25 @@ do
     local ok, msg = b:start(p, {})
     local st = run(b, f, 400)
     check(ok and msg == "ok nothing to build" and st.state == "done" and #f.cmd_log == 0, "topup gate: non-container kept restore ignored (" .. tostring(msg) .. ")")
+end
+-- expected vs filled: 3 kept containers want 50 Plate each, unit holds 50 -> only the first gets items
+do
+    local f = whole_fake({ unit = inv({ S("ITEM_Plate", 50) }, 3),
+                           containers = { [303] = { slots = inv({}, 4) }, [304] = { slots = inv({}, 4) }, [305] = { slots = inv({}, 4) } } })
+    local b = B.new(f.io)
+    local p = plan_for(f, { need = {}, refund = {} })
+    p.kept = {
+        { bcls = "BP_ContainerObject_2", x = 5, y = 0, id = 303, restore = { { name = "ITEM_Plate", count = 50 } } },
+        { bcls = "BP_ContainerObject_2", x = 6, y = 0, id = 304, restore = { { name = "ITEM_Plate", count = 50 } } },
+        { bcls = "BP_ContainerObject_2", x = 7, y = 0, id = 305, restore = { { name = "ITEM_Plate", count = 50 } } },
+    }
+    local tr = tracer(f)
+    b:start(p, {})
+    local st = run(b, f, 400)
+    check(st.state == "done" and cont_plate(f, 303) == 50 and cont_plate(f, 304) == 0 and cont_plate(f, 305) == 0
+          and st.text:find("into 1 of 3 container(s)", 1, true) ~= nil, "restore summary: 3 containers expected, 1 filled (" .. st.text .. ")")
+    check(starts(tr, "restore summary: expected 150 items in 3 containers, delivered 50 items into 1 containers, short "),
+          "restore summary: trace counts (" .. st.text .. ")")
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, failn))

@@ -520,10 +520,15 @@ function B.new(io)
     end
 
     -- restore part of the status text: "; restore: restored N items into K container(s); notes". Empty when no restore ran.
+    -- with the expected counts (R.exp_cont, set by restore_expect): "restored N of M items into K of J container(s)", 0 delivered too.
     local function restore_suffix()
         if not R.restore_on then return "" end
         local parts = {}
-        if R.rcount > 0 then parts[#parts + 1] = ("restored %s items into %s container(s)"):format(R.rcount, R.rcont) end
+        if R.exp_cont then
+            parts[#parts + 1] = ("restored %s of %s items into %s of %s container(s)"):format(R.rcount, R.exp_items, R.rcont, R.exp_cont)
+        elseif R.rcount > 0 then
+            parts[#parts + 1] = ("restored %s items into %s container(s)"):format(R.rcount, R.rcont)
+        end
         for _, n in ipairs(R.rnotes) do parts[#parts + 1] = n end
         if #parts == 0 then return "" end
         return "; restore: " .. table.concat(parts, "; ")
@@ -1037,8 +1042,24 @@ function B.new(io)
         return table.concat(parts, " ")
     end
     local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
+    -- expected vs delivered: JSON need (R.rjobs items) and the pipe's shortfall (R.pm.jobs short). Once, only when both exist.
+    local function restore_expect()
+        if R.exp_cont or not R.pm or not R.rjobs or #R.rjobs == 0 then return end
+        local exp_items, short_items = 0, 0
+        for _, job in ipairs(R.rjobs) do
+            for _, it in ipairs(job.items or {}) do exp_items = exp_items + (it.count or 0) end
+        end
+        for _, jm in ipairs(R.pm.jobs or {}) do
+            for _, s in ipairs(jm.short or {}) do short_items = short_items + (s.count or 0) end
+        end
+        R.exp_cont, R.exp_items, R.short_items = #R.rjobs, exp_items, short_items
+        local unreadable = #R.rjobs - #(R.pm.jobs or {})
+        trace(("restore summary: expected %d items in %d containers, delivered %d items into %d containers, short %d, unreadable %d"):format(
+            R.exp_items, R.exp_cont, R.rcount, R.rcont, R.short_items, unreadable))
+    end
     -- end of the restore phase
     local function restore_end()
+        restore_expect()
         -- unit stacks at the end (read only: a failed read is not an error here)
         if io.read_inv then
             local ps2, us2 = read_both()

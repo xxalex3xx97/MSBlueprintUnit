@@ -303,8 +303,12 @@ local function finishBuild(run)
   S.run = nil
   setBuildBtns(true)
   KEPT.has = true   -- the result line is the Notes status line (buildLoop); the plan summary stays
+  -- GC off while the plan runs (same reason as impOk): UE4SS crashes when a collection runs mid-read
+  collectgarbage("stop")
   local okR, err = pcall(function()
+    local t0 = os.clock()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F, snapOpts()), F, planOpts())
+    Live.trace(("finishBuild plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then
       Live.trace("finishBuild replan failed: " .. tostring(perr))
       setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
@@ -312,7 +316,9 @@ local function finishBuild(run)
     end
     S.plan = plan
     fillCost(Plan.cost_rows(plan, { restore = readRestoreBox() }))
+    Live.trace("finishBuild done")
   end)
+  collectgarbage("restart")
   if not okR then L("refresh after build failed: " .. tostring(err)) end
 end
 
@@ -375,9 +381,13 @@ local function buildClick()
   readStationBuild()
   if stationBlocked() then return end
   local ui = readRestoreBox()
+  -- GC off while the plan and the run start (same reason as impOk)
+  collectgarbage("stop")
   local okRun, err = pcall(function()
     local live = Live.snapshot(S.U, F, snapOpts())
+    local t0 = os.clock()
     local plan, perr = Plan.plan(S.text, live, F, planOpts())
+    Live.trace(("buildClick plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then
       Live.trace("buildClick replan failed: " .. tostring(perr))
       setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
@@ -395,7 +405,9 @@ local function buildClick()
     setBuildBtns(false)
     setStatus(S.builder:status().text)
     M.loopGT(300, buildLoop(run))
+    Live.trace("buildClick done")
   end)
+  collectgarbage("restart")
   if not okRun then
     L("build failed: " .. tostring(err))
     S.run = nil
