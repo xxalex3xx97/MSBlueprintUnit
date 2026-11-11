@@ -1865,6 +1865,29 @@ do
     check(st.text:find("Plate x90 not restored (no free player slot)", 1, true) ~= nil, "player no free slot: note (" .. st.text .. ")")
 end
 
+-- 11 containers, each Plate x120, unit and player empty: 11 per-item notes aggregate into one summary line
+do
+    local f = spl({ unit = inv({}, 3), player = inv({}, 3) })
+    local b = B.new(f.io)
+    local places = {}
+    for i = 1, 11 do places[i] = cont_at(i, { { name = "ITEM_Plate", count = 120 } }) end
+    b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    check(st.text:find("11 container items", 1, true) ~= nil and st.text:find("items short in total", 1, true) ~= nil
+          and st.text:find("plan reduced: unit has", 1, true) == nil, "aggregate 11 reduced notes: one summary line (" .. st.text .. ")")
+end
+
+-- 10 containers, same setup: per-item note still shown
+do
+    local f = spl({ unit = inv({}, 3), player = inv({}, 3) })
+    local b = B.new(f.io)
+    local places = {}
+    for i = 1, 10 do places[i] = cont_at(i, { { name = "ITEM_Plate", count = 120 } }) end
+    b:start(plan_for(f, { place = places, need = {}, refund = {} }), {})
+    local st = run(b, f, 400)
+    check(st.text:find("plan reduced: unit has 0 of 120 for Plate (short 120)", 1, true) ~= nil, "10 reduced notes: per-item text kept (" .. st.text .. ")")
+end
+
 -- container room 50 (one slot), unit 30 whole + player 100 split 20 (room left) -> container 50, note from unit and player, full note
 do
     local f = spl({ unit = inv({ S("ITEM_Plate", 30, 100) }, 3), player = inv({ S("ITEM_Plate", 100, 100) }, 3),

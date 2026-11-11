@@ -1042,6 +1042,16 @@ function B.new(io)
         return table.concat(parts, " ")
     end
     local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
+    -- notes of one kind: each own text up to 10, above 10 one summary line. list = { {text=, n=}, ... }; summary has 2 %s (count of entries, sum of n)
+    local function agg_flush(list, summary)
+        if #list <= 10 then
+            for _, e in ipairs(list) do rs_note(e.text) end
+        elseif #list > 0 then
+            local sum = 0
+            for _, e in ipairs(list) do sum = sum + (e.n or 0) end
+            rs_note(summary:format(#list, commas(sum)))
+        end
+    end
     -- expected vs delivered: JSON need (R.rjobs items) and the pipe's shortfall (R.pm.jobs short). Once, only when both exist.
     local function restore_expect()
         if R.exp_cont or not R.pm or not R.rjobs or #R.rjobs == 0 then return end
@@ -1135,6 +1145,7 @@ function B.new(io)
         local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, split = true, full = {} }
         local um = pm.unit
         local used, npair = {}, 0
+        local A = { unread = {}, player = {}, reduced = {}, noslot = {} }
         local pl, usedp = copy_slots(ps), {}
         local function draw(src, src_inv, src_used, job, cid, cn, item, cap, need)
             local moved, nsplit, why = 0, 0, nil
@@ -1168,10 +1179,10 @@ function B.new(io)
             local map, _, cinv = contents_of(job)
             local cid = cinv and cinv.id
             if not map then
-                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s cannot be read"):format(tostring(job.id)), n = 1 }
             elseif cid == nil or cid == job.id or cid == R.unit_inv or cid == R.player_inv then
                 -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
-                rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s: inventory id unknown, not restored"):format(tostring(job.id)), n = 1 }
             else
                 local cn = norm(cinv)
                 local cmax = capmap(io, cn, um)
@@ -1190,14 +1201,14 @@ function B.new(io)
                     local left = need - mu - mp
                     jm.moved = jm.moved + mu + mp
                     if mp > 0 then
-                        rs_note(("%s x%s: %s from unit, %s from player%s"):format(shortname(it.name), commas(it.count), commas(mu), commas(mp),
-                            short > 0 and (", short " .. commas(short)) or ""))
+                        A.player[#A.player + 1] = { text = ("%s x%s: %s from unit, %s from player%s"):format(shortname(it.name), commas(it.count), commas(mu), commas(mp),
+                            short > 0 and (", short " .. commas(short)) or ""), n = mp }
                     elseif short > 0 then
-                        rs_note(("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have_u), commas(it.count), shortname(it.name), commas(short)))
+                        A.reduced[#A.reduced + 1] = { text = ("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have_u), commas(it.count), shortname(it.name), commas(short)), n = short }
                     end
                     if left > 0 then
                         if whyu == "noslot" or whyp == "noslot" then
-                            rs_note(("%s x%s not restored (no free %s slot)"):format(shortname(it.name), left, whyp == "noslot" and "player" or "unit"))
+                            A.noslot[#A.noslot + 1] = { text = ("%s x%s not restored (no free %s slot)"):format(shortname(it.name), left, whyp == "noslot" and "player" or "unit"), n = left }
                         elseif room_of(cn, it.name, cap) <= 0 then
                             pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = left }
                         end
@@ -1207,6 +1218,10 @@ function B.new(io)
                 end
             end
         end
+        agg_flush(A.unread, "%s containers not restored (unreadable or unknown inventory id), %s counted")
+        agg_flush(A.player, "%s container items drawn partly from the player inventory, %s items from the player")
+        agg_flush(A.reduced, "plan reduced for %s container items (unit stock short), %s items short in total")
+        agg_flush(A.noslot, "%s container items not restored (no free slot), %s items not restored in total")
         return pq, pm
     end
 
@@ -1216,6 +1231,7 @@ function B.new(io)
         if io.split then return pipe_build_split(us, ps) end
         local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, full = {} }
         local um = pm.unit
+        local A = { unread = {}, notrest = {}, leftout = {} }
         local function add(prim, sec, slot0, job_id, item, moved)
             pq[#pq + 1] = { kind = "transfer", prim = prim, sec = sec, slot0 = slot0, action = 2, job = job_id, item = item, moved = moved }
         end
@@ -1223,10 +1239,10 @@ function B.new(io)
             local map, _, cinv = contents_of(job)
             local cid = cinv and cinv.id
             if not map then
-                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s cannot be read"):format(tostring(job.id)), n = 1 }
             elseif cid == nil or cid == job.id or cid == R.unit_inv or cid == R.player_inv then
                 -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
-                rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s: inventory id unknown, not restored"):format(tostring(job.id)), n = 1 }
             else
                 local cn = norm(cinv)
                 local cmax = capmap(io, cn, um)
@@ -1235,7 +1251,7 @@ function B.new(io)
                 for _, it in ipairs(job.items) do
                     local have = get(totals(um), it.name)
                     if have < it.count then
-                        rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), it.count, have))
+                        A.notrest[#A.notrest + 1] = { text = ("%s x%s not restored (unit has %s)"):format(shortname(it.name), it.count, have), n = it.count }
                     else
                         pm.touched[it.name] = true
                         local cap, need, nmoves, moved_item = cmax[it.name], it.count, 0, 0
@@ -1260,9 +1276,9 @@ function B.new(io)
                             if room_of(cn, it.name, cap) <= 0 then
                                 pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = need }
                             elseif left_slot then
-                                rs_note(("%s x%s left out (under half a unit stack)"):format(shortname(it.name), need))
+                                A.leftout[#A.leftout + 1] = { text = ("%s x%s left out (under half a unit stack)"):format(shortname(it.name), need), n = need }
                             else
-                                rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), need, get(totals(um), it.name)))
+                                A.notrest[#A.notrest + 1] = { text = ("%s x%s not restored (unit has %s)"):format(shortname(it.name), need, get(totals(um), it.name)), n = need }
                             end
                         end
                         jm.moved = jm.moved + moved_item
@@ -1272,6 +1288,9 @@ function B.new(io)
                 end
             end
         end
+        agg_flush(A.unread, "%s containers not restored (unreadable or unknown inventory id), %s counted")
+        agg_flush(A.notrest, "%s container items not restored (unit short), %s items in total")
+        agg_flush(A.leftout, "%s container items left out (under half a unit stack), %s items in total")
         return pq, pm
     end
 
