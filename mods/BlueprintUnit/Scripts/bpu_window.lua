@@ -599,6 +599,10 @@ local function openWindow(block, player, ctl)
   setBuildBtns(true)
   txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
   L("open unit=".. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
+  pcall(function()
+    local pr = Live.probe_start(U, player, ctl)
+    if pr then M.loopGT(500, pr) end
+  end)
 end
 
 -- block = BPO_BlueprintUnit_C only (main.lua opener filter). player = DMSPlayerObject. ctl = controller or nil. Game thread.

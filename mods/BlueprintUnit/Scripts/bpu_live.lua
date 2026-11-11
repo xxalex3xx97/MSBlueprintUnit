@@ -569,6 +569,82 @@ function L.item_by_name(name)
     return ITEMS[name]
 end
 
+-- creative give: GiveCreativeItems({Item={Item=<Item UObject>,Amount=n}}). Returns ok, reason. Never passes a nil item.
+function L.give_creative(ctl, item_name, amount)
+    if type(item_name) ~= "string" or item_name == "" then return false, "no item name" end
+    if type(amount) ~= "number" or amount < 1 then return false, "bad amount" end
+    local item = L.item_by_name(item_name)
+    if not valid(item) then return false, "item not found: " .. item_name end
+    local c = ctl
+    if not valid(c) then c = FindFirstOf("DMSPlayerController") end
+    if not valid(c) then return false, "no controller" end
+    local ok, err = pcall(function() c:GiveCreativeItems({ Item = { Item = item, Amount = math.floor(amount) } }) end)
+    TRACE(("give_creative %s x%s -> ok=%s %s"):format(item_name, tostring(amount), tostring(ok), ok and "" or tostring(err)))
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+-- PROBE (one-shot). Mods/BlueprintUnit/probe_on.txt present -> deleted, then L.probe_start returns a tick fn (true = finished); else nil.
+local PROBE_ITEM, PROBE_AMTS = "ITEM_RepairKit", { 1, 100, 1000, 100000 }
+local function inv_stat(inv, item)
+    local r = L.read_inv(inv)
+    if not (r and r.ok) then return nil end
+    local s = { item = 0, all = 0, used = 0, free = 0, max = "?" }
+    for _, sl in ipairs(r.slots) do
+        if sl.item == "" then s.free = s.free + 1
+        else
+            s.used = s.used + 1; s.all = s.all + sl.amount
+            if sl.item == item then s.item = s.item + sl.amount; s.max = sl.max end
+        end
+    end
+    return s
+end
+local function stat_txt(s) return s and ("item=%d all=%d used=%d free=%d max=%s"):format(s.item, s.all, s.used, s.free, tostring(s.max)) or "unreadable" end
+local function dlt(a, b, k) return (a and b) and (a[k] - b[k]) or "?" end
+function L.probe_start(U, player, ctl)
+    local flag = MOD_DIR .. "probe_on.txt"
+    local f = _G.io.open(flag, "rb")
+    if not f then return nil end
+    f:close()
+    pcall(os.remove, flag)
+    local pinv = rd(player, "Inventory")
+    local i, cur = 0, nil
+    local function snap() return { p = inv_stat(pinv, PROBE_ITEM), u = inv_stat(U.unit_inv, PROBE_ITEM) } end
+    local function sig(s) return stat_txt(s.p) .. " | " .. stat_txt(s.u) end
+    TRACE("probe start item=" .. PROBE_ITEM .. " amounts=" .. table.concat(PROBE_AMTS, ","))
+    return function()
+        local ok, done = pcall(function()
+            if not cur then
+                i = i + 1
+                local amt = PROBE_AMTS[i]
+                if not amt then TRACE("probe done"); return true end
+                cur = { amt = amt, before = snap(), last = nil, same = 0, ticks = 0 }
+                TRACE(("probe BEFORE x%d player: %s | unit: %s"):format(amt, stat_txt(cur.before.p), stat_txt(cur.before.u)))
+                local g, why = L.give_creative(ctl, PROBE_ITEM, amt)
+                TRACE(("probe give x%d -> ok=%s %s"):format(amt, tostring(g), tostring(why or "")))
+                return not g          -- stop on first failure
+            end
+            cur.ticks = cur.ticks + 1
+            local now = snap()
+            local sg = sig(now)
+            if sg == cur.last then cur.same = cur.same + 1 else cur.same = 0; cur.last = sg end
+            TRACE(("probe poll x%d tick=%d player: %s | unit: %s"):format(cur.amt, cur.ticks, stat_txt(now.p), stat_txt(now.u)))
+            if (cur.same >= 3 and cur.ticks >= 4) or cur.ticks >= 12 then
+                local gp, gu = dlt(now.p, cur.before.p, "item"), dlt(now.u, cur.before.u, "item")
+                TRACE(("probe RESULT x%d gained player=%s unit=%s | requested=%d | player slots used delta=%s unit slots used delta=%s | stack max=%s"):format(
+                    cur.amt, tostring(gp), tostring(gu), cur.amt, tostring(dlt(now.p, cur.before.p, "used")), tostring(dlt(now.u, cur.before.u, "used")),
+                    tostring(now.p and now.p.max)))
+                local total = (tonumber(gp) or 0) + (tonumber(gu) or 0)
+                if total == 0 then TRACE("probe: nothing landed in player or unit, stop"); return true end
+                cur = nil
+            end
+            return false
+        end)
+        if not ok then TRACE("probe ERROR " .. tostring(done)); return true end
+        return done
+    end
+end
+
 -- Dock child machine of a named live block, from FN.read_docks rows {machine_id, block_id, parent_id, class, name, raw_id}.
 -- Candidates: class = rn.cls and parent_id = station. Matched by the block's child machine ids (rn.mids); when none match
 -- and rn.id >= 0, by block_id = rn.id. Exactly one match -> the row. Otherwise nil + reason: L.DOCK_NOT_YET (no match yet,
@@ -691,6 +767,7 @@ function L.make_io(ctx)
         return L.read_inv(U.unit_inv)
     end
     function io.item_max(name) return L.item_raw(name) end   -- raw MaxStackSize, nil when unknown; bpu_build applies the inventory multiplier
+    function io.give_creative(item_name, amount) return L.give_creative(ctx.ctl, item_name, amount) end
     -- MSCore 0.7.5 refund/charge redirect status: string starting with 'on' = active. Anything else (missing native, error) = 'off ...'.
     function io.redirect_status()
         local N = L.mscore and L.mscore.native
