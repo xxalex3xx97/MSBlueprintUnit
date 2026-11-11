@@ -1561,7 +1561,7 @@ function B.new(io)
             return restore_end()
         end
         set_status("working", progress(#R.pq, #R.pq, ", waiting for the game"))
-        R.t_next = now + PIPE_POLL_MS
+        R.t_next = now + (R.pieces and POLL_MS or PIPE_POLL_MS)  -- creative rounds poll fast, drain needs 2 reads
     end
 
     -- stage 17, config check: the RAW game view (io.scan_raw, not the live overlay, which shows the sent config) must hold
