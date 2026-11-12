@@ -4,6 +4,25 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
+Requires **MSCore 0.7.6 or newer** (dock names still need 0.8.3).
+
+### Added
+- **Forced build.** A station block build no longer refuses on item shortage, overlap or off-grid placement. Blocks are placed anyway; a block that cannot be placed stops the run before anything is sent.
+- **Creative restore in rounds.** In creative mode, container items go to the player inventory in rounds sized to the free slots, then into the containers.
+
+### Changed
+- Station block waits are progress-based: batches of 100, a 30 s stall when nothing changes, and a 10 min cap. Replaces the fixed waits that gave up on large blueprints.
+- Restore summary: "restored N of M items into K of J container(s)" with the count still short. More than 10 notes of one kind are grouped into one summary line.
+
+### Fixed
+- Plan index: the keep, diagnostic and overlap checks are indexed. Blueprints with about 28k machines no longer freeze the game while planning.
+
+### Notes
+- Known limitation: the restore summary "short" count can undercount in rare cases (a unit shortage in the "not restored" branch). The expected and delivered counts are still correct.
+- In game (2026-11-11), a 28k-machine blueprint planned without a freeze; restore delivered 1,566,715 of 1,571,140 items (the rest is the known limitation above).
+
 ## [0.3.1] - 2026-11-10
 
 Requires **MSCore 0.7.6 or newer** (dock names still need 0.8.3).
