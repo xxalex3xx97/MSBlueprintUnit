@@ -11,7 +11,7 @@
 --       opts (optional) = { trace = fn(text) }: called with diagnostics (missing blocks, keep split, placed-validation failure); never changes the plan
 --       opts.station_build = true: missing station blocks classified by bpu_blocks (no "not on the grid" refusal). Needs
 --       live.block_info(class, path) -> info|nil, live.have = {ITEM=n}, live.creative = bool. Adds plan.blocks, block_need,
---       block_count (summary ", blocks N"), block_refuse (shortfall list when short and not creative)
+--       block_count (summary ", blocks N"), block_unplaced (station blocks skipped: no class, not station, locked, unknown)
 -- F = MSCore factory module (mscore_factory.lua), injected: F.tables, F.block_floor, F.floor_rects, F.validate_place,
 --     F.footprint, F.encode_cfg, F.decode_cfg, F.encode_ug. Tests pass a snapshot copy (tests/fixtures).
 -- live (injected by bpu_live, this file never touches the game):
@@ -182,6 +182,12 @@ end
 -- cell key of container memory: bcls|x|y|h|rot (same format as bpu_build records it)
 local function ckey(e)
     return tostring(e.bcls) .. "|" .. tostring(e.x) .. "|" .. tostring(e.y) .. "|" .. tostring(e.h) .. "|" .. tostring(e.rot)
+end
+
+-- bucket key number: 1 and 1.0 (and -0 and 0) give the same text; buckets only, the == test still decides
+local function kn(v)
+    if type(v) == "number" then return ("%.9g"):format(v == 0 and 0 or v) end
+    return tostring(v)
 end
 
 local function is_container(bcls)
@@ -409,8 +415,8 @@ end
 
 ---------------------------------------------------------------- station blocks (Station Build)
 -- Classifies the file's station blocks missing from the live station (bpu_blocks). live.block_info(class, path) -> info|nil.
--- Returns { blocks = accepted block records, need = cost, count = #accepted, notes = {...}, refuse = shortfall list or nil }.
--- refuse only when items are short and not creative. Nothing is sent here.
+-- Returns { blocks = accepted block records, need = cost, count = #accepted, notes = {...}, unplaced = skipped records }.
+-- Items short and not creative: a note, never a refusal. Nothing is sent here.
 local function plan_blocks(doc, blocks, live, opts)
     if type(live.block_info) ~= "function" then bail("plan: station build needs live.block_info") end
     local path_of = {}
@@ -438,8 +444,14 @@ local function plan_blocks(doc, blocks, live, opts)
     -- the natives need the FULL class path: fill it in from the known class paths when a record only has the short name
     for _, r in ipairs(res.remove) do r.path = r.path or path_of[r.class] end
     for _, a in ipairs(bl) do a.path = a.path or path_of[a.class] end
-    local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes }
-    if #res.shortfall > 0 and not live.creative then out.refuse = res.shortfall end
+    local out = { blocks = bl, need = res.cost, refund = res.refund, remove = res.remove, count = #bl, notes = res.notes, unplaced = res.skipped }
+    if #res.shortfall > 0 and not live.creative then
+        local parts = {}
+        for _, s in ipairs(res.shortfall) do
+            parts[#parts + 1] = ("%s x%d"):format((s.item:gsub("^ITEM_", "")), math.floor(s.need - s.have + 0.5))
+        end
+        res.notes[#res.notes + 1] = B.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; building anyway."
+    end
     if type(opts.trace) == "function" then
         opts.trace(("station blocks: doc %d, missing %d, accept %d, remove %d, skipped %d, locked %s"):format(#doc.blocks, #missing,
             #bl, #res.remove, #res.notes, #res.locked > 0 and table.concat(res.locked, ",") or "-"))
@@ -452,6 +464,7 @@ end
 
 ---------------------------------------------------------------- the plan
 local function build(text, live, F, opts)
+    local t_build = os.clock()
     if type(text) ~= "string" then bail("plan: no blueprint text") end
     if type(live) ~= "table" or type(F) ~= "table" or type(F.tables) ~= "table" then bail("plan: live or factory module missing") end
     local buildables = live.buildables or {}
@@ -737,9 +750,19 @@ local function build(text, live, F, opts)
         -- live cfg "" or nil = unknown, blueprint cfg nil = no settings specified: treat as same (keep)
         return (m.dat or ""):find("^DAT_Splitter") ~= nil and m.cfg ~= nil and type(e.cfg) == "string" and #e.cfg > 0 and e.cfg ~= (m.cfg or "")
     end
+    -- live machines bucketed by class+cell+h+rot (ascending k), so each json machine scans only its own bucket
+    local byk = {}
+    for k, e in ipairs(existing) do
+        local key = kn(e.bcls) .. "|" .. kn(e.x) .. "|" .. kn(e.y) .. "|" .. kn(e.h) .. "|" .. kn(e.rot)
+        byk[key] = byk[key] or {}
+        table.insert(byk[key], k)
+    end
+    local t_keep0 = os.clock()
     for _, m in ipairs(machines) do
         local found, rej
-        for k, e in ipairs(existing) do
+        local mkey = kn(m.bcls) .. "|" .. kn(m.x) .. "|" .. kn(m.y) .. "|" .. kn(m.h) .. "|" .. kn(m.rot)
+        for _, k in ipairs(byk[mkey] or {}) do
+            local e = existing[k]
             if not used[k] and e.bcls == m.bcls and e.x == m.x and e.y == m.y and e.h == m.h and e.rot == m.rot then
                 -- live cfg = the station Blueprint snapshot; for undergrounds it is EMPTY in game (trace 2026-11-07), so the Length is unknown:
                 -- same class + cell + rotation counts as identical. Compared only when the live cfg really holds a 6-byte Length.
@@ -770,6 +793,7 @@ local function build(text, live, F, opts)
         end
     end
     machines = rest
+    local keep_ms = (os.clock() - t_keep0) * 1000
     if splitN > 0 then notes[#notes + 1] = splitN .. " splitters replaced (config differed)" end
     if opts and type(opts.trace) == "function" then
         opts.trace(("keep split: json machines %d, kept %d, rest %d, live machines %d"):format(#json_ms, #kept, #rest, #existing))
@@ -780,9 +804,15 @@ local function build(text, live, F, opts)
         opts.trace("live bcls first5: " .. (#lb > 0 and table.concat(lb, ", ") or "-"))
         -- identity mismatch diag: for each machine to be placed, the live machines on exactly the same x,y (any class)
         local cl = {}
+        local byxy = {}
+        for _, e in ipairs(existing) do
+            local key = kn(e.x) .. "," .. kn(e.y)
+            byxy[key] = byxy[key] or {}
+            table.insert(byxy[key], e)
+        end
         for _, m in ipairs(rest) do
             local at = {}
-            for _, e in ipairs(existing) do
+            for _, e in ipairs(byxy[kn(m.x) .. "," .. kn(m.y)] or {}) do
                 if e.x == m.x and e.y == m.y then at[#at + 1] = ("id=%s bcls=%s h=%s rot=%s"):format(tostring(e.id), tostring(e.bcls), tostring(e.h), tostring(e.rot)) end
             end
             cl[#cl + 1] = ("rest %s x=%s y=%s h=%s rot=%s -> live same x,y: [%s]"):format(tostring(m.bcls), tostring(m.x), tostring(m.y), tostring(m.h), tostring(m.rot), table.concat(at, "; "))
@@ -891,10 +921,16 @@ local function build(text, live, F, opts)
     local newall = {}
     for _, m in ipairs(machines) do newall[#newall + 1] = m end
     for _, m in ipairs(cells) do newall[#newall + 1] = m end
+    local byh = {}   -- newall grouped by h once (same order as newall)
+    for _, m in ipairs(newall) do
+        local key = kn(m.h)
+        byh[key] = byh[key] or {}
+        table.insert(byh[key], m)
+    end
     local hits = {}
     for k, e in ipairs(existing) do
         local ew, eh = footprint_of(F, e)
-        for _, m in ipairs(newall) do
+        for _, m in ipairs(byh[kn(e.h)] or {}) do
             if m.h == e.h and overlap(m.x, m.y, m.w, m.hh, e.x, e.y, ew, eh) then
                 hits[#hits + 1] = k
                 break
@@ -1022,6 +1058,9 @@ local function build(text, live, F, opts)
     for k, v in pairs(refund) do refund_all[k] = v end
     for k, v in pairs(refund_cont) do refund_all[k] = (refund_all[k] or 0) + v end
 
+    if opts and type(opts.trace) == "function" then
+        opts.trace(("plan phases: keep %.0f ms total %.0f ms"):format(keep_ms, (os.clock() - t_build) * 1000))
+    end
     return {
         station = live.station,
         name = doc.name,
@@ -1050,7 +1089,7 @@ local function build(text, live, F, opts)
         block_refund = bplan and bplan.refund,
         block_need = bplan and bplan.need,
         block_count = bplan and bplan.count,
-        block_refuse = bplan and bplan.refuse,
+        block_unplaced = bplan and bplan.unplaced,
     }
 end
 

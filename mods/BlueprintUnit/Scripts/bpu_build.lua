@@ -27,9 +27,11 @@ local B = {}
 local TOTAL_MS = 300000   -- whole run
 -- %d takes integers only: game amounts and ms differences can be fractional (io.now() is a float ms clock)
 local function whole(x) return math.floor((tonumber(x) or 0) + 0.5) end
-local BLOCKS_MS = 10000   -- Station Build: the station blocks must all show within this after their one send, else STALL (never resent)
-local STAGE_MS = 3000     -- staging round stalls after this
-local CHARGE_MS = 5000    -- chunk charge (needed before the next chunk only) must show within this
+local BLOCKS_STALL_MS = 30000  -- Station Build: no new block shown for this long -> STALL (never resent)
+local BLOCKS_CAP_MS = 600000   -- Station Build: whole block phase cap
+local BLOCK_BATCH = 100        -- blocks per apply: one apply is all-or-nothing and can land late; batch makes progress visible
+local STAGE_MS = 30000    -- staging round stalls after this (no progress)
+local CHARGE_MS = 30000   -- chunk charge (needed before the next chunk only) must show within this
 local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the player inventory within this, else STALL
 local DRAIN_MS = 2000        -- refund moved to the unit must leave the player within this (not after the last batch), else STALL
 local SETTLE_MS = 500        -- last removal before a placement on its cell, not confirmed by a refund: settle from the send
@@ -45,7 +47,7 @@ local RETRY_MAX = 5          -- restore: a refused send is retried on the next t
 local RESERVE = 1            -- empty player slots kept back from every removal batch (safety margin)
 local CARRY_CAP = 6          -- carriers in a batch add 1 reserved slot each, up to this many
 local CONT_MS = 60000        -- restore: new container ids and ready containers must show within this after the last placement
-local STALL_MS = 8000       -- restore: no change in the restored items for this long after the last send -> STALL (never a fixed wait)
+local STALL_MS = 30000      -- restore: no change in the restored items for this long after the last send -> STALL (never a fixed wait)
 local CONT_READY_POLLS = 2   -- restore: container contents readable on this many polls in a row before the first step
 local RESTORE_MS = 300000    -- restore: whole restore phase cap
 local SORT_SETTLE_MS = 1500  -- split route: unit inventory unchanged for this long after the SORT -> settled
@@ -353,7 +355,7 @@ local function new_run(plan)
         restore_on = false, t_restore = 0, ui_restore = nil, t_progress = 0, pipe_sig = nil,
         queue = {}, qpos = 1, nrem = 0,
         stage_rounds = 0, overlap = false,
-        t_next = 0, t_start = 0, t_stage = 0,
+        t_next = 0, t_start = 0, t_stage = 0, alive_sig = nil, t_alive = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false, chg_failed = 0,
         ren_ok = 0, ren_failed = 0, ren_why = nil, bren = {},   -- dock names: renamed, not applied, first reason; pending Station Build names
         rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
@@ -391,6 +393,8 @@ function B.new(io)
     end
     local function set_status(state, text) R.state = state; R.text = text end
     local function trace(msg) if io.trace then io.trace(msg) end end
+    -- progress signature: any change = the run is alive (whole-run TOTAL_MS counts from the last change, not from the start)
+    local function alive_sig() return table.concat({ R.stage, R.qpos, R.rem_pos, R.chunk_from, R.placed, R.removed }, ":") end
     -- MSCore redirect is on only while our build runs: every run end calls this. Idempotent, never throws.
     local function release_redirect()
         if not R.redirect_ours then return end
@@ -516,10 +520,15 @@ function B.new(io)
     end
 
     -- restore part of the status text: "; restore: restored N items into K container(s); notes". Empty when no restore ran.
+    -- with the expected counts (R.exp_cont, set by restore_expect): "restored N of M items into K of J container(s)", 0 delivered too.
     local function restore_suffix()
         if not R.restore_on then return "" end
         local parts = {}
-        if R.rcount > 0 then parts[#parts + 1] = ("restored %s items into %s container(s)"):format(R.rcount, R.rcont) end
+        if R.exp_cont then
+            parts[#parts + 1] = ("restored %s of %s items into %s of %s container(s)"):format(R.rcount, R.exp_items, R.rcont, R.exp_cont)
+        elseif R.rcount > 0 then
+            parts[#parts + 1] = ("restored %s items into %s container(s)"):format(R.rcount, R.rcont)
+        end
         for _, n in ipairs(R.rnotes) do parts[#parts + 1] = n end
         if #parts == 0 then return "" end
         return "; restore: " .. table.concat(parts, "; ")
@@ -658,7 +667,7 @@ function B.new(io)
         set_status("working", ("staging chunk %d: %d stacks from the unit"):format(R.chunks_done + 1, #R.issued))
     end
 
-    -- stage 5: once the player holds the chunk's items, place it. Slots moved -> back to stage 4 (max 6 rounds). Nothing moved for 10 s -> stalled.
+    -- stage 5: once the player holds the chunk's items, place it. Slots moved -> back to stage 4 (max 6 rounds). Nothing moved for STAGE_MS -> stalled.
     local function staging_wait(now)
         local ps, us, err = read_both()
         if not ps then return fail(err) end
@@ -972,6 +981,7 @@ function B.new(io)
     -- Stage 16: verify (restored items only). No change for STALL_MS after the last send -> STALL note, nothing more sent.
     -- Hard cap: RESTORE_MS from the start of the restore phase.
 
+    local rounds_start, give_round, give_wait   -- creative rounds (defined after agg_flush)
     -- stage 12: new container ids (not in cids_before, ascending) are matched to the placed containers in placement order.
     local function cont_wait(now)
         if not R.jobs_set then
@@ -1006,6 +1016,7 @@ function B.new(io)
         R.cready = ready and R.cready + 1 or 0
         if R.cready >= CONT_READY_POLLS then
             R.t_restore = now
+            if R.creative and io.give_creative and io.split then return rounds_start(now) end
             if io.split then
                 R.stage, R.t_stage = 13, now   -- split route: sort the unit first
                 R.t_next = now
@@ -1033,8 +1044,36 @@ function B.new(io)
         return table.concat(parts, " ")
     end
     local function rs_note(text) R.rnotes[#R.rnotes + 1] = text end
+    -- notes of one kind: each own text up to 10, above 10 one summary line. list = { {text=, n=}, ... }; summary has 2 %s (count of entries, sum of n)
+    local function agg_flush(list, summary)
+        if #list <= 10 then
+            for _, e in ipairs(list) do rs_note(e.text) end
+        elseif #list > 0 then
+            local sum = 0
+            for _, e in ipairs(list) do sum = sum + (e.n or 0) end
+            rs_note(summary:format(#list, commas(sum)))
+        end
+    end
+    -- expected vs delivered: JSON need (R.rjobs items) and the pipe's shortfall (R.pm.jobs short). Once, only when both exist.
+    local function restore_expect()
+        local all = R.rall or R.rjobs
+        if R.exp_cont or not R.pm or not all or #all == 0 then return end
+        local exp_items, short_items = 0, 0
+        for _, job in ipairs(all) do
+            for _, it in ipairs(job.items or {}) do exp_items = exp_items + (it.count or 0) end
+        end
+        for _, jm in ipairs(R.pm.jobs or {}) do
+            for _, s in ipairs(jm.short or {}) do short_items = short_items + (s.count or 0) end
+        end
+        R.exp_cont, R.exp_items, R.short_items = #all, exp_items, short_items
+        local unreadable = #R.rjobs - #(R.pm.jobs or {})
+        trace(("restore summary: expected %d items in %d containers, delivered %d items into %d containers, short %d, unreadable %d"):format(
+            R.exp_items, R.exp_cont, R.rcount, R.rcont, R.short_items, unreadable))
+    end
     -- end of the restore phase
     local function restore_end()
+        if R.pieces then return give_round(io.now()) end   -- creative: next round instead of the end
+        restore_expect()
         -- unit stacks at the end (read only: a failed read is not an error here)
         if io.read_inv then
             local ps2, us2 = read_both()
@@ -1042,6 +1081,76 @@ function B.new(io)
         end
         if (R.skipped or 0) > 0 then rs_note(("%s command(s) skipped (refused)"):format(R.skipped)) end
         end_run(R.base)
+    end
+    -- creative rounds: the restore pieces go to the player inventory (io.give_creative) in rounds sized to the free
+    -- player slots; each round then runs the split pipeline (stages 15/16) into the containers. Stack sizes from capmap.
+    rounds_start = function(now)
+        R.rall, R.pieces, R.round = R.rjobs, {}, 0
+        for _, job in ipairs(R.rjobs) do
+            for _, it in ipairs(job.items) do
+                if it.count > 0 then R.pieces[#R.pieces + 1] = { id = job.id, item = it.name, count = it.count } end
+            end
+        end
+        give_round(now)
+    end
+    give_round = function(now)
+        if #R.pieces == 0 then R.pieces = nil; return restore_end() end
+        local ps, _, err = read_both()
+        if not ps then return fail(err) end
+        local free = 0
+        for _, s in ipairs(ps) do if s.item == "" then free = free + 1 end end
+        local cap, jobs, byid, give, used = capmap(io, ps, ps), {}, {}, {}, 0
+        while #R.pieces > 0 do
+            local p = R.pieces[1]
+            local mx = math.max(cap[p.item] or 1, 1)
+            local n = math.min(p.count, (free - used - 1) * mx)
+            if n <= 0 then break end
+            used = used + math.ceil(n / mx) + 1
+            local j = byid[p.id]
+            if not j then j = { id = p.id, items = {} }; byid[p.id] = j; jobs[#jobs + 1] = j end
+            j.items[#j.items + 1] = { name = p.item, count = n }
+            give[p.item] = (give[p.item] or 0) + n
+            if n == p.count then table.remove(R.pieces, 1) else p.count = p.count - n end
+        end
+        if #jobs == 0 then
+            rs_note("player inventory full, free some slots (creative items not given, rest not restored)")
+            R.pieces = nil
+            return restore_end()
+        end
+        R.round = R.round + 1
+        local before, fails = totals(ps), {}
+        R.gwant, R.gsig, R.t_gprog = {}, nil, now
+        for _, item in ipairs(sorted_keys(give)) do
+            local ok, why = io.give_creative(item, give[item])
+            trace(("restore round %d: give %s x%s -> %s %s"):format(R.round, item, give[item], tostring(ok), ok and "" or tostring(why)))
+            if ok then R.gwant[item] = get(before, item) + give[item]
+            else fails[#fails + 1] = { text = ("creative give failed: %s x%s (%s)"):format(shortname(item), give[item], tostring(why)), n = give[item] } end
+        end
+        agg_flush(fails, "%s creative gives failed, %s items not given")
+        R.rjobs, R.pm, R.pq, R.qpos = jobs, nil, nil, 1   -- per-round pipeline state reset
+        R.pipe_sig, R.skip_u, R.skip_c, R.dead, R.last_detail, R.mis_last, R.fails = nil, nil, nil, nil, nil, nil, 0
+        R.t_restore, R.stage, R.t_next = now, 14, now
+        set_status("working", ("restoring container contents: round %d, %d item group(s) left"):format(R.round, #R.pieces))
+    end
+    local function give_go(now)
+        R.stage, R.t_next, R.t_restore = 15, now, now
+    end
+    give_wait = function(now)
+        local ps, _, err = read_both()
+        if not ps then return fail(err) end
+        local t, ok, parts = totals(ps), true, {}
+        for _, k in ipairs(sorted_keys(R.gwant)) do
+            parts[#parts + 1] = k .. "=" .. get(t, k)
+            if get(t, k) < R.gwant[k] then ok = false end
+        end
+        local sig = table.concat(parts, ";")
+        if sig ~= R.gsig then R.gsig, R.t_gprog = sig, now end
+        if ok then return give_go(now) end
+        if now - R.t_gprog >= STALL_MS then
+            rs_note("creative items did not show in the player inventory, restoring what is there")
+            return give_go(now)
+        end
+        R.t_next = now + POLL_MS
     end
     -- rcount / rcont (containers that got items, by container id)
     local function delivered(n, id)
@@ -1110,6 +1219,7 @@ function B.new(io)
         local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, split = true, full = {} }
         local um = pm.unit
         local used, npair = {}, 0
+        local A = { unread = {}, player = {}, reduced = {}, noslot = {} }
         local pl, usedp = copy_slots(ps), {}
         local function draw(src, src_inv, src_used, job, cid, cn, item, cap, need)
             local moved, nsplit, why = 0, 0, nil
@@ -1143,10 +1253,10 @@ function B.new(io)
             local map, _, cinv = contents_of(job)
             local cid = cinv and cinv.id
             if not map then
-                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s cannot be read"):format(tostring(job.id)), n = 1 }
             elseif cid == nil or cid == job.id or cid == R.unit_inv or cid == R.player_inv then
                 -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
-                rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s: inventory id unknown, not restored"):format(tostring(job.id)), n = 1 }
             else
                 local cn = norm(cinv)
                 local cmax = capmap(io, cn, um)
@@ -1165,14 +1275,14 @@ function B.new(io)
                     local left = need - mu - mp
                     jm.moved = jm.moved + mu + mp
                     if mp > 0 then
-                        rs_note(("%s x%s: %s from unit, %s from player%s"):format(shortname(it.name), commas(it.count), commas(mu), commas(mp),
-                            short > 0 and (", short " .. commas(short)) or ""))
+                        A.player[#A.player + 1] = { text = ("%s x%s: %s from unit, %s from player%s"):format(shortname(it.name), commas(it.count), commas(mu), commas(mp),
+                            short > 0 and (", short " .. commas(short)) or ""), n = mp }
                     elseif short > 0 then
-                        rs_note(("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have_u), commas(it.count), shortname(it.name), commas(short)))
+                        A.reduced[#A.reduced + 1] = { text = ("plan reduced: unit has %s of %s for %s (short %s)"):format(commas(have_u), commas(it.count), shortname(it.name), commas(short)), n = short }
                     end
                     if left > 0 then
                         if whyu == "noslot" or whyp == "noslot" then
-                            rs_note(("%s x%s not restored (no free %s slot)"):format(shortname(it.name), left, whyp == "noslot" and "player" or "unit"))
+                            A.noslot[#A.noslot + 1] = { text = ("%s x%s not restored (no free %s slot)"):format(shortname(it.name), left, whyp == "noslot" and "player" or "unit"), n = left }
                         elseif room_of(cn, it.name, cap) <= 0 then
                             pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = left }
                         end
@@ -1182,6 +1292,10 @@ function B.new(io)
                 end
             end
         end
+        agg_flush(A.unread, "%s containers not restored (unreadable or unknown inventory id), %s counted")
+        agg_flush(A.player, "%s container items drawn partly from the player inventory, %s items from the player")
+        agg_flush(A.reduced, "plan reduced for %s container items (unit stock short), %s items short in total")
+        agg_flush(A.noslot, "%s container items not restored (no free slot), %s items not restored in total")
         return pq, pm
     end
 
@@ -1191,6 +1305,7 @@ function B.new(io)
         if io.split then return pipe_build_split(us, ps) end
         local pq, pm = {}, { unit = copy_slots(us), touched = {}, jobs = {}, full = {} }
         local um = pm.unit
+        local A = { unread = {}, notrest = {}, leftout = {} }
         local function add(prim, sec, slot0, job_id, item, moved)
             pq[#pq + 1] = { kind = "transfer", prim = prim, sec = sec, slot0 = slot0, action = 2, job = job_id, item = item, moved = moved }
         end
@@ -1198,10 +1313,10 @@ function B.new(io)
             local map, _, cinv = contents_of(job)
             local cid = cinv and cinv.id
             if not map then
-                rs_note(("container id %s cannot be read"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s cannot be read"):format(tostring(job.id)), n = 1 }
             elseif cid == nil or cid == job.id or cid == R.unit_inv or cid == R.player_inv then
                 -- a machine id or an unknown id is never a command target (the game derefs a null inventory)
-                rs_note(("container id %s: inventory id unknown, not restored"):format(tostring(job.id)))
+                A.unread[#A.unread + 1] = { text = ("container id %s: inventory id unknown, not restored"):format(tostring(job.id)), n = 1 }
             else
                 local cn = norm(cinv)
                 local cmax = capmap(io, cn, um)
@@ -1210,7 +1325,7 @@ function B.new(io)
                 for _, it in ipairs(job.items) do
                     local have = get(totals(um), it.name)
                     if have < it.count then
-                        rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), it.count, have))
+                        A.notrest[#A.notrest + 1] = { text = ("%s x%s not restored (unit has %s)"):format(shortname(it.name), it.count, have), n = it.count }
                     else
                         pm.touched[it.name] = true
                         local cap, need, nmoves, moved_item = cmax[it.name], it.count, 0, 0
@@ -1235,9 +1350,9 @@ function B.new(io)
                             if room_of(cn, it.name, cap) <= 0 then
                                 pm.full[#pm.full + 1] = { id = job.id, item = it.name, left = need }
                             elseif left_slot then
-                                rs_note(("%s x%s left out (under half a unit stack)"):format(shortname(it.name), need))
+                                A.leftout[#A.leftout + 1] = { text = ("%s x%s left out (under half a unit stack)"):format(shortname(it.name), need), n = need }
                             else
-                                rs_note(("%s x%s not restored (unit has %s)"):format(shortname(it.name), need, get(totals(um), it.name)))
+                                A.notrest[#A.notrest + 1] = { text = ("%s x%s not restored (unit has %s)"):format(shortname(it.name), need, get(totals(um), it.name)), n = need }
                             end
                         end
                         jm.moved = jm.moved + moved_item
@@ -1247,6 +1362,9 @@ function B.new(io)
                 end
             end
         end
+        agg_flush(A.unread, "%s containers not restored (unreadable or unknown inventory id), %s counted")
+        agg_flush(A.notrest, "%s container items not restored (unit short), %s items in total")
+        agg_flush(A.leftout, "%s container items left out (under half a unit stack), %s items in total")
         return pq, pm
     end
 
@@ -1443,7 +1561,7 @@ function B.new(io)
             return restore_end()
         end
         set_status("working", progress(#R.pq, #R.pq, ", waiting for the game"))
-        R.t_next = now + PIPE_POLL_MS
+        R.t_next = now + (R.pieces and POLL_MS or PIPE_POLL_MS)  -- creative rounds poll fast, drain needs 2 reads
     end
 
     -- stage 17, config check: the RAW game view (io.scan_raw, not the live overlay, which shows the sent config) must hold
@@ -1510,16 +1628,28 @@ function B.new(io)
         end
     end
 
-    -- Station Build: ONE send (pending reset, add_block each, pending apply; bpu_blocks). A failed send is not retried.
+    -- Station Build: batches of BLOCK_BATCH blocks, one send each (pending reset, add_block each, pending apply; bpu_blocks).
+    -- The removals go with the first batch. A failed send is not retried. Next batch only after the current one is all in place.
     local function blocks_send(now, ids)
         local P = R.plan
-        local ok, err = io.send_blocks(P.station, P.blocks, { primary = ids.unit_id, player = ids.player_id, editing = 0 }, P.remove)
+        if ids then R.bids = { primary = ids.unit_id, player = ids.player_id, editing = 0 } end
+        if not R.bq then
+            R.bq, R.bi, R.t_blocks0 = {}, 0, now
+            for i = 1, #P.blocks, BLOCK_BATCH do
+                R.bq[#R.bq + 1] = { blocks = table.move(P.blocks, i, math.min(i + BLOCK_BATCH - 1, #P.blocks), 1, {}),
+                                    remove = (#R.bq == 0) and P.remove or {} }
+            end
+        end
+        R.bi = R.bi + 1
+        local bt = R.bq[R.bi]
+        local ok, err = io.send_blocks(P.station, bt.blocks, R.bids, bt.remove)
         if not ok then
             trace("station blocks: send failed: " .. tostring(err))
             return fail(Blk.TEXT.sent_failed)
         end
         R.stage, R.t_blocks, R.t_next = 18, now, now + POLL_MS
-        set_status("working", ("placing %d station block(s) and removing %d in the way"):format(#P.blocks, #P.remove))
+        R.blk_best, R.blk_n, R.t_prog = nil, nil, now
+        set_status("working", ("placing station blocks, batch %d of %d (%d blocks, %d removed)"):format(R.bi, #R.bq, #bt.blocks, #bt.remove))
     end
 
     -- stage 19: rename each pending Station Build dock once its dock child shows (io.dock_found), give up after DOCK_WAIT_MS.
@@ -1561,33 +1691,42 @@ function B.new(io)
         first_step(now)
     end
 
-    -- stage 18: poll the live station until every block shows (POLL_MS). BLOCKS_MS from the send -> STALL, no resend.
+    -- stage 18: poll the live station until the current batch shows (POLL_MS). Progress = fewer missing or more blocks in the
+    -- station. No progress for BLOCKS_STALL_MS -> STALL, no resend. BLOCKS_CAP_MS for the whole block phase.
     local function blocks_wait(now)
         local P = R.plan
+        local bt = R.bq[R.bi]
         local ex, err = io.scan_blocks(P.station)
-        local miss = 0
+        local miss
         if not ex then
             trace("station blocks: station read failed: " .. tostring(err))
-            miss = #P.blocks
+            miss = #bt.blocks + #bt.remove
         else
-            local left = Blk.missing_after(P.blocks, ex, P.remove)
-            miss = #left
-            if miss == 0 then
-                trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, whole(now - R.t_blocks)))
-                resolve_new_renames(ex, now)
-                if #R.bren > 0 then
-                    R.stage = 19
-                    dock_wait(now)
-                else
-                    first_step(now)
-                end
-                return
-            end
-            trace(("station blocks: %d of %d still missing"):format(miss, #P.blocks))
+            miss = #Blk.missing_after(bt.blocks, ex, bt.remove)
         end
-        if now - R.t_blocks >= BLOCKS_MS then
-            trace(("station blocks: not placed in %d ms, %d missing"):format(BLOCKS_MS, miss))
-            return fail(Blk.TEXT.stalled:format(BLOCKS_MS // 1000, miss))
+        if miss == 0 then
+            trace(("station blocks: batch %d of %d done, after %d ms"):format(R.bi, #R.bq, whole(now - R.t_blocks)))
+            if R.bi < #R.bq then return blocks_send(now) end
+            trace(("station blocks: all %d in place, %d removed, after %d ms"):format(#P.blocks, #P.remove, whole(now - R.t_blocks0)))
+            resolve_new_renames(ex, now)
+            if #R.bren > 0 then
+                R.stage = 19
+                dock_wait(now)
+            else
+                first_step(now)
+            end
+            return
+        end
+        local nex = ex and #ex or 0
+        if R.blk_best == nil or miss < R.blk_best or nex ~= R.blk_n then R.t_prog = now end
+        R.blk_best, R.blk_n = math.min(R.blk_best or miss, miss), nex
+        trace(("station blocks: batch %d of %d, %d still missing"):format(R.bi, #R.bq, miss))
+        if now - R.t_blocks0 >= BLOCKS_CAP_MS then
+            return fail(Blk.TEXT.stalled_cap:format(BLOCKS_CAP_MS // 60000, miss))
+        end
+        if now - R.t_prog >= BLOCKS_STALL_MS then
+            trace(("station blocks: no progress for %d ms, %d missing"):format(whole(now - R.t_prog), miss))
+            return fail(Blk.TEXT.stalled:format(BLOCKS_STALL_MS // 1000, miss))
         end
         R.t_next = now + POLL_MS
     end
@@ -1602,29 +1741,25 @@ function B.new(io)
         R = new_run(nil)
         if type(opts) == "table" then R.ui_restore = opts.restore end   -- Chk_Restore: true / false, nil = no checkbox (on)
         if not plan or not plan.valid then return start_fail("import first") end
-        -- Station Build (plan.block_count set): refused before any send when items are short, or when MSCore is too old
+        -- Station Build (plan.block_count set): refused before any send when MSCore is too old, or when a floor cannot be placed
+        -- (never build the factory over missing floors). Item shortage never refuses: the blocks are sent anyway.
         if plan.block_count then
             if io.station_build_capable then
                 local okc, why = io.station_build_capable()
                 if not okc then return start_fail(why) end
             end
-            if plan.block_refuse then
-                local parts = {}
-                for _, s in ipairs(plan.block_refuse) do
-                    local name = s.item:gsub("^ITEM_", "")
-                    parts[#parts + 1] = ("need %d %s, have %d (%d short)"):format(whole(s.need), name, whole(s.have), whole(s.need - s.have))
-                end
-                return start_fail(Blk.TEXT.shortfall .. ": " .. table.concat(parts, ", ") .. "; " .. Blk.TEXT.nothing_built .. ".")
+            if plan.block_unplaced and #plan.block_unplaced > 0 then
+                local names = {}
+                for i = 1, math.min(5, #plan.block_unplaced) do names[i] = Blk.place_text(plan.block_unplaced[i]) end
+                return start_fail(Blk.TEXT.unplaceable:format(Blk.listing(names, #plan.block_unplaced)))
             end
         end
-        -- machine need + station block cost: one total check (player + unit + refund)
+        -- machine need: one total check (player + unit + refund). Station block cost is not in it (blocks are forced).
         local need = {}
         for k, v in pairs(plan.need or {}) do need[k] = v end
-        for k, v in pairs(plan.block_need or {}) do need[k] = (need[k] or 0) + v end
         -- station blocks removed for the file: their cost comes back to the unit on the same apply (refund)
         local refund_cost = {}
         for k, v in pairs(plan.refund_cost or plan.refund or {}) do refund_cost[k] = v end
-        for k, v in pairs(plan.block_refund or {}) do refund_cost[k] = (refund_cost[k] or 0) + v end
         local P = {
             station = plan.station, fp = plan.fp,
             place = plan.place or {}, kept = plan.kept or {}, chg = plan.chg or {},
@@ -1641,6 +1776,7 @@ function B.new(io)
         R.text = "checking station"
         local now = io.now()
         R.t_start = now
+        R.alive_sig, R.t_alive = alive_sig(), now
         R.t_stage = now
         local ex, err = io.scan(P.station)
         if not ex then return start_fail(err or "live read fault") end
@@ -1766,11 +1902,15 @@ function B.new(io)
             return
         end
         if now < R.t_next then return end
-        if R.stage < 12 and now - R.t_start > TOTAL_MS then return fail("timeout after 300 s") end
+        -- whole-run timeout counts from the last progress change (big bases take long), not from the start
+        local sg = alive_sig()
+        if sg ~= R.alive_sig then R.alive_sig, R.t_alive = sg, now end
+        if R.stage < 12 and now - R.t_alive > TOTAL_MS then return fail("timeout after 300 s") end
         local s = R.stage
         if s == 11 then send_queue(now)
         elseif s == 12 then cont_wait(now)
         elseif s == 13 then sort_wait(now)
+        elseif s == 14 then give_wait(now)
         elseif s == 15 then pipe_send(now)
         elseif s == 16 then pipe_wait(now)
         elseif s == 17 then cfg_wait(now)

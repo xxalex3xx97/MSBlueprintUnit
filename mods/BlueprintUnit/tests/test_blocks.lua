@@ -52,22 +52,23 @@ local missing = {
     { class = "Locked", gx = 3, gy = 0, h = 0, rot = 0 },  -- locked
     { class = "Locked", gx = 4, gy = 0, h = 0, rot = 0 },  -- locked again (listed once)
     { class = "Unk", gx = 5, gy = 0, h = 0, rot = 0 },     -- unknown research
-    { class = "Ok", gx = 9, gy = 9, h = 0, rot = 0 },      -- occupied by live
+    { class = "Ok", gx = 9, gy = 9, h = 0, rot = 0 },      -- overlaps a live block (no file): forced, accepted
     { class = "Ok", gx = 0, gy = 0, h = 1, rot = 0 },      -- accepted (other height, no overlap)
     { class = "Ok", gx = 0, gy = 0, h = 0, rot = 0 },      -- overlaps the first accepted
     { class = "Big", gx = 20, gy = 0, h = 0, rot = 0 },    -- accepted, cost ITEM_A 1 + ITEM_B 3
 }
 local live = { { class = "Ok", gx = 9, gy = 9, h = 0, rot = 0 } }
 local r = B.classify(missing, live, info_of, { ITEM_A = 2, ITEM_B = 2 })
-check("classify accepted count", #r.accept == 3)
-check("classify notes count", #r.notes == 6)
+check("classify accepted count", #r.accept == 5)
+check("classify notes count", #r.notes == 4)
 check("classify notes text", r.notes[1] == "Skipped Gone: this block type is not in this game.")
 check("classify raw keeps technical text", r.raw[1] == "Gone at 1,0,0: class not in this game")
-check("classify skip occupied", r.notes[4] == "Skipped Ok: another block of the blueprint already occupies that spot.")
-check("classify locked: one aggregated note", r.notes[6] == "Skipped 2 blocks locked by research: Locked x2.")
+check("classify skipped list", #r.skipped == 5 and r.skipped[1].class == "Gone" and r.skipped[2].class == "Pipe"
+    and r.skipped[3].class == "Locked" and r.skipped[4].class == "Locked" and r.skipped[5].class == "Unk")
+check("classify locked: one aggregated note", r.notes[4] == "Skipped 2 blocks locked by research: Locked x2.")
 check("classify locked listed once", #r.locked == 1 and r.locked[1] == "Locked")
-check("classify cost sum", r.cost.ITEM_A == 2 + 2 + 1 and r.cost.ITEM_B == 3)
-check("classify shortfall", #r.shortfall == 2 and r.shortfall[1].item == "ITEM_A" and r.shortfall[1].need == 5
+check("classify cost sum", r.cost.ITEM_A == 9 and r.cost.ITEM_B == 3)
+check("classify shortfall", #r.shortfall == 2 and r.shortfall[1].item == "ITEM_A" and r.shortfall[1].need == 9
     and r.shortfall[1].have == 2 and r.shortfall[2].item == "ITEM_B")
 local r2 = B.classify({ { class = "Ok", gx = 0, gy = 0, h = 0, rot = 0 } }, {}, info_of, { ITEM_A = 5 })
 check("no shortfall when enough", #r2.shortfall == 0 and #r2.accept == 1)
@@ -144,12 +145,12 @@ check("remove: net refund needs nothing", #rr.shortfall == 0)
 
 -- a live block that is itself in the file is never removed: the file overlaps itself, the new block is skipped
 local rk = B.classify({ S1 }, { SIDE }, rinfo_of, {}, { S1, SIDE })
-check("in file: not removed, skipped as occupied", #rk.remove == 0 and #rk.accept == 0 and rk.notes[1] == "Skipped Station 01: another block of the blueprint already occupies that spot.")
+check("in file: not removed, forced as accepted", #rk.remove == 0 and #rk.accept == 1 and #rk.notes == 0)
 
 -- the Blueprint Unit block itself is never removed, even when the file does not list it
 local UNIT = { class = "BPO_BlueprintUnit", gx = 0, gy = 0, h = 0, rot = 0, path = "/Game/BPO_BlueprintUnit" }
 local ru = B.classify({ S1 }, { UNIT }, rinfo_of, {}, { S1 })
-check("unit block is never removed", #ru.remove == 0 and #ru.accept == 0)
+check("unit block is never removed", #ru.remove == 0 and #ru.accept == 1)
 
 -- net cost: 6 Plate for the new block, 4 Plate + 1 Frame refund -> 2 Plate short when holding 1
 local rn = B.classify({ { class = "Station_02A", gx = 0, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, { ITEM_Plate = 1 },
@@ -165,7 +166,7 @@ check("gone: second block accepted after the side is removed", #rg.accept == 2 a
 check("gone: one note (the removal), no occupied note", #rg.notes == 1 and rg.notes[1]:find("Removed the", 1, true) ~= nil)
 -- two missing blocks over the same side: removed once
 local rd = B.classify({ S1, { class = "Station_01", gx = 1, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, { S1 })
-check("dedup: side removed once, second block skipped as overlap", #rd.remove == 1 and #rd.accept == 1 and rd.notes[#rd.notes]:find("another block of the blueprint already occupies", 1, true) ~= nil)
+check("dedup: side removed once, second block forced as accepted", #rd.remove == 1 and #rd.accept == 2 and #rd.notes == 1 and rd.notes[#rd.notes]:find("Removed the", 1, true) ~= nil)
 -- probe spacing: a Station 1x1 4 cells away from the side is not in its way; 2 cells away is
 local rp = B.classify({ { class = "Station_01", gx = 4, gy = 0, h = 0, rot = 0 } }, { SIDE }, rinfo_of, {}, {})
 check("probe: station 4 away from side, no removal", #rp.remove == 0 and #rp.accept == 1)
@@ -177,7 +178,7 @@ local rb = B.classify({ S1 }, { bare }, function(c, p) if p == nil and c == "Shi
 check("no path: one-cell live block, removed when hit", #rb.remove == 1 and rb.refund.ITEM_Plate == nil)
 -- off (no file): old behaviour, no removal
 local ro = B.classify({ S1 }, { SIDE }, rinfo_of, {})
-check("off: no file -> occupied, nothing removed", #ro.remove == 0 and #ro.accept == 0)
+check("off: no file -> nothing removed, forced as accepted", #ro.remove == 0 and #ro.accept == 1)
 
 -- send: pending reset, remove each, add each, ONE apply, in that order
 local function rfake(fail_at)

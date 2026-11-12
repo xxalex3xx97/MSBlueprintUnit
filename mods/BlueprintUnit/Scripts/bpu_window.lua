@@ -151,9 +151,10 @@ local function stationBlocked()
   setStatus(STATION_OLD)
   return true
 end
--- options for bpu_plan and bpu_live (Station Build only when ticked; off = the plan and snapshot as before)
-local function planOpts() return { trace = Live.trace, station_build = S.stationBuild } end
-local function snapOpts() return { station_build = S.stationBuild, player = S.player } end
+-- options for bpu_plan and bpu_live. Station Build is ON whenever MSCore can do it (forced build), or when ticked
+local function sbOn() return S.stationBuild or (Live.station_build_capable()) end
+local function planOpts() return { trace = Live.trace, station_build = sbOn() } end
+local function snapOpts() return { station_build = sbOn(), player = S.player } end
 
 -- outer chain of a widget reaches our window (UserWidget): WidgetTree -> UserWidget
 local function owned(e)
@@ -302,8 +303,12 @@ local function finishBuild(run)
   S.run = nil
   setBuildBtns(true)
   KEPT.has = true   -- the result line is the Notes status line (buildLoop); the plan summary stays
+  -- GC off while the plan runs (same reason as impOk): UE4SS crashes when a collection runs mid-read
+  collectgarbage("stop")
   local okR, err = pcall(function()
+    local t0 = os.clock()
     local plan, perr = Plan.plan(S.text, Live.snapshot(S.U, F, snapOpts()), F, planOpts())
+    Live.trace(("finishBuild plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then
       Live.trace("finishBuild replan failed: " .. tostring(perr))
       setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
@@ -311,7 +316,9 @@ local function finishBuild(run)
     end
     S.plan = plan
     fillCost(Plan.cost_rows(plan, { restore = readRestoreBox() }))
+    Live.trace("finishBuild done")
   end)
+  collectgarbage("restart")
   if not okR then L("refresh after build failed: " .. tostring(err)) end
 end
 
@@ -374,9 +381,13 @@ local function buildClick()
   readStationBuild()
   if stationBlocked() then return end
   local ui = readRestoreBox()
+  -- GC off while the plan and the run start (same reason as impOk)
+  collectgarbage("stop")
   local okRun, err = pcall(function()
     local live = Live.snapshot(S.U, F, snapOpts())
+    local t0 = os.clock()
     local plan, perr = Plan.plan(S.text, live, F, planOpts())
+    Live.trace(("buildClick plan %.1f ms ok=%s"):format((os.clock() - t0) * 1000, tostring(plan ~= nil)))
     if not plan then
       Live.trace("buildClick replan failed: " .. tostring(perr))
       setStatus("error: " .. tostring(perr) .. " (import again if this stays)")
@@ -394,7 +405,9 @@ local function buildClick()
     setBuildBtns(false)
     setStatus(S.builder:status().text)
     M.loopGT(300, buildLoop(run))
+    Live.trace("buildClick done")
   end)
+  collectgarbage("restart")
   if not okRun then
     L("build failed: " .. tostring(err))
     S.run = nil
@@ -586,6 +599,10 @@ local function openWindow(block, player, ctl)
   setBuildBtns(true)
   txt("Txt_CostPin", KEPT.pinned and "Unpin" or "Pin")
   L("open unit=".. tostring(rd(U.unit_inv, "ID")) .. " player=" .. tostring(rd(pinv, "ID")))
+  pcall(function()
+    local pr = Live.probe_start(U, player, ctl)
+    if pr then M.loopGT(500, pr) end
+  end)
 end
 
 -- block = BPO_BlueprintUnit_C only (main.lua opener filter). player = DMSPlayerObject. ctl = controller or nil. Game thread.

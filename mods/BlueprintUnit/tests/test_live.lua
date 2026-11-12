@@ -727,5 +727,25 @@ do
     Live.mscore, StaticFindObject = savedMs, savedSFO3
 end
 
+-- give_creative: guards (no GiveCreativeItems call), then a known item -> one call with Item.Item and Amount
+do
+    local savedItems = world.Item
+    world.Item = { named("ITEM_RepairKit", { MaxStackSize = 50 }) }
+    Live.reset()
+    local gcalls, glast = 0, nil
+    local gctl = { IsValid = alive, GiveCreativeItems = function(_, a) gcalls = gcalls + 1; glast = a end }
+    local gu, gur = Live.give_creative(gctl, "ITEM_Nope", 100)
+    check(gu == false and gcalls == 0 and gur:find("item not found", 1, true) ~= nil, "give_creative: unknown item -> false, no call")
+    local gn, gnr = Live.give_creative(gctl, nil, 100)
+    check(gn == false and gcalls == 0 and gnr == "no item name", "give_creative: nil name -> false, no call")
+    local gz, gzr = Live.give_creative(gctl, "ITEM_RepairKit", 0)
+    check(gz == false and gcalls == 0 and gzr == "bad amount", "give_creative: zero amount -> false, no call")
+    local gk, gkr = Live.give_creative(gctl, "ITEM_RepairKit", 100)
+    check(gk == true and gkr == nil and gcalls == 1 and glast.Item.Item ~= nil and glast.Item.Amount == 100,
+          "give_creative: known item -> true, 1 call, Item.Item set, Amount 100")
+    world.Item = savedItems
+    Live.reset()
+end
+
 print(("RESULT %d passed, %d failed"):format(pass, fail))
 os.exit(fail == 0 and 0 or 1)

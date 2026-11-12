@@ -51,7 +51,9 @@ B.TEXT = {
     shortfall = "Not enough items for the station blocks",
     nothing_built = "nothing was built",
     failed = "The station blocks could not be placed; nothing was resent.",
-    stalled = "The station blocks did not all appear within %d s (%d still missing); nothing was resent.",
+    stalled = "The station blocks stopped appearing: no new block for %d s (%d still missing); nothing was resent.",
+    stalled_cap = "The station blocks did not all appear within %d min (%d still missing); nothing was resent.",
+    unplaceable = "These station blocks cannot be placed: %s. The factory was not built.",
     sent_failed = "The station blocks could not be sent; nothing was resent.",
     research_all = "Could not read the research state of any station block, so Station Build placed nothing.",
 }
@@ -197,12 +199,13 @@ end
 local FRIENDLY = { no_class = B.TEXT.no_class, not_station = B.TEXT.not_station, unknown = B.TEXT.unknown,
                    occupied = B.TEXT.occupied, overlap_doc = B.TEXT.occupied }
 
--- missing: blocks to place (diff(doc, live).missing). Skip order: no class, not station, locked, unknown,
--- live block in the file (never removed), overlap with an earlier accepted block. A live block that overlaps an
--- accepted missing block (and is not in the file) is removed; a removed live block no longer occupies its cell.
--- Cost: added blocks (cost) and removed blocks (refund); shortfall on net = cost - refund > have.
+-- missing: blocks to place (diff(doc, live).missing). Skip order: no class, not station, locked, unknown (these are
+-- the only skips; res.skipped lists them). Forced build: every other block is accepted. A live block that overlaps an
+-- accepted missing block is removed, except blocks of the file, the Blueprint Unit block and no-file (keep_all) runs,
+-- which are left in place. A removed live block no longer occupies its cell.
+-- Cost: added blocks (cost) and removed blocks (refund); shortfall on net = cost - refund > have (note only, never refuses).
 function B.classify(missing, live, info_of, have, doc)
-    local res = { accept = {}, notes = {}, raw = {}, locked = {}, cost = {}, refund = {}, shortfall = {}, remove = {} }
+    local res = { accept = {}, notes = {}, raw = {}, locked = {}, cost = {}, refund = {}, shortfall = {}, remove = {}, skipped = {} }
     local in_doc = {}
     for _, d in ipairs(doc or {}) do in_doc[B.key(d)] = true end
     local keep_all = doc == nil   -- no file given: nothing is removable
@@ -211,6 +214,7 @@ function B.classify(missing, live, info_of, have, doc)
     local gone = {}   -- live index -> removed by an accepted block
     local locked_n = {}   -- class -> count of blocks skipped as locked (one player note)
     local function skip(b, key)
+        res.skipped[#res.skipped + 1] = b
         res.raw[#res.raw + 1] = at(b) .. ": " .. B.RAW[key]
         if FRIENDLY[key] then res.notes[#res.notes + 1] = "Skipped " .. B.name(b.class) .. ": " .. FRIENDLY[key] .. "." end
     end
@@ -225,6 +229,7 @@ function B.classify(missing, live, info_of, have, doc)
             reason = "locked"
             if not locked_n[b.class] then res.locked[#res.locked + 1] = b.class end
             locked_n[b.class] = (locked_n[b.class] or 0) + 1
+            res.skipped[#res.skipped + 1] = b
             res.raw[#res.raw + 1] = at(b) .. ": " .. B.RAW.locked
         elseif info.unlocked == nil then
             reason = "unknown"
@@ -233,16 +238,10 @@ function B.classify(missing, live, info_of, have, doc)
         if not reason then
             box = B.box(info, b)
             for i, lb in ipairs(live_boxes) do
-                if not gone[i] and B.overlap(box, lb) then hits[#hits + 1] = i end
-            end
-            for _, i in ipairs(hits) do
-                -- never remove the Blueprint Unit block itself (it runs this build); blocks of the file are kept too
-                if keep_all or in_doc[B.key(live[i])] or tostring(live[i].class):find("BlueprintUnit", 1, true) then reason = "occupied"; break end
-            end
-        end
-        if not reason then
-            for _, a in ipairs(res.accept) do
-                if B.overlap(box, a.box) then reason = "overlap_doc"; break end
+                if not gone[i] and B.overlap(box, lb)
+                   and not (keep_all or in_doc[B.key(live[i])] or tostring(live[i].class):find("BlueprintUnit", 1, true)) then
+                    hits[#hits + 1] = i
+                end
             end
         end
         if reason == "locked" then
