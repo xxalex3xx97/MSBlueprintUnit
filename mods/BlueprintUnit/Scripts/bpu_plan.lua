@@ -566,6 +566,7 @@ local function build(text, live, F, opts)
     local recipes = live.recipes or {}
     local blocks = live.blocks or {}
     local notes, skipped_ug = {}, {}
+    local name_skipped = 0   -- named elevator/teleporter machines whose Name cannot be applied (skipped, or kept with other name)
 
     local bkeys = sorted_keys(buildables)
     local function dat_for_cls(cls)   -- Buildable of a class: first with a footprint row, else first of that class
@@ -592,6 +593,7 @@ local function build(text, live, F, opts)
     for _, m in ipairs(doc.machines) do
         if m.cls:find("Teleporter", 1, true) or (m.dat and m.dat:find("Teleporter", 1, true)) then
             notes[#notes + 1] = "skipped (Teleporter is never placed): " .. m.cls .. "@(" .. m.x .. "," .. m.y .. ")"
+            if m.name then name_skipped = name_skipped + 1 end
         else
             machines[#machines + 1] = m
         end
@@ -662,6 +664,7 @@ local function build(text, live, F, opts)
         if not m.dat then m.dat = dat_for_cls(m.cls) end
         if not m.dat then
             notes[#notes + 1] = "skipped (block-built, no Buildable): " .. m.cls
+            if m.name then name_skipped = name_skipped + 1 end
         else
             resolved[#resolved + 1] = m
             if not F.tables[m.dat] then bail("unknown buildable (no footprint row): " .. m.dat) end
@@ -1010,6 +1013,11 @@ local function build(text, live, F, opts)
         if tostring(m.dat):find("Splitter", 1, true) and m.cfg and m.cfg ~= "" and (m.live or "") ~= m.cfg then split_diff = split_diff + 1 end
     end
     if split_diff > 0 then notes[#notes + 1] = split_diff .. " kept splitters have different port settings than the blueprint (not changed)" end
+    -- kept named machines: the live config must decode to the blueprint Name, else the Name was not applied (note only)
+    for _, m in ipairs(kept) do
+        if m.name and decode_named(m.live) ~= m.name then name_skipped = name_skipped + 1 end
+    end
+    if name_skipped > 0 then notes[#notes + 1] = name_skipped .. " elevator/teleporter name(s) not applied (kept machines cannot be renamed natively; docks use rename_dock)" end
 
     -- removals: conflicts (same layer overlap with new machines, kept ones excluded) + stale (existing the blueprint no longer has)
     local newall = {}

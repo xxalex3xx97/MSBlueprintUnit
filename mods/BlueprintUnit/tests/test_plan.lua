@@ -615,5 +615,18 @@ check("elevator name: decode history form 0 (source FString)", P.decode_named(hi
 check("elevator name: decode refuses empty, trailing bytes, short data",
     P.decode_named("") == nil and P.decode_named(LIFT_A .. "\0") == nil and P.decode_named("\1\0\0") == nil)
 
+-- kept elevator (same class+cell): live name cannot be changed, so a differing live Name is noted; equal live Name is not
+local NAME_NOTE = "1 elevator/teleporter name(s) not applied (kept machines cannot be renamed natively; docks use rename_dock)"
+local function has_text(pp, text)
+    for _, n in ipairs(pp and pp.notes or {}) do
+        if n == text then return true end
+    end
+    return false
+end
+local pk = P.plan(read("elevator_name.json"), live({ existing = { ex(70, "BP_ElevatorObject", "DAT_Elevator", 1, 1, "\1\0\0\0\0\0\255\0\0\0\0") } }), F)
+check("elevator kept: differing live name -> note, place unchanged", pk and pk.counts.keep == 1 and pk.counts.place == 0 and has_text(pk, NAME_NOTE))
+local pk2 = P.plan(read("elevator_name.json"), live({ existing = { ex(71, "BP_ElevatorObject", "DAT_Elevator", 1, 1, LIFT_A) } }), F)
+check("elevator kept: equal live name -> no note", pk2 and pk2.counts.keep == 1 and not has_text(pk2, NAME_NOTE))
+
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)
