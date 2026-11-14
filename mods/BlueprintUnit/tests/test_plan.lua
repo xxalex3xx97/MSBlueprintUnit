@@ -24,6 +24,7 @@ local BUILDABLES = {
     DAT_Dock = { bcls = "BP_DockObject", cost = {} },
     DAT_ItemCrate = { bcls = "BP_ItemCrateObject", cost = {} },
     DAT_Teleporter = { bcls = "BP_TeleporterObject", cost = { ITEM_A = 9 } },
+    DAT_Elevator = { bcls = "BP_ElevatorObject", cost = {} },
     DAT_Container_2 = { bcls = "BP_ContainerObject_2", cost = {} },
 }
 
@@ -594,6 +595,25 @@ check("sb names: nothing live -> no renames, summary dock names 1 (new dock only
     and P.summary(dk0) == "place 0, keep 0, remove 0, recipe changes 0, blocks 1, dock names 1")
 check("summary: no renames, text unchanged", P.summary({ counts = { place = 0, keep = 0, remove = 0, recipe = 0 }, refund = {}, renames = {} })
     == "place 0, keep 0, remove 0, recipe changes 0")
+
+-- elevator/teleporter Name -> FText config on the placed machine. DAT_Elevator has no generated footprint row: test-only w=1 h=1
+F.tables.DAT_Elevator = { w = 1, h = 1 }
+local LIFT_A = "\1\0\2\0\0\0\255\1\0\0\0\7\0\0\0Lift A\0"
+local pel = plan_of("elevator_name.json")
+check("elevator name: placed, Name written as named FText config", pel and pel.counts.place == 1 and pel.place[1].cfg == LIFT_A)
+local pel0 = P.plan(read("elevator_name.json"):gsub('"Name":"Lift A",', '"Name":"",'), live(), F)
+check("elevator name: empty Name -> no config override", pel0 and pel0.place[1].cfg == nil)
+local pcrate = P.plan('{"Version":2,"Blocks":[],"DefaultMachines":[{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Name":"X","Transform":{"GridLocation":{"X":1,"Y":1},"Height":0,"GridRotation":0}}]}', live(), F)
+check("elevator name: non-elevator machine Name ignored", pcrate and pcrate.place[1].cfg == nil)
+local uni = "Lift \u{C4}"
+check("elevator name: non-ASCII name -> UTF-16 (negative length), round-trips", P.decode_named(P.encode_named(uni)) == uni
+    and P.encode_named(uni):sub(12, 15) == string.pack("<i4", -7))
+check("elevator name: encode_named empty form is 11 bytes", #P.encode_named("") == 11 and P.decode_named(P.encode_named("")) == "")
+check("elevator name: decode named form", P.decode_named(LIFT_A) == "Lift A")
+local hist = "\1\0" .. string.pack("<I4i1", 0, 0) .. "\0\0\0\0" .. "\0\0\0\0" .. "\2\0\0\0X\0"
+check("elevator name: decode history form 0 (source FString)", P.decode_named(hist) == "X")
+check("elevator name: decode refuses empty, trailing bytes, short data",
+    P.decode_named("") == nil and P.decode_named(LIFT_A .. "\0") == nil and P.decode_named("\1\0\0") == nil)
 
 print(string.format("%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

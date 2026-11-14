@@ -1,0 +1,1 @@
+{"Version":2,"DisplayName":"Elev","Blocks":[{"Class":"/Game/Blueprints/BuildingBlocks/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}],"DefaultMachines":[{"Class":"BP_ElevatorObject","DefaultName":"DAT_Elevator","Name":"Lift A","Transform":{"GridLocation":{"X":1,"Y":1},"Height":0,"GridRotation":0}}]}

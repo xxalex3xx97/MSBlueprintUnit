@@ -303,6 +303,95 @@ local function clean_name(s)
     return s
 end
 
+-- named machines (elevator, teleporter; ItemElevator is not): Name is written as an FText in the machine config
+local function named_kind(m)
+    local function nk(s)
+        return s ~= nil and ((s:find("Elevator", 1, true) ~= nil and s:find("ItemElevator", 1, true) == nil)
+            or s:find("Teleporter", 1, true) ~= nil)
+    end
+    return nk(m.cls) or nk(m.dat) or false
+end
+
+-- UE FString: ASCII = i32 (len+1), bytes, NUL; otherwise UTF-16LE = i32 -(units+1), units, NUL NUL
+local function fstr(s)
+    if s == "" then return string.pack("<i4", 0) end
+    if not s:find("[\128-\255]") then return string.pack("<i4", #s + 1) .. s .. "\0" end
+    local units = {}
+    for _, cp in utf8.codes(s) do
+        if cp >= 0x10000 then
+            local v = cp - 0x10000
+            units[#units + 1] = 0xD800 + (v >> 10)
+            units[#units + 1] = 0xDC00 + (v & 0x3FF)
+        else
+            units[#units + 1] = cp
+        end
+    end
+    local out = {}
+    for i, u in ipairs(units) do out[i] = string.pack("<I2", u) end
+    return string.pack("<i4", -(#units + 1)) .. table.concat(out) .. "\0\0"
+end
+
+-- elevator/teleporter config: "\1\0" + FText. Name "" = u32 0, i8 -1, u32 0; named = u32 2, i8 -1, u32 1, FString
+local function encode_named(name)
+    if name == "" then return "\1\0" .. string.pack("<I4i1I4", 0, -1, 0) end
+    return "\1\0" .. string.pack("<I4i1I4", 2, -1, 1) .. fstr(name)
+end
+
+-- FString at byte position p -> text, next position. Errors (short data) are caught by decode_named.
+local function read_fstr(b, p)
+    local n = string.unpack("<i4", b, p)
+    p = p + 4
+    if n == 0 then return "", p end
+    if n > 0 then
+        if b:byte(p + n - 1) ~= 0 then return nil end
+        return b:sub(p, p + n - 2), p + n
+    end
+    local units = -n
+    if units < 1 or string.unpack("<I2", b, p + 2 * (units - 1)) ~= 0 then return nil end
+    local cps, i = {}, 0
+    while i < units - 1 do
+        local u = string.unpack("<I2", b, p + 2 * i)
+        i = i + 1
+        if u >= 0xD800 and u <= 0xDBFF then
+            local lo = string.unpack("<I2", b, p + 2 * i)
+            i = i + 1
+            if lo < 0xDC00 or lo > 0xDFFF then return nil end
+            u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00)
+        elseif u >= 0xDC00 and u <= 0xDFFF then
+            return nil
+        end
+        cps[#cps + 1] = utf8.char(u)
+    end
+    return table.concat(cps), p + 2 * units
+end
+
+-- config bytes -> Name ("" for the empty form). Accepts the named form and the history form 0 (last FString = source).
+-- nil when malformed, empty or with trailing bytes.
+local function decode_named_inner(b)
+    if b:sub(1, 2) ~= "\1\0" then return nil end
+    local _, h, p = string.unpack("<I4i1", b, 3)
+    local text
+    if h == -1 then
+        local has
+        has, p = string.unpack("<I4", b, p)
+        if has == 0 then text = "" else text, p = read_fstr(b, p) end
+    elseif h == 0 then
+        local ns, key
+        ns, p = read_fstr(b, p)
+        if not ns then return nil end
+        key, p = read_fstr(b, p)
+        if not key then return nil end
+        text, p = read_fstr(b, p)
+    end
+    if not text or p ~= #b + 1 then return nil end
+    return text
+end
+local function decode_named(b)
+    if type(b) ~= "string" then return nil end
+    local ok, text = pcall(decode_named_inner, b)
+    return ok and text or nil
+end
+
 ---------------------------------------------------------------- JSON -> records
 local function parse_doc(text)
     local root, err = JSON.decode(text)
@@ -330,6 +419,9 @@ local function parse_doc(text)
         if type(c) ~= "string" then bail("bad JSON: machine without Class") end
         local m = { cls = short(c), x = 0, y = 0, h = 0, rot = 0 }
         if type(e.DefaultName) == "string" and e.DefaultName:sub(1, 4) == "DAT_" then m.dat = e.DefaultName end
+        -- optional Name: cleaned like dock names; kept only for named machines (elevator/teleporter), valid UTF-8 only
+        local nm = clean_name(type(e.Name) == "string" and e.Name or "")
+        if nm ~= "" and utf8.len(nm) and named_kind(m) then m.name = nm end
         local tr = e.Transform
         if type(tr) ~= "table" then bail("bad JSON: machine without Transform: " .. m.cls) end
         m.x, m.y, m.h, m.rot = grid(tr, "machine Transform")
@@ -624,7 +716,9 @@ local function build(text, live, F, opts)
     -- config bytes: ConfigHex verbatim (non-underground); recipe machines get the recipe layout; undergrounds paired below
     local port_noted = {}
     for _, m in ipairs(machines) do
-        if m.hasHex and not is_ug(m) then
+        if m.name and not is_ug(m) then   -- named machine: Name wins over ConfigHex
+            m.cfg = encode_named(m.name)
+        elseif m.hasHex and not is_ug(m) then
             m.cfg = m.hexcfg
         else
             local rt = RECIPE_MACH[m.dat]
@@ -1210,4 +1304,6 @@ function P.fingerprint(existing)
     return hv
 end
 
+P.encode_named = encode_named   -- exported for tests
+P.decode_named = decode_named
 return P
