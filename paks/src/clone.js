@@ -1,8 +1,9 @@
 const fs = require('fs'), path = require('path');
-const L = (process.env.MS_MODS_ROOT || 'F:\\MSDemoMods') + '\\legacy\\MainSequence\\Content\\Blueprints\\BuildingBlocks';
+const VAN = process.env.BPU_VANILLA || ((process.env.MS_MODS_ROOT || 'F:\\MSDemoMods') + '\\legacy'); // vanilla root (holds MainSequence\); set BPU_VANILLA to the new-vanilla dir after an update
+const L = VAN + '\\MainSequence\\Content\\Blueprints\\BuildingBlocks';
 const OUT = path.join(__dirname, 'stage', 'MainSequence', 'Content', 'Blueprints', 'BuildingBlocks');
 fs.mkdirSync(OUT, { recursive: true });
-const LOC_IN = (process.env.MS_MODS_ROOT || 'F:\\MSDemoMods') + '\\legacy\\MainSequence\\Content\\Data\\Localization';
+const LOC_IN = VAN + '\\MainSequence\\Content\\Data\\Localization';
 const LOC_OUT = path.join(__dirname, 'stage', 'MainSequence', 'Content', 'Data', 'Localization');
 fs.mkdirSync(LOC_OUT, { recursive: true });
 // hologram template transform (BP uexp doubles). Vanilla: loc (0,0,141.0058747886738), scale 0.0325. designer sets HOLO_*.
@@ -156,7 +157,7 @@ for (const f of [BP_NEW + '.uasset', BP_NEW + '.uexp', PROMPT + '.uasset', PROMP
 // The sim's actor import is package name base "BP_Container" with FName number 3 (= suffix _2). Base rename to BP_BPUnitSto (same length) keeps number 3 -> BP_BPUnitSto_2.
 // Off unless BPU_CONTAINER=1 (build_pak.ps1 -Container clone).
 if (process.env.BPU_CONTAINER === '1') {
-const MACH_IN = (process.env.MS_MODS_ROOT || 'F:\\MSDemoMods') + '\\legacy\\MainSequence\\Content\\Blueprints\\Machines';
+const MACH_IN = VAN + '\\MainSequence\\Content\\Blueprints\\Machines';
 const MACH_OUT = path.join(__dirname, 'stage', 'MainSequence', 'Content', 'Blueprints', 'Machines');
 fs.mkdirSync(MACH_OUT, { recursive: true });
 const SIM_OLD = 'BP_ContainerObject_2', SIM_NEW = 'BP_BPUnitStoreObj_01';

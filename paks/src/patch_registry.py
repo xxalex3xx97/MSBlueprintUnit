@@ -15,7 +15,8 @@ K = int(sys.argv[1])
 VAR = sys.argv[2]
 OUT = sys.argv[3]
 MODS_ROOT = os.environ.get('MS_MODS_ROOT', 'F:/MSDemoMods')  # repo root, holds legacy/ (vanilla source)
-S = MODS_ROOT + '/legacy/MainSequence/Content/Data/DAT_BuildingBlockRegistry'
+VAN = os.environ.get('BPU_VANILLA', MODS_ROOT + '/legacy')  # vanilla root (holds MainSequence/); set to new-vanilla dir after an update
+S = VAN + '/MainSequence/Content/Data/DAT_BuildingBlockRegistry'
 BLK = '/Game/Blueprints/BuildingBlocks/'
 
 

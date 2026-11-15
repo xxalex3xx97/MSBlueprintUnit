@@ -11,7 +11,8 @@ import hashlib
 
 OUT = sys.argv[1]
 MODS_ROOT = os.environ.get('MS_MODS_ROOT', 'F:/MSDemoMods')  # repo root, holds legacy/ (vanilla source)
-S = MODS_ROOT + '/legacy/MainSequence/Content/Data/Research/RSC_ComputationScience'
+VAN = os.environ.get('BPU_VANILLA', MODS_ROOT + '/legacy')  # vanilla root (holds MainSequence/); set to new-vanilla dir after an update
+S = VAN + '/MainSequence/Content/Data/Research/RSC_ComputationScience'
 PK = '/Game/Blueprints/BuildingBlocks/BPO_BlueprintUnit'
 CL = 'BPO_BlueprintUnit_C'
 
