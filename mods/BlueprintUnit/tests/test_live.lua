@@ -652,6 +652,9 @@ do
     local NOMIDS = "block has no child machine ids (needs MSCore 0.8.3 build with mids)"
     check(Live.dock_for(42, rnM) == d_old, "dock_for: matched by mids (block id ignored when mids are given)")
     check(Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 555 } }) == d_old, "dock_for: mids alone")
+    check((Live.dock_for(42, { cls = "BPO_Elevator_02", name = "Lift", mids = { 77 } }) or {}).machine_id == 77, "dock_for: elevator block -> its one child machine id")
+    check(Live.dock_for(42, { cls = "BPO_Elevator_02", name = "Lift", mids = {} }) == nil, "dock_for: elevator block without child ids -> not yet")
+    check((Live.dock_for(42, { cls = "BPO_Elevator_02", machine_id = 9, name = "Lift" }) or {}).machine_id == 9, "dock_for: kept machine id used as is")
     local dm, dmw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 999 } })
     check(dm == nil and dmw == Live.DOCK_NOT_YET and dmw == "not found yet", "dock_for: mids match no dock (no block id) -> not found yet")
     local dx, dxw = Live.dock_for(42, { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 557 } })

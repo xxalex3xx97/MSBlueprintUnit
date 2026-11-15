@@ -284,6 +284,7 @@ end
 local DOCK_NAME_CLS = {
     BPO_Dock = "BPO_StationBlockDock", BPO_Dock_2 = "BPO_IndustrialDock",
     BPO_ShipyardCore = "BPO_ShipyardBlockDock", BPO_ShipyardCore_02 = "BPO_ShipyardBlockDock_02",
+    BPO_ElevatorBlock_03 = "BPO_Elevator_02",   -- elevator block: its one child machine takes the name (same native rename, receiver = child machine id)
 }
 
 -- dock Name cleanup: control chars (< 0x20) stripped, surrounding ASCII whitespace trimmed, at most NAME_MAX characters
@@ -1015,9 +1016,11 @@ local function build(text, live, F, opts)
     if split_diff > 0 then notes[#notes + 1] = split_diff .. " kept splitters have different port settings than the blueprint (not changed)" end
     -- kept named machines: the live config must decode to the blueprint Name, else the Name was not applied (note only)
     for _, m in ipairs(kept) do
-        if m.name and decode_named(m.live) ~= m.name then name_skipped = name_skipped + 1 end
+        if m.name and decode_named(m.live) ~= m.name and type(m.id) == "number" then   -- live kept elevator: renamed natively by machine id
+            renames[#renames + 1] = { cls = m.cls, machine_id = m.id, name = m.name, gx = m.x, gy = m.y, h = m.h }
+        elseif m.name and decode_named(m.live) ~= m.name then name_skipped = name_skipped + 1 end
     end
-    if name_skipped > 0 then notes[#notes + 1] = name_skipped .. " elevator/teleporter name(s) not applied (kept machines cannot be renamed natively; docks use rename_dock)" end
+    if name_skipped > 0 then notes[#notes + 1] = name_skipped .. " elevator/teleporter name(s) not applied (no live machine id; Teleporters are never placed)" end
 
     -- removals: conflicts (same layer overlap with new machines, kept ones excluded) + stale (existing the blueprint no longer has)
     local newall = {}

@@ -624,7 +624,7 @@ local function has_text(pp, text)
     return false
 end
 local pk = P.plan(read("elevator_name.json"), live({ existing = { ex(70, "BP_ElevatorObject", "DAT_Elevator", 1, 1, "\1\0\0\0\0\0\255\0\0\0\0") } }), F)
-check("elevator kept: differing live name -> note, place unchanged", pk and pk.counts.keep == 1 and pk.counts.place == 0 and has_text(pk, NAME_NOTE))
+check("elevator kept: differing live name -> native rename by machine id, place unchanged", pk and pk.counts.keep == 1 and pk.counts.place == 0 and #pk.renames == 1 and pk.renames[0 + 1].machine_id == 70 and pk.renames[1].name ~= "" and not has_text(pk, NAME_NOTE))
 local pk2 = P.plan(read("elevator_name.json"), live({ existing = { ex(71, "BP_ElevatorObject", "DAT_Elevator", 1, 1, LIFT_A) } }), F)
 check("elevator kept: equal live name -> no note", pk2 and pk2.counts.keep == 1 and not has_text(pk2, NAME_NOTE))
 

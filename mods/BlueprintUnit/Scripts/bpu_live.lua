@@ -652,6 +652,12 @@ end
 -- Never guesses among several docks.
 L.DOCK_NOT_YET = "not found yet"
 function L.dock_for(station, rn)
+    if rn.machine_id then return { machine_id = rn.machine_id } end   -- kept machine: id known, nothing to look up
+    if rn.cls == "BPO_Elevator_02" then   -- elevator block: exactly one child machine, taken from the block's child ids (no live name to read back)
+        if type(rn.mids) == "table" and #rn.mids == 1 then return { machine_id = rn.mids[1] } end
+        if type(rn.mids) == "table" and #rn.mids > 1 then return nil, #rn.mids .. " child machines for elevator block" end
+        return nil, L.DOCK_NOT_YET
+    end
     local FN = L.mscore and L.mscore.factory_native
     if not (FN and FN.read_docks) then return nil, "dock names need MSCore >= 0.8.3" end
     local rows, err = FN.read_docks(station)
