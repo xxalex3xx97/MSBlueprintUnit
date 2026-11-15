@@ -18,12 +18,6 @@ MODS_ROOT = os.environ.get('MS_MODS_ROOT', 'F:/MSDemoMods')  # repo root, holds 
 S = MODS_ROOT + '/legacy/MainSequence/Content/Data/DAT_BuildingBlockRegistry'
 BLK = '/Game/Blueprints/BuildingBlocks/'
 
-# vanilla layout (positions in the .uasset header)
-NN, NO, IC, IO, EO = 251, 277, 245, 10686, 18526   # name count/offset, import count/offset, export offset
-PLO, PLC = 18630, 83                              # preload dependency offset/count
-VANILLA_EXPORT_SIZE = 746                         # export 0 SerialSize before array growth
-VANILLA_ARRAY = 19                                # Functional Blocks element count
-VANILLA_HEADER = 19021                            # = vanilla TotalHeaderSize = uexp start
 
 # entries: 0 = old bench (kept for old saves), 1 = Mining Unit, 2 = Blueprint Unit
 ENT = [(BLK + 'BPO_MiningBenchBlock', 'BPO_MiningBenchBlock_C'),
@@ -35,6 +29,19 @@ ents = ENT[:K]
 
 a = open(S + '.uasset', 'rb').read()
 e = open(S + '.uexp', 'rb').read()
+
+# vanilla layout, parsed from the header (fixed positions; asserted below)
+u32 = lambda b, q: struct.unpack_from('<i', b, q)[0]
+NN, NO, IC, IO, EO = u32(a, 97), u32(a, 101), u32(a, 129), u32(a, 133), u32(a, 125)   # name count/offset, import count/offset, export offset
+PLO, PLC = u32(a, 257), u32(a, 253)               # preload dependency offset/count
+VANILLA_HEADER = u32(a, 44)                       # = vanilla TotalHeaderSize = uexp start
+VANILLA_BULK = u32(a, 237)                        # BulkDataStart
+assert u32(a, 121) == 1 and VANILLA_HEADER == len(a) and IO + 32 * IC == EO and EO + 104 == PLO
+VANILLA_EXPORT_SIZE = struct.unpack_from('<q', a, EO + 28)[0]   # export 0 SerialSize before array growth
+SB = u32(a, EO + 84)                              # SerializationBefore dep count (vanilla)
+KA = e.index(b'Functional Blocks\0') + len(b'Functional Blocks\0')
+VANILLA_ARRAY = u32(e, KA)                        # Functional Blocks element count
+assert VANILLA_BULK == VANILLA_HEADER + VANILLA_EXPORT_SIZE
 
 # read vanilla name table
 names = []
@@ -58,7 +65,7 @@ imp = b''
 for j in range(K):
     imp += struct.pack('<8i', ix('/Script/CoreUObject'), 0, ix('Package'), 0, 0, NN + 2 * j, 0, 0)
     imp += struct.pack('<8i', ix('/Script/Engine'), 0, ix('BlueprintGeneratedClass'), 0, -(IC + 2 * j + 1), NN + 2 * j + 1, 0, 0)
-P3 = PLO + 4 * 81                                 # end of export 0 serialization-before deps (81 vanilla), 2 create deps follow
+P3 = PLO + 4 * SB                                 # end of export 0 serialization-before deps (SB vanilla), 2 create deps follow
 pre = b''.join(struct.pack('<i', -(IC + 2 * j + 2)) for j in range(K))
 ins = [(IO, A), (EO, len(imp)), (P3, 4 * K)]
 
@@ -68,13 +75,13 @@ def sh(v):
 
 
 # header: shift known offset values (byte-scan, as the original script did)
-offs = {IO, EO, 18622, 18626, PLO, VANILLA_HEADER, 19767}
+offs = {IO, EO, PLO - 8, PLO - 4, PLO, VANILLA_HEADER, VANILLA_BULK}
 h = bytearray(a[:NO])
 for q in range(44, NO - 3):
     v = struct.unpack_from('<i', h, q)[0]
     if v in offs:
-        # BulkDataStart (19767) = header + export size, so it also grows with the array
-        struct.pack_into('<i', h, q, sh(v) + (4 * len(ARR) if v == 19767 else 0))
+        # BulkDataStart (VANILLA_BULK) = header + export size, so it also grows with the array
+        struct.pack_into('<i', h, q, sh(v) + (4 * len(ARR) if v == VANILLA_BULK else 0))
 
 
 def setat(buf, val, new, after=0):
@@ -85,7 +92,7 @@ def setat(buf, val, new, after=0):
     raise Exception(val)
 
 
-setat(h, NN, NN + 2 * K, 60)       # NameCount (generation NameCount at 185 stays vanilla 251, as in the k=1 build)
+setat(h, NN, NN + 2 * K, 60)       # NameCount (generation NameCount at 185 stays vanilla, as in the k=1 build)
 setat(h, IC, IC + 2 * K, 60)       # ImportCount
 setat(h, PLC, PLC + K, 60)         # PreloadDependencyCount
 h = bytes(h)
@@ -97,15 +104,15 @@ pl = a[PLO:P3]
 pl2 = a[P3:]
 struct.pack_into('<q', ex, 28, VANILLA_EXPORT_SIZE + 4 * len(ARR))   # SerialSize
 struct.pack_into('<q', ex, 36, sh(VANILLA_HEADER))                  # SerialOffset = new header size
-assert struct.unpack_from('<i', ex, 84)[0] == 81                    # SerializationBefore deps count
-struct.pack_into('<i', ex, 84, 81 + K)
+assert struct.unpack_from('<i', ex, 84)[0] == SB                    # SerializationBefore deps count
+struct.pack_into('<i', ex, 84, SB + K)
 out = h + nm + newnames + im + imp + bytes(ex) + pl + pre + pl2
 
-# uexp: Functional Blocks array (count, then refs). New refs go right after the vanilla -80 element.
+# uexp: Functional Blocks array (count, then refs). New refs go right after the vanilla -(SB-1) element.
 u = bytearray(e)
 k0 = e.index(b'Functional Blocks\0') + len(b'Functional Blocks\0')
 assert struct.unpack_from('<i', e, k0)[0] == VANILLA_ARRAY
-w = e.index(struct.pack('<i', -80), k0)
+w = e.index(struct.pack('<i', -(SB - 1)), k0)
 assert w - k0 < 4 + 4 * VANILLA_ARRAY
 u[w + 4:w + 4] = b''.join(struct.pack('<i', -(IC + 2 * j + 2)) for j in ARR)
 struct.pack_into('<i', u, k0, VANILLA_ARRAY + len(ARR))
@@ -156,12 +163,12 @@ def verify(oa, oe):
     ser, off = struct.unpack_from('<q', oa, eo + 28)[0], struct.unpack_from('<q', oa, eo + 36)[0]
     chk('export SerialSize %d == %d' % (ser, VANILLA_EXPORT_SIZE + 4 * len(ARR)), ser == VANILLA_EXPORT_SIZE + 4 * len(ARR))
     chk('export SerialOffset %d == TotalHeaderSize' % off, off == total)
-    chk('export SerializationBefore count == %d' % (81 + K), u32(oa, eo + 84) == 81 + K)
+    chk('export SerializationBefore count == %d' % (SB + K), u32(oa, eo + 84) == SB + K)
     van_pl = [u32(a, PLO + 4 * i) for i in range(PLC)]
     pref = [u32(oa, plo + 4 * i) for i in range(PLC + K)]
-    chk('preload: vanilla 81 refs kept', pref[:81] == van_pl[:81])
-    chk('preload: new refs == %s' % [-(IC + 2 * j + 2) for j in range(K)], pref[81:81 + K] == [-(IC + 2 * j + 2) for j in range(K)])
-    chk('preload: vanilla create refs kept', pref[81 + K:] == van_pl[81:])
+    chk('preload: vanilla %d refs kept' % SB, pref[:SB] == van_pl[:SB])
+    chk('preload: new refs == %s' % [-(IC + 2 * j + 2) for j in range(K)], pref[SB:SB + K] == [-(IC + 2 * j + 2) for j in range(K)])
+    chk('preload: vanilla create refs kept', pref[SB + K:] == van_pl[SB:])
     bulk = u32(oa, 237)
     chk('BulkDataStart %d == TotalHeaderSize + SerialSize %d' % (bulk, total + ser), bulk == total + ser)
     chk('uexp length %d == SerialSize + 4 footer' % len(oe), len(oe) == ser + 4)
