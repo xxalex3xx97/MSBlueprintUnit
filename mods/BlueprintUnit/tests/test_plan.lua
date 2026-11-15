@@ -147,10 +147,16 @@ p, err = P.plan(read("block_off_grid.json"), live(), F)
 check("blocks: refused", p == nil)
 check("blocks: message", err == "These blocks are not on the station grid: Station 1x1 at (2, 0), level 0. Fix them in the blueprint or tick Station Build.")
 
--- hidden Teleporter never placed (skipped with note)
+-- Teleporter is placed like any machine (4x4 footprint, MSCore's 1x1 guess corrected)
 p = plan_of("teleporter.json")
-check("teleporter: only the belt placed", p and p.counts.place == 1 and p.place[1].bcls == "BP_ConveyorBeltObject")
-check("teleporter: note", p and #p.notes >= 1 and p.notes[1]:find("Teleporter", 1, true) ~= nil)
+local tele_placed = false
+for _, m in ipairs(p and p.place or {}) do if m.bcls == "BP_TeleporterObject" then tele_placed = true end end
+check("teleporter: placed with the belt", p and p.counts.place == 2 and tele_placed)
+check("teleporter: no skip note", p and #p.notes == 0)
+local pt = P.plan((read("teleporter.json"):gsub('"DefaultName":"DAT_Teleporter"', '"DefaultName":"DAT_Teleporter","Name":"Hub"')), live({}), F)
+local tcfg
+for _, m in ipairs(pt and pt.place or {}) do if m.bcls == "BP_TeleporterObject" then tcfg = m.cfg end end
+check("teleporter: Name written as FText config", tcfg == P.encode_named("Hub"))
 
 -- bad height refused, nothing planned
 p, err = P.plan(read("bad_height.json"), live(), F)

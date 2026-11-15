@@ -589,16 +589,11 @@ local function build(text, live, F, opts)
 
     local doc = parse_doc(text)
 
-    -- hidden Teleporter never places (brief); skipped with a note
-    local machines = {}
-    for _, m in ipairs(doc.machines) do
-        if m.cls:find("Teleporter", 1, true) or (m.dat and m.dat:find("Teleporter", 1, true)) then
-            notes[#notes + 1] = "skipped (Teleporter is never placed): " .. m.cls .. "@(" .. m.x .. "," .. m.y .. ")"
-            if m.name then name_skipped = name_skipped + 1 end
-        else
-            machines[#machines + 1] = m
-        end
+    -- Teleporter: placed like any machine (full game; the demo has none). MSCore's table holds a 1x1 guess: decoded MachineDimensions are 4x4.
+    if type(F.tables.DAT_Teleporter) == "table" and F.tables.DAT_Teleporter.w == 1 and F.tables.DAT_Teleporter.h == 1 then
+        F.tables.DAT_Teleporter.w, F.tables.DAT_Teleporter.h = 4, 4
     end
+    local machines = doc.machines
 
     -- Blocks must be on the live station Blueprint. Station Build (opts.station_build): missing blocks are classified and
     -- placed by plan_blocks instead of refused here
@@ -662,7 +657,7 @@ local function build(text, live, F, opts)
     local resolved = {}
     for i, m in ipairs(machines) do
         if type(m) ~= "table" then error(("plan: machine %d is a %s (%s)"):format(i, type(m), tostring(m))) end
-        if not m.dat then m.dat = dat_for_cls(m.cls) end
+        if not m.dat then m.dat = (buildables[m.cls] and m.cls) or dat_for_cls(m.cls) end   -- site JSON Class can be the DAT id itself (Teleporter)
         if not m.dat then
             notes[#notes + 1] = "skipped (block-built, no Buildable): " .. m.cls
             if m.name then name_skipped = name_skipped + 1 end
@@ -1020,7 +1015,7 @@ local function build(text, live, F, opts)
             renames[#renames + 1] = { cls = m.cls, machine_id = m.id, name = m.name, gx = m.x, gy = m.y, h = m.h }
         elseif m.name and decode_named(m.live) ~= m.name then name_skipped = name_skipped + 1 end
     end
-    if name_skipped > 0 then notes[#notes + 1] = name_skipped .. " elevator/teleporter name(s) not applied (no live machine id; Teleporters are never placed)" end
+    if name_skipped > 0 then notes[#notes + 1] = name_skipped .. " elevator/teleporter name(s) not applied (no live machine id)" end
 
     -- removals: conflicts (same layer overlap with new machines, kept ones excluded) + stale (existing the blueprint no longer has)
     local newall = {}
