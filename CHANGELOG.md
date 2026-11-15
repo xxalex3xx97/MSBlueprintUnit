@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-15
+
+### Fixed
+- Game crashed on loading a save after the Nov 13 game update (rebuilt block registry pak).
+
 ## [0.4.0] - 2026-11-12
 
 Requires **MSCore 0.7.6 or newer** (dock names still need 0.8.3).
