@@ -31,4 +31,4 @@ Tools: MS_MODS_ROOT (default F:\MSDemoMods) for legacy/ source and tools\retoc.
 - clone.js Job E: BP_BlueprintUnit.uasset import WBP_StationInventory -> WBP_BPUnitNoWindow00 (same length, ascii+utf16; 3 hits: package path, WBP_StationInventory_C, Default__). Same trick as Mining Unit WBP_Workbench -> WBP_MiningUnt. Lua also closes any live WBP_StationInventory_C 100 ms after open (main.lua closeVanilla).
 
 ## Build needs the CURRENT vanilla
-clone.js reads vanilla from F:\MSDemoMods\legacy (Oct 26, stale); building against it hangs/crashes the game. Set BPU_VANILLA=F:\MSEAroot\legacy before build_pak.ps1; the 8,8 build then matches the released pak byte for byte.
+clone.js reads vanilla from F:\MSDemoMods\legacy (Oct 26, stale); building against it hangs/crashes the game. Set BPU_VANILLA=F:\MSEAroot\legacy before build_pak.ps1; the default build (container 0,0) then matches the released 0.4.2 pak byte for byte.
