@@ -151,9 +151,22 @@ p = plan_of("teleporter.json")
 check("teleporter: only the belt placed", p and p.counts.place == 1 and p.place[1].bcls == "BP_ConveyorBeltObject")
 check("teleporter: note", p and #p.notes >= 1 and p.notes[1]:find("Teleporter", 1, true) ~= nil)
 
--- bad height refused, nothing planned
-p, err = P.plan(read("bad_height.json"), live(), F)
-check("bad height: refused", p == nil and err == "machine Height not a multiple of 8: BP_ConveyorBeltObject")
+-- odd machine height (turret machines use 44 / 24) accepted
+p, err = P.plan(read("odd_height.json"), live(), F)
+check("odd machine height: accepted", p ~= nil and p.valid and p.counts.place == 1)
+
+-- two machines on one cell: different Height = no overlap, same Height = overlap refused
+local function two_at(h1, h2)
+    local function belt(h)
+        return '{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":1,"Y":1},"Height":' .. h .. ',"GridRotation":0}}'
+    end
+    return '{"Version":2,"Blocks":[{"Class":"/Game/Blueprints/BuildingBlocks/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}],"DefaultMachines":['
+        .. belt(h1) .. "," .. belt(h2) .. "]}"
+end
+p, err = P.plan(two_at(44, 24), live(), F)
+check("heights 44 and 24 same cell: no overlap", p ~= nil and p.counts.place == 2)
+p, err = P.plan(two_at(44, 44), live(), F)
+check("same height same cell: overlap refused", p == nil and err ~= nil and err:find("overlap", 1, true) ~= nil)
 
 -- summary / removes / cost text helpers on hand-made plans
 check("summary: 7 refund items show 5 + '+2 more'", P.summary({ counts = { place = 0, keep = 0, remove = 3, recipe = 0 },

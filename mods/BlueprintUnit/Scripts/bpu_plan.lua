@@ -333,7 +333,6 @@ local function parse_doc(text)
         local tr = e.Transform
         if type(tr) ~= "table" then bail("bad JSON: machine without Transform: " .. m.cls) end
         m.x, m.y, m.h, m.rot = grid(tr, "machine Transform")
-        if m.h % 8 ~= 0 then bail("machine Height not a multiple of 8: " .. m.cls) end
         if m.rot < 0 or m.rot > 3 then bail("machine GridRotation not 0-3: " .. m.cls) end
         if type(e.Recipe) == "string" and e.Recipe ~= "" then m.recipe = e.Recipe end
         if e.Ports ~= nil then
