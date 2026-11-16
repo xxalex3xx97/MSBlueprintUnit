@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-16
+
+### Fixed
+- The hidden container of the Blueprint Unit sits at the block centre (was in the corner), so its collision box no longer blocks a corner.
+- Container ports no longer show a glow and cannot be edited (the hide step used the wrong actor class).
+
+### Notes
+- Units placed before 0.4.2 keep the old container position (saved with the block). Dismantle (empty the unit first) and rebuild it to get the centred container.
+
 ## [0.4.1] - 2026-11-15
 
 ### Fixed
