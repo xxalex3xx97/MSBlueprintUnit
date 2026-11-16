@@ -3,14 +3,14 @@
 # DefaultMachines is a separate property = unversioned-header index 24, absent in BPO_CommandModule. So the export 1 header
 # gains idx 24 (uexp 116-117 `07 02` -> `02 02 04 02`) and its 22-byte value goes right before idx 29's value.
 # Element now = count | 80 09 0c | class | 80 07 06 (Transform, mask 06 = Height+Rotation omitted) | X i32 | Y i32 (22 bytes).
-# X, Y = machine units relative to block origin (env BPU_MX / BPU_MY, default 8, 8).
+# X, Y = machine units relative to block origin (env BPU_MX / BPU_MY, default 0, 0 = block centre).
 # Patches the .uasset/.uexp in place.
 # Usage: python -I patch_bpo_machine.py <DIR with BPO_BlueprintUnit.uasset/.uexp> <CLASS PACKAGE> <CLASS NAME>
 #        python -I patch_bpo_machine.py --walk <base path without ext>   (print CONNECTOR array walk only)
 #   vanilla container: <CLASS PACKAGE>=/Game/Blueprints/Machines/BP_ContainerObject_2  <CLASS NAME>=BP_ContainerObject_2_C
 #   clone container:   <CLASS PACKAGE>=/Game/Blueprints/Machines/BP_BPUnitStoreObj_01  <CLASS NAME>=BP_BPUnitStoreObj_01_C
 # Layout is parsed and asserted, not hardcoded. verify() re-parses the output bytes before anything is written.
-# ponytail: X,Y tuned by live test only (8,8 primary; fallbacks 8,10 / 10,10 / 16,16). Scale assumed, not verified.
+# ponytail: X,Y tuned by live test only (0,0 primary; fallbacks -2,-2 / 2,2). Scale assumed, not verified.
 import struct
 import sys
 import os
@@ -23,7 +23,7 @@ HDR = 104            # uexp offset of export 1 unversioned property header
 HDR_VANILLA = bytes.fromhex('00 0c 01 02 02 04 02 04 01 02 02 04 07 02 07 03')
 HDR_IDX = [0, 1, 2, 3, 4, 5, 7, 10, 11, 14, 15, 17, 20, 21, 29, 37]
 IDX_DM = 24          # unversioned property index of DefaultMachines
-MX, MY = int(os.environ.get('BPU_MX', 8)), int(os.environ.get('BPU_MY', 8))   # machine position (int32 each)
+MX, MY = int(os.environ.get('BPU_MX', 0)), int(os.environ.get('BPU_MY', 0))   # machine position (int32 each)
 HDR_NEW = bytes.fromhex('02 02 04 02')   # replaces vanilla '07 02' at HDR+12: skip 2 -> idx 24, skip 4 -> idx 29
 GROW = 24            # export 1 SerialSize growth: 2 header bytes + 22 value bytes
 GROW_HDR = 2         # the header bytes shift everything after uexp 118 (connector array 374 -> 376, its end 404 -> 406)

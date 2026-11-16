@@ -435,10 +435,10 @@ end
 
 -- ---------------------------------------------------------------------------------------------
 -- Crate hide. Our container = sim BP_BPUnitStoreObj_01_C, ParentID = unit block ID or frame ID.
--- Its actor = BP_Container_2_C with BPC_MachineInteraction.MachineObject == that sim (match by ID, class checked).
+-- Its actor = BP_BPUnitSto_2_C with BPC_MachineInteraction.MachineObject == that sim (match by ID, class checked).
 -- Exactly one link -> hide actor + its interaction (no collision, hidden). Anything else: log once, hide nothing.
 -- ---------------------------------------------------------------------------------------------
-local CRATE_SIM, CRATE_ACT = "BP_BPUnitStoreObj_01_C", "BP_Container_2_C"
+local CRATE_SIM, CRATE_ACT = "BP_BPUnitStoreObj_01_C", "BP_BPUnitSto_2_C"
 local crateDone, crateLogged = {}, {}   -- crateDone[simID|actor name] = true once hidden
 -- sim IDs of unit blocks and their frames (block arg optional; every BPO_BlueprintUnit_C in the world is added)
 local function unitIds(block)
@@ -454,7 +454,7 @@ local function unitIds(block)
   if s and type(list) == "table" then for _, b in ipairs(list) do add(b) end end
   return set
 end
--- BP_Container_2_C actors whose MachineObject is this sim (ID equal, class BP_BPUnitStoreObj_01_C)
+-- BP_BPUnitSto_2_C actors whose MachineObject is this sim (ID equal, class BP_BPUnitStoreObj_01_C)
 local function linkedActors(sid)
   local hits = {}
   local s, list = pcall(FindAllOf, CRATE_ACT)
