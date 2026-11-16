@@ -865,7 +865,12 @@ local function build(text, live, F, opts)
         for j = i + 1, #order do
             local b = order[j]
             if b.x - b.w >= a_right then break end
-            if (placed[a] or placed[b]) and a.h == b.h and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+            if (placed[a] or placed[b]) and a.h == b.h and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then
+                -- ponytail: virtual exit cell of one tunnel on the entrance of another is allowed (game registers only entrances); unverified visually in game
+                local ug_cross = (cell_of[a] ~= nil) ~= (cell_of[b] ~= nil)
+                    and tostring(a.dat):find("UndergroundBelt", 1, true) and tostring(b.dat):find("UndergroundBelt", 1, true)
+                if not ug_cross then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+            end
         end
     end
 

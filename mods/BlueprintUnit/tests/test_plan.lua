@@ -384,6 +384,20 @@ do
     check("off-floor ug: placed note", nu)
 end
 
+-- virtual exit cell of tunnel 1 on the entrance of tunnel 2 (rot1): allowed; a real belt there still overlaps
+do
+    local function ugm(x, rot, hex)
+        return '{"Class":"BP_UndergroundBeltObject_2","DefaultName":"DAT_UndergroundBelt_2",' .. (hex and ('"ConfigHex":"' .. hex .. '",') or '') ..
+            '"Transform":{"GridLocation":{"X":' .. x .. ',"Y":1},"Height":0,"GridRotation":' .. rot .. '}}'
+    end
+    local base = '{"Version":2,"Blocks":[],"DefaultMachines":[' .. ugm(-7, 0) .. ',' .. ugm(-3, 0) .. ','
+    local pc, ec = P.plan(base .. ugm(-3, 1, "010003000000") .. ']}', live(), F)
+    check("ug cross: plan ok", pc ~= nil and ec == nil)
+    check("ug cross: placed 2, 1 exit cell", pc and pc.counts.place == 2 and #pc.cells == 1)
+    local pn, en = P.plan(base .. '{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":-3,"Y":1},"Height":0,"GridRotation":1}}]}', live(), F)
+    check("ug cross: real belt on exit cell still overlaps", pn == nil and en and en:find("overlap", 1, true) ~= nil)
+end
+
 -- negative ids (bpu_live overlay, not in the game view yet): never removed, never stale
 p = plan_of("empty.json", { existing = { ex(-1, "BP_ConveyorBeltObject", "DAT_ConveyorBelt", 5, 5) } })
 check("virtual stale: not removed, not in stale_ids", p and p.counts.remove == 0 and #p.removed == 0 and #p.stale_ids == 0)
