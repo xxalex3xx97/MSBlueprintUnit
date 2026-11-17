@@ -2655,6 +2655,39 @@ do
     check(st.state == "done" and #calls == 1 and st.text:find("renamed 1 dock(s)", 1, true) ~= nil, "dock names: normal path sends the live renames once (" .. st.text .. ")")
 end
 
+-- dock filters: send_filters called on the live records, counts in the status; missing io.send_filters does not throw
+do
+    local f = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    local fcalls = {}
+    f.io.send_renames = function() return 0, 0 end
+    f.io.send_filters = function(list) fcalls[#fcalls + 1] = #list; return 2, 1, "dock not found" end
+    local b = B.new(f.io)
+    local p = plan_for(f, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p.renames = { { cls = "BPO_IndustrialDock", gx = 0, gy = 0, h = 0, filters = { { index = 0, item = "iron", loading = 0 } }, id = 77 } }
+    b:start(p, {})
+    local st = run(b, f)
+    check(st.state == "done" and #fcalls == 1 and st.text:find("dock filters 2", 1, true) ~= nil
+        and st.text:find("1 dock filter(s) not applied: dock not found", 1, true) ~= nil, "dock filters: sent once, counts in status (" .. st.text .. ")")
+    local f2 = fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
+    f2.io.send_renames = function() return 0, 0 end
+    local b2 = B.new(f2.io)
+    local p2 = plan_for(f2, { place = { M("BP_A", 0, 0, { ITEM_Plate = 1 }) }, need = { ITEM_Plate = 1 } })
+    p2.renames = { { cls = "BPO_IndustrialDock", gx = 0, gy = 0, h = 0, filters = { { index = 0, item = "iron", loading = 0 } }, id = 77 } }
+    b2:start(p2, {})
+    local st2 = run(b2, f2)
+    check(st2.state == "done" and st2.text:find("dock filter", 1, true) == nil, "dock filters: no io.send_filters -> no throw, no text (" .. st2.text .. ")")
+    local f3 = fake({ player = inv({}, 2), unit = inv({}, 2) })
+    local n3 = 0
+    f3.io.send_renames = function() return 0, 0 end
+    f3.io.send_filters = function() n3 = n3 + 1; return 1, 0 end
+    local b3 = B.new(f3.io)
+    local p3 = plan_for(f3, {})
+    p3.renames = { { cls = "BPO_IndustrialDock", gx = 0, gy = 0, h = 0, filters = { { index = 0, item = "iron", loading = 0 } }, id = 77 } }
+    local ok3, msg3 = b3:start(p3, {})
+    check(ok3 and msg3 == "ok dock names" and n3 == 1 and b3:status().text:find("dock filters 1", 1, true) ~= nil,
+        "dock filters only: sent and finished with filter text (" .. tostring(b3:status().text) .. ")")
+end
+
 -- fractional ms clock (io.now is a float ms clock): the station-block trace used %d on now - t_blocks and raised, aborting the tick
 do
     local f = dock_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2), dock_after = 1000, block_delay = 1000 })

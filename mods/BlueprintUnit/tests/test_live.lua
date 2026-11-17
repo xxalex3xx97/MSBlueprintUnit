@@ -713,6 +713,25 @@ do
     Live.mscore = { factory_native = { read_docks = function() return rows end, rename_dock = FNR.rename_dock } }
     local o6, f6, w6 = ioR.send_renames({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "New", mids = { 999 } } })
     check(o6 == 0 and f6 == 1 and w6 == "dock not found", "send_renames: no dock yet -> not applied, reason 'dock not found'")
+    -- dock filters: FN.set_dock_filter(machine_id, index0, item, loading); missing native -> message
+    local fmade = {}
+    Live.mscore = { factory_native = { read_docks = function() return rows end,
+        set_dock_filter = function(mid, i, item, l) fmade[#fmade + 1] = { mid, i, item, l }; return true end } }
+    local fl = { { index = 0, item = "waterice", loading = 0 }, { index = 1, item = "iron", loading = 1 } }
+    local okf, ff = ioR.send_filters({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, filters = fl, mids = { 555 } } })
+    check(okf == 2 and ff == 0 and #fmade == 2 and fmade[1][1] == 555 and fmade[1][2] == 0 and fmade[1][3] == "waterice" and fmade[2][4] == 1,
+        "send_filters: set_dock_filter per filter on the dock machine")
+    local ok7, f7, w7 = ioR.send_filters({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, filters = fl, mids = { 999 } } })
+    check(ok7 == 0 and f7 == 1 and w7 == "dock not found" and #fmade == 2, "send_filters: no dock yet -> 1 not applied, nothing sent")
+    local ok8 = ioR.send_filters({ { cls = "BPO_StationBlockDock", gx = 0, gy = 0, h = 0, name = "N", mids = { 555 } } })
+    check(ok8 == 0 and #fmade == 2, "send_filters: record without filters -> skipped")
+    Live.mscore = { factory_native = { read_docks = function() return rows end } }
+    local ok9, r9 = Live.send_filter(ctlR, 555, 0, "iron", 0)
+    check(ok9 == false and r9 == "dock filters need the MSCore build with native set_dock_filter", "send_filter: missing native -> refused with message")
+    Live.mscore = { factory_native = { set_dock_filter = function() return nil, "bad item" end } }
+    local ok10, r10 = Live.send_filter(ctlR, 555, 0, "zzz", 0)
+    check(ok10 == false and r10 == "bad item", "send_filter: nil,reason -> not applied with reason")
+    Live.mscore = { factory_native = { read_docks = function() return rows end, rename_dock = FNR.rename_dock } }
     -- io.dock_found: found / not found yet (keep polling) / permanent reason (fail at once)
     local fd, fdw = ioR.dock_found(rnM)
     check(fd == true and fdw == nil, "dock_found: dock shows -> true")

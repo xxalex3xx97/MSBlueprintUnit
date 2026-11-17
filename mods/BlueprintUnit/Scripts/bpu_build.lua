@@ -357,7 +357,7 @@ local function new_run(plan)
         stage_rounds = 0, overlap = false,
         t_next = 0, t_start = 0, t_stage = 0, alive_sig = nil, t_alive = 0,
         unit_inv = 0, player_inv = 0, creative = false, chg_sent = false, chg_failed = 0,
-        ren_ok = 0, ren_failed = 0, ren_why = nil, bren = {},   -- dock names: renamed, not applied, first reason; pending Station Build names
+        ren_ok = 0, ren_failed = 0, ren_why = nil, flt_ok = 0, flt_failed = 0, flt_why = nil, bren = {},   -- dock names: renamed, not applied, first reason; pending Station Build names
         rem_list = {}, rem_pos = 1, batch_refund = {}, batch_set = {}, t_removed = 0, removal_confirmed = false,
         drain = {}, costs = {}, emp = nil,   -- rem_list = { {id, bcls, refund = cost map} } in removal order; batch = rem_pos..last sent
         chunk_from = 1, chunk_to = 1, counted_from = nil, chunks = 0, chunks_done = 0,
@@ -477,6 +477,23 @@ function B.new(io)
         if nf > 0 and why ~= nil then R.ren_why = R.ren_why or tostring(why) end
     end
 
+    -- dock filter counts from io.send_filters: set, not applied, first reason (a nil count is 0)
+    local function flt_count(okn, failn, why)
+        local nf = tonumber(failn) or 0
+        R.flt_ok = R.flt_ok + (tonumber(okn) or 0)
+        R.flt_failed = R.flt_failed + nf
+        if nf > 0 and why ~= nil then R.flt_why = R.flt_why or tostring(why) end
+    end
+    -- send the filters of a list of dock records (pcall; a missing io.send_filters or no filters = nothing)
+    local function send_filters(list)
+        if not (io.send_filters and list) then return end
+        local any = false
+        for _, rn in ipairs(list) do if rn.filters then any = true end end
+        if not any then return end
+        local okf, a, b, c = pcall(io.send_filters, list)
+        if okf then flt_count(a, b, c) else flt_count(0, #list, a) end
+    end
+
     local function send_changes_once()
         if not R.chg_sent then
             local _, failc = io.send_changes(R.plan.chg)
@@ -486,6 +503,7 @@ function B.new(io)
                 local okr, a, b, c = pcall(io.send_renames, R.plan.renames)
                 if okr then ren_count(a, b, c) else ren_count(0, #R.plan.renames, a) end
             end
+            send_filters(R.plan.renames)
             R.chg_sent = true
         end
     end
@@ -500,7 +518,7 @@ function B.new(io)
         for _, rn in ipairs(R.plan.block_renames or {}) do
             local lb = byk[rn.bcls .. "|" .. rn.gx .. "|" .. rn.gy .. "|" .. rn.h]
             if lb then
-                R.bren[#R.bren + 1] = { bcls = rn.bcls, cls = rn.cls, gx = rn.gx, gy = rn.gy, h = rn.h, name = rn.name, id = lb.id, mids = lb.mids, t0 = now }
+                R.bren[#R.bren + 1] = { bcls = rn.bcls, cls = rn.cls, gx = rn.gx, gy = rn.gy, h = rn.h, name = rn.name, filters = rn.filters, id = lb.id, mids = lb.mids, t0 = now }
             else
                 ren_count(0, 1, "dock not found")
             end
@@ -515,6 +533,11 @@ function B.new(io)
         if (R.ren_failed or 0) > 0 then
             s = s .. ("; %d dock name(s) not applied"):format(R.ren_failed)
             if R.ren_why then s = s .. ": " .. R.ren_why end
+        end
+        if (R.flt_ok or 0) > 0 then s = s .. ("; dock filters %d"):format(R.flt_ok) end
+        if (R.flt_failed or 0) > 0 then
+            s = s .. ("; %d dock filter(s) not applied"):format(R.flt_failed)
+            if R.flt_why then s = s .. ": " .. R.flt_why end
         end
         return s
     end
@@ -1671,6 +1694,7 @@ function B.new(io)
             if found then
                 local okp, okn, failn, whyn = pcall(io.send_renames, { rn })
                 if okp then ren_count(okn, failn, whyn) else ren_count(0, 1, okn) end
+                send_filters({ rn })
             elseif why and why ~= DOCK_NOT_YET and why:find(DOCK_NOIDS, 1, true) ~= 1 then
                 ren_count(0, 1, why)
                 trace(("dock name %s at %s,%s: %s"):format(rn.name, tostring(rn.gx), tostring(rn.gy), why))
@@ -1840,12 +1864,18 @@ function B.new(io)
                 local okr, nok, nf, why = pcall(io.send_renames, P.renames)
                 if not okr then nok, nf, why = 0, #P.renames, nok end
                 nok, nf = tonumber(nok) or 0, tonumber(nf) or 0
+                send_filters(P.renames)
                 R.state = "done"
                 if nok == 0 and nf == 0 then
                     R.text = "dock names already set"
                 else
                     R.text = ("dock names: renamed %d, %d not applied"):format(nok, nf)
                     if nf > 0 and why ~= nil then R.text = R.text .. ": " .. tostring(why) end
+                end
+                if R.flt_ok > 0 then R.text = R.text .. ("; dock filters %d"):format(R.flt_ok) end
+                if R.flt_failed > 0 then
+                    R.text = R.text .. ("; %d dock filter(s) not applied"):format(R.flt_failed)
+                    if R.flt_why then R.text = R.text .. ": " .. R.flt_why end
                 end
                 release_redirect()
                 return true, "ok dock names"

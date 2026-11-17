@@ -695,6 +695,17 @@ function L.send_rename(ctl, mid, text)
     return false, tostring(b or "rename_dock failed")
 end
 
+-- set one dock item filter through MSCore's native (factory_native.set_dock_filter(machine_id, index0, item, loading) -> true | nil, reason).
+function L.send_filter(ctl, mid, index, item, loading)
+    local FN = L.mscore and L.mscore.factory_native
+    if not (FN and FN.set_dock_filter) then return false, "dock filters need the MSCore build with native set_dock_filter" end
+    local okc, a, b = pcall(FN.set_dock_filter, mid, index, item, loading)
+    TRACE(("set_dock_filter receiver=%s index=%s item=%s loading=%s -> ok=%s ret=%s reason=%s"):format(tostring(mid), tostring(index), tostring(item), tostring(loading), tostring(okc), tostring(a), tostring(b)))
+    if not okc then return false, tostring(a) end
+    if a then return true end
+    return false, tostring(b or "set_dock_filter failed")
+end
+
 -- pin the modification cost in the game's own HUD: SetPinnedCostInput.CreateInputSetPinnedCost(ItemStack[]) -> ctl:AddInputCommand(player.ID, cmd).
 -- stacks = { {name="ITEM_x", n=amount}, ... }; {} = unpin. Returns ok, err|ret. Every call is traced (UNKNOWNs settle from the trace).
 function L.send_pin(ctl, player, stacks)
@@ -892,11 +903,14 @@ function L.make_io(ctx)
         local okn, failn, why = 0, 0, nil
         local sent = {}
         for _, rn in ipairs(list or {}) do
-            local okd, d, err = pcall(L.dock_for, U.station, rn)
+            local okd, d, err = true, nil, nil
+            if rn.name then okd, d, err = pcall(L.dock_for, U.station, rn) end
             if not okd then d, err = nil, tostring(d) end
             if err == L.DOCK_NOT_YET then err = "dock not found" end
             local mid = d and d.machine_id
-            if not d or mid == nil then
+            if not rn.name then
+                -- filters-only record: handled by io.send_filters
+            elseif not d or mid == nil then
                 failn = failn + 1; why = why or err or "dock machine id not readable"
             elseif sent[mid] or not Plan.rename_due(rn.name, d.name) then
                 -- already has this name, or sent in this run: nothing to do
@@ -907,6 +921,31 @@ function L.make_io(ctx)
             end
         end
         print(("[BPUnit] dock names: %d renamed, %d not applied"):format(okn, failn))
+        return okn, failn, why
+    end
+    -- Dock filters (Blocks[].Filters): every filter of every record that has any is set on its dock child, same lookup as the names.
+    -- Returns set, not applied (counts), first reason. A dock that is not found counts one failure.
+    function io.send_filters(list)
+        local okn, failn, why = 0, 0, nil
+        local sent = {}
+        for _, rn in ipairs(list or {}) do
+            if rn.filters and #rn.filters > 0 then
+                local okd, d, err = pcall(L.dock_for, U.station, rn)
+                if not okd then d, err = nil, tostring(d) end
+                if err == L.DOCK_NOT_YET then err = "dock not found" end
+                local mid = d and d.machine_id
+                if not d or mid == nil then
+                    failn = failn + 1; why = why or err or "dock machine id not readable"
+                elseif not sent[mid] then
+                    sent[mid] = true
+                    for _, f in ipairs(rn.filters) do
+                        local oks, r = L.send_filter(ctx.ctl, mid, f.index, f.item, f.loading)
+                        if oks then okn = okn + 1 else failn = failn + 1; why = why or tostring(r) end
+                    end
+                end
+            end
+        end
+        print(("[BPUnit] dock filters: %d set, %d not applied"):format(okn, failn))
         return okn, failn, why
     end
     -- Station Build dock names: true when the dock child for rn shows in the fresh read (no rename, no count).
