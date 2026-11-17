@@ -190,6 +190,12 @@ local function kn(v)
     return tostring(v)
 end
 
+-- game layer of a Height (mscore M.layer): h // 8. Machines on the same layer share a floor; heights need not be multiples of 8
+local function layer(h)
+    if type(h) ~= "number" then return h end
+    return math.floor(h / 8)
+end
+
 local function is_container(bcls)
     return tostring(bcls or ""):find("Container", 1, true) ~= nil
 end
@@ -343,7 +349,6 @@ local function parse_doc(text)
         local tr = e.Transform
         if type(tr) ~= "table" then bail("bad JSON: machine without Transform: " .. m.cls) end
         m.x, m.y, m.h, m.rot = grid(tr, "machine Transform")
-        if m.h % 8 ~= 0 then bail("machine Height not a multiple of 8: " .. m.cls) end
         if m.rot < 0 or m.rot > 3 then bail("machine GridRotation not 0-3: " .. m.cls) end
         if type(e.Recipe) == "string" and e.Recipe ~= "" then m.recipe = e.Recipe end
         if e.Ports ~= nil then
@@ -682,7 +687,7 @@ local function build(text, live, F, opts)
                 return rot >= 2 and -f or f
             end
             table.sort(v, function(a, b)   -- stable: index breaks ties
-                if machines[a].h ~= machines[b].h then return machines[a].h < machines[b].h end   -- floors never pair across
+                if layer(machines[a].h) ~= layer(machines[b].h) then return layer(machines[a].h) < layer(machines[b].h) end   -- floors never pair across
                 if line(a) ~= line(b) then return line(a) < line(b) end
                 if flow(a) ~= flow(b) then return flow(a) < flow(b) end
                 return a < b
@@ -691,7 +696,7 @@ local function build(text, live, F, opts)
             for k = 1, #v do
                 if not used[k] then
                     for q = k + 1, #v do
-                        if line(v[q]) ~= line(v[k]) or machines[v[q]].h ~= machines[v[k]].h then break end
+                        if line(v[q]) ~= line(v[k]) or layer(machines[v[q]].h) ~= layer(machines[v[k]].h) then break end
                         if not used[q] then
                             local d = flow(v[q]) - flow(v[k])
                             if d < 2 or d % 2 ~= 0 then break end   -- off-grid or same cell: no pair
@@ -884,7 +889,12 @@ local function build(text, live, F, opts)
         for j = i + 1, #order do
             local b = order[j]
             if b.x - b.w >= a_right then break end
-            if (placed[a] or placed[b]) and a.h == b.h and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+            if (placed[a] or placed[b]) and layer(a.h) == layer(b.h) and overlap(a.x, a.y, a.w, a.hh, b.x, b.y, b.w, b.hh) then
+                -- ponytail: virtual exit cell of one tunnel on the entrance of another is allowed (game registers only entrances); unverified visually in game
+                local ug_cross = (cell_of[a] ~= nil) ~= (cell_of[b] ~= nil)
+                    and tostring(a.dat):find("UndergroundBelt", 1, true) and tostring(b.dat):find("UndergroundBelt", 1, true)
+                if not ug_cross then bail("overlap: " .. where(a) .. " and " .. where(b)) end
+            end
         end
     end
 
@@ -941,15 +951,15 @@ local function build(text, live, F, opts)
     for _, m in ipairs(cells) do newall[#newall + 1] = m end
     local byh = {}   -- newall grouped by h once (same order as newall)
     for _, m in ipairs(newall) do
-        local key = kn(m.h)
+        local key = kn(layer(m.h))
         byh[key] = byh[key] or {}
         table.insert(byh[key], m)
     end
     local hits = {}
     for k, e in ipairs(existing) do
         local ew, eh = footprint_of(F, e)
-        for _, m in ipairs(byh[kn(e.h)] or {}) do
-            if m.h == e.h and overlap(m.x, m.y, m.w, m.hh, e.x, e.y, ew, eh) then
+        for _, m in ipairs(byh[kn(layer(e.h))] or {}) do
+            if layer(m.h) == layer(e.h) and overlap(m.x, m.y, m.w, m.hh, e.x, e.y, ew, eh) then
                 hits[#hits + 1] = k
                 break
             end

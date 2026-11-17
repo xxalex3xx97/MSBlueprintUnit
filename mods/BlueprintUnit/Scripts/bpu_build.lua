@@ -1931,6 +1931,11 @@ function B.new(io)
             release_redirect()   -- safety net: no build running but the redirect is still ours
             return
         end
+        -- MSCore switches the redirect off by itself 10 s after the last enable: renew while this run is active (a missed release can never leave it on)
+        if R.redirect_ours and now - (R.redir_renew or 0) > 4000 then
+            R.redir_renew = now
+            pcall(io.redirect_enable, true)
+        end
         if now < R.t_next then return end
         -- whole-run timeout counts from the last progress change (big bases take long), not from the start
         local sg = alive_sig()
