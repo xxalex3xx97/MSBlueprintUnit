@@ -167,6 +167,11 @@ p, err = P.plan(two_at(44, 24), live(), F)
 check("heights 44 and 24 same cell: no overlap", p ~= nil and p.counts.place == 2)
 p, err = P.plan(two_at(44, 44), live(), F)
 check("same height same cell: overlap refused", p == nil and err ~= nil and err:find("overlap", 1, true) ~= nil)
+-- game layer = h // 8: 40 and 44 are both layer 5 (overlap refused); 8 and 16 are layers 1 and 2 (no overlap)
+p, err = P.plan(two_at(40, 44), live(), F)
+check("heights 40 and 44 same cell (layer 5): overlap refused", p == nil and err ~= nil and err:find("overlap", 1, true) ~= nil)
+p, err = P.plan(two_at(8, 16), live(), F)
+check("heights 8 and 16 same cell (layers 1, 2): no overlap", p ~= nil and p.counts.place == 2)
 
 -- summary / removes / cost text helpers on hand-made plans
 check("summary: 7 refund items show 5 + '+2 more'", P.summary({ counts = { place = 0, keep = 0, remove = 3, recipe = 0 },
