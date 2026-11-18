@@ -2,4 +2,4 @@
 -- dock names (Blocks[].Name) need MSCore 0.8.3 (rename_dock, block mids); older MSCore: the names are skipped with a message, the rest works.
 -- dock filters (Blocks[].Filters) need the MSCore build with factory_native.set_dock_filter; without it they are skipped with a message, the rest works.
 -- station_build_min_mscore: Station Build (Chk_StationBuild) needs the MSCore 0.8.0 natives; min_mscore stays 0.7.6 for the rest.
-return { version = "0.4.2", min_mscore = "0.7.6", min_lua_api = 3, station_build_min_mscore = "0.8.0" }
+return { version = "0.4.3", min_mscore = "0.7.6", min_lua_api = 3, station_build_min_mscore = "0.8.0" }
