@@ -554,17 +554,17 @@ do
             return nil, "not found"
         end,
     }
-    Live.mscore = { factory_native = FN }
+    Live.mscore = { class = CLS, factory_native = FN }
     local okc, whyc = Live.station_build_capable()
     check(not okc and whyc == "Station Build needs MSCore 0.8.0 or newer.", "station build: no 0.8.0 natives -> refused")
     local oks, errs = pcall(Live.snapshot, U, F, { station_build = true })
     check(not oks and tostring(errs):find("Station Build needs MSCore 0.8.0 or newer.", 1, true) ~= nil, "station build: snapshot refuses without 0.8.0 natives")
-    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    Live.mscore = { class = CLS, factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
     check(Live.station_build_capable() == true, "station build: 0.8.0 natives present")
     local noRm = { add_block = FN.add_block, pending = FN.pending, read_block_class = FN.read_block_class }
-    Live.mscore = { factory_native = FN, native = noRm }
+    Live.mscore = { class = CLS, factory_native = FN, native = noRm }
     check(Live.station_build_capable() == false, "station build: no remove_block -> refused")
-    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    Live.mscore = { class = CLS, factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
 
     local snap = Live.snapshot(U, F, { station_build = true, player = W.player })
     local info = snap.block_info("BPO_A", "/G/BPO_A.BPO_A_C")
@@ -620,7 +620,7 @@ do
             return nil, "not found"
         end,
         add_block = function() return true end, remove_block = function() return true end, pending = function() return true end }
-    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    Live.mscore = { class = CLS, factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
     local function unl(m)
         mode = m
         return Live.snapshot(U, F, { station_build = true, player = W.player }).block_info("BPO_A", "/G/BPO_A.BPO_A_C")
@@ -689,7 +689,7 @@ do
     local made, sentc = {}, {}
     local FNR = { read_docks = function() return rows end,
         rename_dock = function(mid, text) made[#made + 1] = { mid = mid, text = text }; return true end }
-    Live.mscore = { factory_native = FNR }
+    Live.mscore = { class = CLS, factory_native = FNR }
     local ctlR = { IsValid = alive, AddInputCommand = forbidden("ctl:AddInputCommand"), CreateInputSetText = forbidden("CreateInputSetText") }
     local ioR = Live.make_io({ unit = { station = 42 }, ctl = ctlR, F = F, native = {}, plan_mod = P, buildables = {} })
     local okR, failR = ioR.send_renames({ rn })
