@@ -24,6 +24,7 @@ end
 local world = {}
 function FindAllOf(c) return world[c] end
 function FindFirstOf(c) local l = world[c]; return l and l[1] or nil end
+local CLS = function(k) return ({ station = "StationObject", container = "ContainerObject", container_actor = "BP_Container_2_C" })[k] end
 
 local function alive() return true end
 -- UObject stand-in: class is behind GetClass():GetFName() (as in the game, P0 cls()); there is no Class property.
@@ -44,7 +45,7 @@ local fakeMachines = {
     { id = 11, cls = "BP_Splitter", bcls = "BP_Splitter", x = 3, y = 1, h = 0, rot = 0, cfg = "" },
     { id = 12, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", x = 5, y = 1, h = 0, rot = 0 },
 }
-Live.mscore = { factory_native = { read_station = function(sid)
+Live.mscore = { class = CLS, factory_native = { read_station = function(sid)
     fakeCalls = fakeCalls + 1
     return { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0, bid = -1 } }, fakeMachines
 end,
@@ -764,6 +765,15 @@ do
           "give_creative: known item -> true, 1 call, Item.Item set, Amount 100")
     world.Item = savedItems
     Live.reset()
+end
+
+do
+    local savedMs = Live.mscore
+    Live.mscore = {}
+    local uf, um = Live.find_unit({ IsValid = alive }, nil)
+    check(uf == nil and type(um) == "string" and um:find("needs 0.8.10") ~= nil, "no class fn: find_unit -> nil + needs 0.8.10")
+    check(next(Live.container_invs()) == nil, "no class fn: container_invs -> {}")
+    Live.mscore = savedMs
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, fail))
