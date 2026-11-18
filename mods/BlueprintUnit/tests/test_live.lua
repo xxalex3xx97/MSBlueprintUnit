@@ -24,6 +24,7 @@ end
 local world = {}
 function FindAllOf(c) return world[c] end
 function FindFirstOf(c) local l = world[c]; return l and l[1] or nil end
+local CLS = function(k) return ({ station = "StationObject", container = "ContainerObject", container_actor = "BP_Container_2_C" })[k] end
 
 local function alive() return true end
 -- UObject stand-in: class is behind GetClass():GetFName() (as in the game, P0 cls()); there is no Class property.
@@ -44,7 +45,7 @@ local fakeMachines = {
     { id = 11, cls = "BP_Splitter", bcls = "BP_Splitter", x = 3, y = 1, h = 0, rot = 0, cfg = "" },
     { id = 12, cls = "BP_ConveyorBeltObject", bcls = "BP_ConveyorBeltObject", x = 5, y = 1, h = 0, rot = 0 },
 }
-Live.mscore = { factory_native = { read_station = function(sid)
+Live.mscore = { class = CLS, factory_native = { read_station = function(sid)
     fakeCalls = fakeCalls + 1
     return { { class = "BPO_Station_01", gx = 0, gy = 0, h = 0, rot = 0, bid = -1 } }, fakeMachines
 end,
@@ -553,17 +554,17 @@ do
             return nil, "not found"
         end,
     }
-    Live.mscore = { factory_native = FN }
+    Live.mscore = { class = CLS, factory_native = FN }
     local okc, whyc = Live.station_build_capable()
     check(not okc and whyc == "Station Build needs MSCore 0.8.0 or newer.", "station build: no 0.8.0 natives -> refused")
     local oks, errs = pcall(Live.snapshot, U, F, { station_build = true })
     check(not oks and tostring(errs):find("Station Build needs MSCore 0.8.0 or newer.", 1, true) ~= nil, "station build: snapshot refuses without 0.8.0 natives")
-    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    Live.mscore = { class = CLS, factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
     check(Live.station_build_capable() == true, "station build: 0.8.0 natives present")
     local noRm = { add_block = FN.add_block, pending = FN.pending, read_block_class = FN.read_block_class }
-    Live.mscore = { factory_native = FN, native = noRm }
+    Live.mscore = { class = CLS, factory_native = FN, native = noRm }
     check(Live.station_build_capable() == false, "station build: no remove_block -> refused")
-    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    Live.mscore = { class = CLS, factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
 
     local snap = Live.snapshot(U, F, { station_build = true, player = W.player })
     local info = snap.block_info("BPO_A", "/G/BPO_A.BPO_A_C")
@@ -619,7 +620,7 @@ do
             return nil, "not found"
         end,
         add_block = function() return true end, remove_block = function() return true end, pending = function() return true end }
-    Live.mscore = { factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
+    Live.mscore = { class = CLS, factory_native = FN, native = { add_block = FN.add_block, remove_block = FN.remove_block, pending = FN.pending, read_block_class = FN.read_block_class } }
     local function unl(m)
         mode = m
         return Live.snapshot(U, F, { station_build = true, player = W.player }).block_info("BPO_A", "/G/BPO_A.BPO_A_C")
@@ -688,7 +689,7 @@ do
     local made, sentc = {}, {}
     local FNR = { read_docks = function() return rows end,
         rename_dock = function(mid, text) made[#made + 1] = { mid = mid, text = text }; return true end }
-    Live.mscore = { factory_native = FNR }
+    Live.mscore = { class = CLS, factory_native = FNR }
     local ctlR = { IsValid = alive, AddInputCommand = forbidden("ctl:AddInputCommand"), CreateInputSetText = forbidden("CreateInputSetText") }
     local ioR = Live.make_io({ unit = { station = 42 }, ctl = ctlR, F = F, native = {}, plan_mod = P, buildables = {} })
     local okR, failR = ioR.send_renames({ rn })
@@ -764,6 +765,15 @@ do
           "give_creative: known item -> true, 1 call, Item.Item set, Amount 100")
     world.Item = savedItems
     Live.reset()
+end
+
+do
+    local savedMs = Live.mscore
+    Live.mscore = {}
+    local uf, um = Live.find_unit({ IsValid = alive }, nil)
+    check(uf == nil and type(um) == "string" and um:find("needs 0.8.10") ~= nil, "no class fn: find_unit -> nil + needs 0.8.10")
+    check(next(Live.container_invs()) == nil, "no class fn: container_invs -> {}")
+    Live.mscore = savedMs
 end
 
 print(("RESULT %d passed, %d failed"):format(pass, fail))

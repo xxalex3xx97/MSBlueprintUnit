@@ -7,6 +7,19 @@ local L = {}
 local Blk = require("bpu_blocks")
 L.mscore = nil  -- set by main.lua (the MSCore handle, factory_native.read_station)
 
+-- game class names come from MSCore (class(logical), 0.8.10+). nil = MSCore too old: that lookup is off.
+local warnedOld = false
+local function mscls(k)
+    local M = L.mscore
+    local f = M and M.class
+    if type(f) ~= "function" then
+        if not warnedOld then warnedOld = true; print("[BPU] MSCore too old (needs 0.8.10): container and station lookups are off\n") end
+        return nil
+    end
+    local ok, n = pcall(f, k)
+    return ok and n or nil
+end
+
 -- Trace trail for native crashes: print + append to <mod dir>bpu_trace.log (open/append/flush/close per call).
 local MOD_DIR = (debug.getinfo(1, "S").source:match("^@(.*[/\\])") or "./") .. "../"   -- Mods/BlueprintUnit/, not the process cwd
 local TRACE_PATH = MOD_DIR .. "bpu_trace.log"
@@ -139,7 +152,8 @@ local function idOf(o)
 end
 
 local function find_by_id(sid)
-    for _, s in ipairs(FindAllOf("StationObject") or {}) do
+    local c = mscls("station"); if not c then return nil end
+    for _, s in ipairs(FindAllOf(c) or {}) do
         if valid(s) and nm(s):find("^Default__") == nil and idOf(s) == sid then return s end
     end
     return nil
@@ -164,7 +178,8 @@ function L.find_unit(block, player_hint)
     if not valid(block) then return nil, "no block" end
     local cands = station_ids(block)
     local conts = {}
-    for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
+    local cc = mscls("container"); if not cc then return nil, "MSCore too old (needs 0.8.10)" end
+    for _, c in ipairs(FindAllOf(cc) or {}) do
         if valid(c) and clsname(c) == "BP_BPUnitStoreObj_01" then conts[#conts + 1] = c end
     end
     local tl = { "find_unit block=" .. tostring(idOf(block)) .. " cands=" .. table.concat(cands, ",") .. " nconts=" .. #conts }
@@ -539,7 +554,8 @@ end
 -- Plain UObject reads, like find_unit. Used to size removal batches by container contents.
 function L.container_invs()
     local map = {}
-    for _, c in ipairs(FindAllOf("ContainerObject") or {}) do
+    local cc = mscls("container"); if not cc then return map end
+    for _, c in ipairs(FindAllOf(cc) or {}) do
         if valid(c) and nm(c):find("^Default__") == nil and clsname(c) ~= "BP_BPUnitStoreObj_01" then
             local id = unw(rd(c, "ID"))
             local inv = rd(c, "Inventory")

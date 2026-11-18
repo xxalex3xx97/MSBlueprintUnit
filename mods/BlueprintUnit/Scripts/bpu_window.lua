@@ -435,10 +435,10 @@ end
 
 -- ---------------------------------------------------------------------------------------------
 -- Crate hide. Our container = sim BP_BPUnitStoreObj_01_C, ParentID = unit block ID or frame ID.
--- Its actor = BP_BPUnitSto_2_C with BPC_MachineInteraction.MachineObject == that sim (match by ID, class checked).
+-- Its actor = container actor with BPC_MachineInteraction.MachineObject == that sim (match by ID, class checked).
 -- Exactly one link -> hide actor + its interaction (no collision, hidden). Anything else: log once, hide nothing.
 -- ---------------------------------------------------------------------------------------------
-local CRATE_SIM, CRATE_ACT = "BP_BPUnitStoreObj_01_C", "BP_BPUnitSto_2_C"
+local CRATE_SIM = "BP_BPUnitStoreObj_01_C"
 local crateDone, crateLogged = {}, {}   -- crateDone[simID|actor name] = true once hidden
 -- sim IDs of unit blocks and their frames (block arg optional; every BPO_BlueprintUnit_C in the world is added)
 local function unitIds(block)
@@ -454,10 +454,15 @@ local function unitIds(block)
   if s and type(list) == "table" then for _, b in ipairs(list) do add(b) end end
   return set
 end
--- BP_BPUnitSto_2_C actors whose MachineObject is this sim (ID equal, class BP_BPUnitStoreObj_01_C)
+-- container actors whose MachineObject is this sim (ID equal, class BP_BPUnitStoreObj_01_C)
 local function linkedActors(sid)
   local hits = {}
-  local s, list = pcall(FindAllOf, CRATE_ACT)
+  local actCls = MSCore and type(MSCore.class) == "function" and MSCore.class("container_actor") or nil
+  if not actCls then
+    if not M._crateOld then M._crateOld = true; L("MSCore too old (needs 0.8.10): crate hide is off") end
+    return hits
+  end
+  local s, list = pcall(FindAllOf, actCls)
   for _, a in ipairs((s and type(list) == "table") and list or {}) do
     if ok(a) then
       local comp = rd(a, "BPC_MachineInteraction")
