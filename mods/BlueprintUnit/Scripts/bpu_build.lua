@@ -29,7 +29,7 @@ local TOTAL_MS = 300000   -- whole run
 local function whole(x) return math.floor((tonumber(x) or 0) + 0.5) end
 local BLOCKS_STALL_MS = 30000  -- Station Build: no new block shown for this long -> STALL (never resent)
 local BLOCKS_CAP_MS = 600000   -- Station Build: whole block phase cap
-local BLOCK_BATCH = 100        -- blocks per apply: one apply is all-or-nothing and can land late; batch makes progress visible
+local BLOCK_BATCH = 20       -- blocks per apply: one apply is all-or-nothing and can land late; batch makes progress visible
 local STAGE_MS = 30000    -- staging round stalls after this (no progress)
 local CHARGE_MS = 30000   -- chunk charge (needed before the next chunk only) must show within this
 local REFUND_MAX_MS = 2000   -- removal batch: its refund must show in the player inventory within this, else STALL
