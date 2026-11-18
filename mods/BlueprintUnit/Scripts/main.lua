@@ -39,6 +39,11 @@ print(TAG .. "loaded " .. V.version .. " on MSCore " .. tostring(MSCore.version)
 local BPU = require("bpu_window")
 BPU.init(MSCore)
 require("bpu_live").mscore = MSCore  -- station blocks/machines via factory_native.read_station (0.7.2)
+local WBP = MSCore.wbp
+if not (WBP and type(WBP.widget) == "function") then
+  WBP = nil
+  print(TAG .. "MSCore too old (needs " .. V.widgets_min_mscore .. "): pause-menu close after ESC is off\n")
+end
 
 local function ok(o) if o == nil or type(o) ~= "userdata" then return false end local s, v = pcall(function() return o:IsValid() end) return s and v == true end
 local function nm(o) if not ok(o) then return "?" end local s, v = pcall(function() return o:GetFName():ToString() end) return s and v or "?" end
@@ -76,7 +81,7 @@ local function onOpen(src, self, a1, a2, a3, a4, a5)
       if ok(x) then
         local c = cn(x)
         if not player and c == "DMSPlayerObject" then player = x end
-        if not widget and c:sub(-2) == "_C" and c ~= "WidgetBlueprintGeneratedClass" and nm(x):find("^WBP_") then widget = x end
+        if not widget and WBP and WBP.is_window(x) then widget = x end
       end
     end
     local ctl = (src == "DMSPlayerController:ToggleWidget") and unw(self) or nil
@@ -101,10 +106,9 @@ hookOne("/Script/MainSequence.WidgetSubsystem:ShowWindow", "WidgetSubsystem:Show
 hookOne("/Script/MainSequence.DMSPlayerController:ToggleWidget", "DMSPlayerController:ToggleWidget")
 
 -- ESC close -> the same key press reaches the game's IA_Escape and opens the pause menu.
--- Main path: poll for WBP_PauseMenu_C at 50, 150, 300 ms after our ESC close (the class may not be loaded at startup, so
--- no hook is relied on). Extra path: SetupWidget post-hook, registered at startup or on the next window open.
+-- Main path: poll for the pause menu at 50, 150, 300 ms after our ESC close (the widget may not exist at startup, so
+-- no hook is relied on). Extra path: MSCore WBP.on_open hook, registered at startup or on the next window open.
 -- esc = { t = clock of our ESC close, done = true once the pause menu was closed }; nil = no ESC pending.
-local PAUSE_CLS = "/Game/Blueprints/Widgets/Menus/WBP_PauseMenu.WBP_PauseMenu_C"
 local PAUSE_POLL_MS = { 50, 150, 300 }
 local pauseHooked = false
 local esc = nil
@@ -113,7 +117,7 @@ local LIB = "/Script/UMG.Default__WidgetBlueprintLibrary"
 
 -- explicit input restore (as MSCore.wbp.close teardown). Skipped while a pause menu is still on screen.
 local function restoreInput(label)
-  local pm = FindFirstOf("WBP_PauseMenu_C")
+  local pm = WBP and WBP.instance("pause_menu")
   if ok(pm) then
     local s, inV = pcall(function() return pm:IsInViewport() end)
     if not s or inV == true then print(TAG .. "input restore skipped (" .. label .. "): pause menu still open\n") return end
@@ -140,30 +144,10 @@ local function restoreInput(label)
   print(TAG .. "input restore (" .. label .. "): " .. table.concat(r, " ") .. " paused=" .. tostring(okP and paused or "n/a") .. "\n")
 end
 
--- game's own close first (CloseWidgetOrPause = second ESC press: closes the tracked window or pause menu, restores input).
--- Fallback only when that call is missing/errors: pause widget CloseSelf, then HideWidget. Input restore 150 ms later.
+-- close via MSCore (wbp.close_pause: game's own close first, then fallbacks). Input restore 150 ms later.
 local function closePause(w, label)
-  local pc = FindFirstOf("DMSPlayerController")
-  local how, why = nil, nil
-  if ok(pc) then
-    local s, e = pcall(function() pc:CloseWidgetOrPause() end)
-    if s then how = "CloseWidgetOrPause" else why = "CloseWidgetOrPause err=" .. tostring(e) end
-  else
-    why = "controller invalid"
-  end
-  if not how then
-    if not ok(w) then print(TAG .. "pause menu close: widget invalid (" .. label .. ") " .. tostring(why) .. "\n") return false end
-    local s, e = pcall(function() w:CloseSelf() end)
-    if s then
-      how = "CloseSelf"
-    else
-      why = tostring(why) .. " CloseSelf err=" .. tostring(e)
-      if ok(pc) then
-        local s2, e2 = pcall(function() pc:HideWidget(w, false) end)
-        if s2 then how = "HideWidget" else why = why .. " HideWidget err=" .. tostring(e2) end
-      end
-    end
-  end
+  if not WBP then return false end
+  local how, why = WBP.close_pause(w)
   print(TAG .. "pause menu closed (" .. label .. ") via " .. tostring(how or "FAILED") .. (how and "" or (" " .. tostring(why))) .. "\n")
   if not how then return false end
   ExecuteWithDelay(150, function() ExecuteInGameThread(function() pcall(restoreInput, label) end) end)
@@ -172,7 +156,7 @@ end
 
 -- game thread. Closes the pause menu when it is found on screen. true = handled.
 local function pausePoll(label)
-  local w = FindFirstOf("WBP_PauseMenu_C")
+  local w = WBP and WBP.instance("pause_menu")
   if not ok(w) then return false end
   local okV, inV = pcall(function() return w:IsInViewport() end)
   if okV and inV ~= true then return false end   -- object exists but is not on screen
@@ -208,18 +192,14 @@ end
 
 function hookPause()
   if pauseHooked then return true end
-  local s, pre, post = pcall(RegisterHook, PAUSE_CLS .. ":SetupWidget", function() end, function(self) pcall(onPause, self) end)
-  if s then pauseHooked = true end
-  print(TAG .. "hook pause menu " .. (s and ("registered ids=" .. tostring(pre) .. "," .. tostring(post)) or "FAILED") .. " path=" .. PAUSE_CLS .. "\n")
-  return s
+  if not WBP then return false end
+  local s = WBP.on_open("pause_menu", function(self) pcall(onPause, self) end)
+  pauseHooked = s == true
+  print(TAG .. "hook pause menu " .. (s and "registered/armed" or "FAILED") .. "\n")
+  return pauseHooked
 end
-if not hookPause() then
-  -- class not loaded yet: retry when a pause menu object is created (full path, then short name)
-  for _, n in ipairs({ PAUSE_CLS, "WBP_PauseMenu_C" }) do
-    local sN = pcall(NotifyOnNewObject, n, function() pcall(ExecuteInGameThread, hookPause) end)
-    print(TAG .. "pause menu NotifyOnNewObject " .. n .. (sN and " armed" or " FAILED") .. "\n")
-  end
-end
+hookPause()
+
 
 -- keys: all do nothing while our window is closed
 pcall(function()
