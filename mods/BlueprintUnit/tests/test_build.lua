@@ -2297,11 +2297,11 @@ do
     check(ok and st.state == "done" and f.calls.pl == 1 and f.clock - t0 >= 60000, "station blocks: slow progress (20 s per block) is not a stall (" .. st.text .. ")")
 end
 
--- cap: one block every 20 s (no 30 s stall) but 100 blocks need ~2000 s -> the 10 min cap stops the block phase, no factory
+-- cap: one block every 20 s (no 30 s stall) but 40 blocks (2 batches of 20) need ~800 s -> the 10 min cap stops the block phase, no factory
 do
     local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local many = {}
-    for i = 1, 100 do many[i] = { class = "BPO_Station_02", gx = 2 * i, gy = 0, h = 0, rot = 0 } end
+    for i = 1, 40 do many[i] = { class = "BPO_Station_02", gx = 2 * i, gy = 0, h = 0, rot = 0 } end
     f.io.scan_blocks = function()
         local out = {}
         if not f.blocks_out then return out end
@@ -2315,10 +2315,10 @@ do
     local st = run(b, f, 6000)
     local waited = f.clock - t0
     check(ok and st.state == "error" and st.text:find("did not all appear within 10 min", 1, true) and waited >= 600000 and waited <= 601000
-          and f.sent_blocks == 1 and f.calls.pl == 0, "station blocks: progress never stalls, 10 min cap stops the block phase (" .. st.text .. ")")
+          and f.sent_blocks == 2 and f.calls.pl == 0, "station blocks: progress never stalls, 10 min cap stops the block phase (" .. st.text .. ")")
 end
 
--- batches: 250 blocks -> 3 sends (100, 100, 50); removals only with the first send
+-- batches: 250 blocks -> 13 sends (12 x 20, then 10); removals only with the first send
 do
     local f = blocks_fake({ player = inv({}, 2), unit = inv({ S("ITEM_Plate", 10) }, 2) })
     local removes = {}
@@ -2337,8 +2337,8 @@ do
     p.block_remove = { { class = "BPO_Old", gx = 9, gy = 0, h = 0, rot = 0 } }
     local ok = b:start(p, {})
     local st = run(b, f, 2000)
-    check(ok and st.state == "done" and f.sent_blocks == 3 and removes[1] == 1 and removes[2] == 0 and removes[3] == 0 and f.calls.pl == 1,
-          "station blocks: 250 blocks in 3 batches, removes with the first only (" .. st.text .. ")")
+    check(ok and st.state == "done" and f.sent_blocks == 13 and removes[1] == 1 and removes[2] == 0 and removes[13] == 0 and f.calls.pl == 1,
+          "station blocks: 250 blocks in 13 batches, removes with the first only (" .. st.text .. ")")
 end
 
 -- forced shortage: block cost not in the total check, unit holds none, blocks still sent, factory placed
