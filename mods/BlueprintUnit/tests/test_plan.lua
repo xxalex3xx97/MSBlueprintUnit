@@ -578,6 +578,21 @@ check("names: live block id carried to the rename", dn2 and dn2.renames[1].id ==
 local dn3 = plan_of("dock_names.json", { blocks = { { class = "BPO_Dock", gx = 0, gy = 0, h = 0, rot = 0, id = 77, mids = { 555 } },
     { class = "BPO_Dock_2", gx = 4, gy = 0, h = 0, rot = 0 }, { class = "BPO_Station_01", gx = 8, gy = 0, h = 0, rot = 0 } } })
 check("names: live block child mids carried to the rename", dn3 and dn3.renames[1].mids and dn3.renames[1].mids[1] == 555 and #dn3.renames[1].mids == 1)
+-- dock filters (Blocks[].Filters): index 0-based, empty items skipped, bLoading mapped to 0/1, dock classes only
+do
+    local ftxt = '{"Version":2,"Blocks":[{"Class":"/Game/B/BPO_Dock_2.BPO_Dock_2_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0,'
+        .. '"Filters":[{"item":"waterice","bLoading":0},{"item":"","bLoading":1},{"item":"iron","bLoading":1}]},'
+        .. '{"Class":"/Game/B/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":4,"Y":0},"Height":0,"GridRotation":0,'
+        .. '"Filters":[{"item":"x","bLoading":1}]}],"DefaultMachines":[]}'
+    local pf = P.plan(ftxt, live({ blocks = { { class = "BPO_Dock_2", gx = 0, gy = 0, h = 0, rot = 0, id = 5 },
+        { class = "BPO_Station_01", gx = 4, gy = 0, h = 0, rot = 0 } } }), F)
+    local r1 = pf and pf.renames[1]
+    check("filters: one record (non-dock ignored), no name", pf and #pf.renames == 1 and r1.name == nil and r1.cls == "BPO_IndustrialDock")
+    check("filters: empty item skipped, index 0-based, bLoading mapped",
+        r1 and #r1.filters == 2 and r1.filters[1].index == 0 and r1.filters[1].item == "waterice" and r1.filters[1].loading == 0
+        and r1.filters[2].index == 2 and r1.filters[2].item == "iron" and r1.filters[2].loading == 1)
+    check("filters: summary says dock filters 1", pf and P.summary(pf):find("dock filters 1", 1, true) ~= nil and not P.summary(pf):find("dock names", 1, true))
+end
 local nn = plan_of("empty.json")
 check("names: old JSON -> no renames", nn and #nn.renames == 0)
 check("names: rename_due decision", P.rename_due("A", "B") and not P.rename_due("A", "A") and not P.rename_due(nil, "B")

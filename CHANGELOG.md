@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-18
+
+### Added
+- Pasting a station sets each dock's item filters (needs the MSCore build with set_dock_filter, 0.8.8; with an older MSCore the filters are skipped with a message and the rest works).
+
+### Fixed
+- Big Station Build pastes no longer stall: the station blocks are sent in batches of 20 (the game ignored one apply of 100 blocks).
+
 ## [0.4.2] - 2026-11-16
 
 ### Fixed

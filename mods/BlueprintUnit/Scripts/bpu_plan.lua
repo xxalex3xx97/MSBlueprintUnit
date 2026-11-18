@@ -326,8 +326,18 @@ local function parse_doc(text)
         local sc = short(c)
         -- optional Name: cleaned (clean_name), non-empty, dock classes only; anything else is ignored (old JSONs: nil)
         local name = clean_name(type(e.Name) == "string" and e.Name or "")
+        -- optional Filters (dock classes only): [{item, bLoading}] -> {index (0-based), item, loading 0|1}; empty items skipped
+        local filters
+        if DOCK_NAME_CLS[sc] and type(e.Filters) == "table" then
+            for i, f in ipairs(e.Filters) do
+                if type(f) == "table" and type(f.item) == "string" and f.item ~= "" then
+                    filters = filters or {}
+                    filters[#filters + 1] = { index = i - 1, item = f.item, loading = (f.bLoading ~= nil and f.bLoading ~= 0 and f.bLoading ~= false) and 1 or 0 }
+                end
+            end
+        end
         doc.blocks[#doc.blocks + 1] = { class = sc, gx = x, gy = y, h = h, rot = rot, path = c,
-            name = (DOCK_NAME_CLS[sc] and name ~= "") and name or nil }
+            name = (DOCK_NAME_CLS[sc] and name ~= "") and name or nil, filters = filters }
     end
     local dm = root.DefaultMachines
     if dm ~= nil and (type(dm) ~= "table" or not is_array(dm)) then bail("bad JSON: DefaultMachines not an array") end
@@ -531,8 +541,9 @@ local function build(text, live, F, opts)
         for _, n in ipairs(bplan.notes) do notes[#notes + 1] = n end
         for _, r in ipairs(bplan.remove) do removed_key[r.class .. "|" .. r.gx .. "|" .. r.gy .. "|" .. r.h] = true end
         for _, a in ipairs(bplan.blocks) do
-            if a.name and first_name(a.class .. "|" .. a.gx .. "|" .. a.gy .. "|" .. a.h, a.name, a.gx, a.gy) then
-                block_renames[#block_renames + 1] = { bcls = a.class, cls = DOCK_NAME_CLS[a.class], gx = a.gx, gy = a.gy, h = a.h, name = a.name }
+            local nm = a.name and first_name(a.class .. "|" .. a.gx .. "|" .. a.gy .. "|" .. a.h, a.name, a.gx, a.gy) and a.name or nil
+            if nm or a.filters then
+                block_renames[#block_renames + 1] = { bcls = a.class, cls = DOCK_NAME_CLS[a.class], gx = a.gx, gy = a.gy, h = a.h, name = nm, filters = a.filters }
             end
         end
     else
@@ -560,11 +571,18 @@ local function build(text, live, F, opts)
     end
     -- Named docks: one rename per named JSON block that is live now, on the live block it matched (same key). id = live BlockID
     -- when the live read has it (nil: bpu_live cannot find the dock child and reports it). Plan never sends anything.
+    local filtered = {}
     for _, jb in ipairs(doc.blocks) do
         local key = jb.class .. "|" .. jb.gx .. "|" .. jb.gy .. "|" .. jb.h
         local lb = blockset[key]
-        if jb.name and lb and not removed_key[key] and first_name(key, jb.name, jb.gx, jb.gy) then
-            renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = jb.name, id = lb.id, mids = lb.mids }
+        if lb and not removed_key[key] and (jb.name or jb.filters) then
+            local nm = jb.name and first_name(key, jb.name, jb.gx, jb.gy) and jb.name or nil
+            -- filters ride on the same record (dock_for lookup is shared); one per block key
+            local fl = jb.filters and not filtered[key] and jb.filters or nil
+            if fl then filtered[key] = true end
+            if nm or fl then
+                renames[#renames + 1] = { cls = DOCK_NAME_CLS[jb.class], gx = jb.gx, gy = jb.gy, h = jb.h, name = nm, filters = fl, id = lb.id, mids = lb.mids }
+            end
         end
     end
 
@@ -1144,8 +1162,15 @@ function P.summary(plan)
     s = s .. ", recipe changes " .. c.recipe
     if plan.block_count then s = s .. ", blocks " .. plan.block_count end
     if plan.block_remove and #plan.block_remove > 0 then s = s .. ", removed " .. #plan.block_remove end
-    local nrn = #(plan.renames or {}) + #(plan.block_renames or {})   -- live named docks + named docks this Station Build places
+    local nrn, nfl = 0, 0   -- live named docks + named docks this Station Build places; docks with filters
+    for _, list in ipairs({ plan.renames or {}, plan.block_renames or {} }) do
+        for _, r in ipairs(list) do
+            if r.name then nrn = nrn + 1 end
+            if r.filters then nfl = nfl + 1 end
+        end
+    end
     if nrn > 0 then s = s .. ", dock names " .. nrn end
+    if nfl > 0 then s = s .. ", dock filters " .. nfl end
     return s
 end
 
