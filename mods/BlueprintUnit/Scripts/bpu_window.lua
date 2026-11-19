@@ -463,12 +463,23 @@ local function linkedActors(sid)
     return hits
   end
   local s, list = pcall(FindAllOf, actCls)
+  local n, withMo, sameId = 0, 0, {}
   for _, a in ipairs((s and type(list) == "table") and list or {}) do
     if ok(a) then
+      n = n + 1
       local comp = rd(a, "BPC_MachineInteraction")
       local mo = ok(comp) and rd(comp, "MachineObject") or nil
-      if ok(mo) and rd(mo, "ID") == sid and cn(mo) == CRATE_SIM then hits[#hits + 1] = a end
+      if ok(mo) then
+        withMo = withMo + 1
+        if rd(mo, "ID") == sid then
+          if cn(mo) == CRATE_SIM then hits[#hits + 1] = a else sameId[#sameId + 1] = cn(mo) end
+        end
+      end
     end
+  end
+  if #hits == 0 and not M._crateDiag then   -- one-off: why no link (actor class / MachineObject / ID mismatch)
+    M._crateDiag = true
+    L(("crate diag: %s actors=%d withMachineObject=%d sameIdOtherClass=[%s]"):format(actCls, n, withMo, table.concat(sameId, ",")))
   end
   return hits
 end
