@@ -11,7 +11,7 @@ Rotation step (clockwise in y-down view): (x, y) -> (-y, x).
 
 Game order (rot 0), RULE: clockwise from East, top-most first:
   E by y asc, S by x desc, W by y desc, N by x asc.
-Verified by probe (in game): Refinery and Assembler only. Everything else is rule-derived.
+Verified by probe (in game): Refinery, Assembler, Container, Large Container (the containers break the rule). Everything else is rule-derived.
 
 Run: python tooling/gen_port_order.py [--rea path] [--catalog path]
 """
@@ -27,6 +27,9 @@ DEF_CAT = r"F:\ms-factory-bp-site\js\catalog.js"
 VERIFIED = {
     "DAT_Refinery": [(3, 0), (0, 3), (-3, 0), (0, -3)],
     "DAT_Assembler": [(5, -2), (5, 2), (2, 5), (-2, 5), (-5, 2), (-5, -2), (-2, -5), (2, -5)],
+    # game probe 2026-11-19 (binary-coded containers): NOT the clockwise rule, per-face directions differ
+    "DAT_Container": [(2, -1), (2, 1), (-2, -1), (-2, 1), (-1, 2), (1, 2), (-1, -2), (1, -2)],
+    "DAT_Container_2": [(4, 3), (4, 1), (4, -1), (4, -3), (-4, -3), (-4, -1), (-4, 1), (-4, 3), (3, 4), (1, 4), (-1, 4), (-3, 4), (3, -4), (1, -4), (-1, -4), (-3, -4)],
 }
 FACE_GROUP = {"E": 0, "S": 1, "W": 2, "N": 3}
 
