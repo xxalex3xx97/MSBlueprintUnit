@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-19
+
+### Changed
+- Station, container and pause-menu lookups go through MSCore (widget and class names live only in MSCore), so a game update that renames them only needs an MSCore fix. Needs MSCore 0.8.10 or newer; with an older MSCore those features turn off with a message.
+
 ## [0.4.3] - 2026-11-18
 
 ### Added
