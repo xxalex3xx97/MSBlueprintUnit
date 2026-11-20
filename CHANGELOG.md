@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-20
+
+### Fixed
+- Crate and ports hidden again after a game update: the unit crate is found through its machine interaction component (the actor is BP_BPUnitSto_2_C).
+
+### Changed
+- Compact fonts in the Blueprint Unit window (body 11, labels 10, headers 13, buttons 11). Needs the rebuilt pakchunk102-BPUnitUI_P from this release.
+
 ## [0.4.4] - 2026-11-19
 
 ### Changed
