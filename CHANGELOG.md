@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-20
+
+### Fixed
+- The game crashed at start after the 2026-11-20 game update ("Bad export index" on BP_BlueprintUnit). The Blueprint Unit block pak (pakchunk100) is rebuilt against the new game files.
+
 ## [0.4.5] - 2026-11-20
 
 ### Fixed
