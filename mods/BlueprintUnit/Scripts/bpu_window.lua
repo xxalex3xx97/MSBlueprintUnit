@@ -479,6 +479,16 @@ local function linkedActors(sid)
   end
   if #hits == 0 and not M._crateDiag then   -- one-off: why no link (actor class / MachineObject / ID mismatch)
     M._crateDiag = true
+    local s2, comps = pcall(FindAllOf, "BPC_MachineInteraction_C")   -- who owns sim ID == sid, any class
+    local owners = {}
+    for _, c in ipairs((s2 and type(comps) == "table") and comps or {}) do
+      local mo = ok(c) and rd(c, "MachineObject") or nil
+      if ok(mo) and rd(mo, "ID") == sid then
+        local sOw, ow = pcall(function() return c:GetOwner() end)
+        owners[#owners + 1] = (sOw and cn(ow) or "?") .. "/" .. cn(mo)
+      end
+    end
+    L("crate diag2: sim ID=" .. tostring(sid) .. " comps=" .. tostring(s2 and type(comps) == "table" and #comps) .. " owners=[" .. table.concat(owners, ",") .. "]")
     L(("crate diag: %s actors=%d withMachineObject=%d sameIdOtherClass=[%s]"):format(actCls, n, withMo, table.concat(sameId, ",")))
   end
   return hits
