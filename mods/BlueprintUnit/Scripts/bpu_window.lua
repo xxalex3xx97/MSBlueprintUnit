@@ -454,20 +454,16 @@ local function unitIds(block)
   if s and type(list) == "table" then for _, b in ipairs(list) do add(b) end end
   return set
 end
--- container actors whose MachineObject is this sim (ID equal, class BP_BPUnitStoreObj_01_C)
+-- actors owning a BPC_MachineInteraction whose MachineObject is this sim (ID equal, class BP_BPUnitStoreObj_01_C).
+-- Our crate actor is BP_BPUnitSto_2_C (own pak class), not the game's BP_Container_2_C: match by component, not actor class.
 local function linkedActors(sid)
   local hits = {}
-  local actCls = MSCore and type(MSCore.class) == "function" and MSCore.class("container_actor") or nil
-  if not actCls then
-    if not M._crateOld then M._crateOld = true; L("MSCore too old (needs 0.8.10): crate hide is off") end
-    return hits
-  end
-  local s, list = pcall(FindAllOf, actCls)
-  for _, a in ipairs((s and type(list) == "table") and list or {}) do
-    if ok(a) then
-      local comp = rd(a, "BPC_MachineInteraction")
-      local mo = ok(comp) and rd(comp, "MachineObject") or nil
-      if ok(mo) and rd(mo, "ID") == sid and cn(mo) == CRATE_SIM then hits[#hits + 1] = a end
+  local s, comps = pcall(FindAllOf, "BPC_MachineInteraction_C")
+  for _, c in ipairs((s and type(comps) == "table") and comps or {}) do
+    local mo = ok(c) and rd(c, "MachineObject") or nil
+    if ok(mo) and rd(mo, "ID") == sid and cn(mo) == CRATE_SIM then
+      local so, a = pcall(function() return c:GetOwner() end)
+      if so and ok(a) then hits[#hits + 1] = a end
     end
   end
   return hits
