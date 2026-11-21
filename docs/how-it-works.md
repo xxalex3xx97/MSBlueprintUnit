@@ -41,7 +41,7 @@ Leftover items stay with the player.
 
 ## Station Build (optional)
 
-Off unless the **Station Build** checkbox is ticked. Needs MSCore 0.8.0 or newer (`add_block`, `remove_block`, `pending`, `read_block_class`).
+The **Station Build** checkbox starts unticked (`mk_bpunit_wbp.py`), but `bpu_window.lua` `sbOn()` is `ticked or MSCore capable`, so it is on whenever MSCore has the natives; the box only matters on an older MSCore, where ticking it blocks Import and Build. Needs MSCore 0.8.0 or newer (`add_block`, `remove_block`, `pending`, `read_block_class`).
 
 - **Plan** (`bpu_plan`, `bpu_blocks`): blocks of the JSON that are missing on the station are classified. Skipped with a note: class not in this game, not a station block, locked by research (read in Lua from `DMSWorld:GetResearchState()`), overlapping another block of the JSON. A live block that overlaps a block to add, and is not in the JSON, goes to a remove list (never the Blueprint Unit block). Overlap uses the block bounds from `read_block_class`: raw /65536, which is 4x the grid unit in x and y and 2x in height; the game keeps each box slightly under its size, so neighbouring blocks do not overlap.
 - **Cost**: net per item = added blocks minus refunds of removed blocks. If the unit and the player together cannot pay for the station blocks, that is a note only (`; building anyway`) and the blocks are sent anyway. Only the machine cost check (`total_check`, `not enough items: ...`) refuses, before anything is sent. Creative mode skips both.
