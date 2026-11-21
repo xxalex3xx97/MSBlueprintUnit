@@ -35,7 +35,7 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 
 1. Research **Computation Science**.
 2. Build a **Blueprint Unit** in the Designer.
-3. Press **F** on the console to open the window.
+3. Interact with the unit's console (the game's interact key, **F**) to open the window.
 4. **Import**: paste the blueprint JSON and import it.
 5. Check the **Modification Cost** list.
 6. **Build**.
@@ -52,7 +52,7 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 
 **Station Build (optional checkbox, off by default).** Tick **Station Build (place station blocks + factory)** before Build to also place the station blocks of the JSON (Station 1x1, docks, elevators, ...), then the factory. Needs MSCore 0.8.0 or newer (the box says so when it is older).
 - A block of the JSON that is missing from your station is placed. A live block that stands in the way (and is not in the JSON) is removed first; the removed block is refunded and the new one charged as one net cost. The Blueprint Unit block itself is never removed.
-- Blocks locked by research are skipped, with a note. If the unit and you together cannot pay for all blocks, Build refuses with the list of missing items and builds nothing.
+- Blocks locked by research are skipped, with a note. If the unit and you together cannot pay for all station blocks, that is only a note (the missing items are listed) and the build goes ahead anyway. Only the cost of the factory machines can refuse: Build then stops with `not enough items: ...` before anything is sent (not in creative mode).
 - A splitter that already exists with different port settings is removed and placed again with the new settings.
 
 **Blueprint Unit inventory:** 120 slots, +1,000,000% stack size. Existing 1000-slot or 300-slot units keep their size: place a new unit.
@@ -63,7 +63,7 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 
 1. Research **Computation Science**.
 2. In the Designer, add a **Blueprint Unit** block to your station.
-3. Use the unit's console and press **F**. The window opens.
+3. Interact with the unit's console (the game's interact key, **F**). The window opens.
 
 ### 2. Import a blueprint
 
