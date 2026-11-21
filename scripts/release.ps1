@@ -40,7 +40,8 @@ $expected = @($files | ForEach-Object { $_.Substring($_.LastIndexOf('=') + 1) })
 $expected += 'Mods/BlueprintUnit/enabled.txt', 'Mods/BlueprintUnit/mscore.mod'
 $expected = @($expected | Sort-Object)
 
-& $releaseMod -Name BlueprintUnit -Repo xxalex3xx97/MSBlueprintUnit -Version $Version -MinNative $mm.Groups[1].Value -Files $files -Empty @('Mods/BlueprintUnit/enabled.txt') -OutDir $OutDir
+# save_scrub = classes MSCore Manager converts to stock on Remove mod
+& $releaseMod -Name BlueprintUnit -Repo xxalex3xx97/MSBlueprintUnit -Version $Version -MinNative $mm.Groups[1].Value -Files $files -Empty @('Mods/BlueprintUnit/enabled.txt') -SaveScrub @('/Game/Blueprints/BuildingBlocks/BPO_BlueprintUnit.BPO_BlueprintUnit_C>/Game/Blueprints/BuildingBlocks/BPO_CommandModule.BPO_CommandModule_C', '/Game/Blueprints/Machines/BP_BPUnitStoreObj_01.BP_BPUnitStoreObj_01_C>/Game/Blueprints/Machines/BP_ContainerObject_2.BP_ContainerObject_2_C') -OutDir $OutDir
 if ($LASTEXITCODE -ne 0) { throw 'release-mod.ps1 failed' }
 
 # listing check on the built zip
