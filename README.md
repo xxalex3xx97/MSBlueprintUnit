@@ -35,7 +35,7 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 
 1. Research **Computation Science**.
 2. Build a **Blueprint Unit** in the Designer.
-3. Press **F** on the console to open the window.
+3. Interact with the unit's console (the game's interact key, **F**) to open the window.
 4. **Import**: paste the blueprint JSON and import it.
 5. Check the **Modification Cost** list.
 6. **Build**.
@@ -50,9 +50,9 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 - Container contents are restored after Build, on by default. The **Enable container item restoration** checkbox turns it off (`restore_off.txt` also disables it). With MSCore 0.7.6 the unit sorts, splits the exact amount and moves it; older MSCore is not supported.
 - While a build or restore runs, the **Build** button reads **Abort** and cancels it. Closing the window cancels it too; items already moved stay where they are.
 
-**Station Build (optional checkbox, off by default).** Tick **Station Build (place station blocks + factory)** before Build to also place the station blocks of the JSON (Station 1x1, docks, elevators, ...), then the factory. Needs MSCore 0.8.0 or newer (the box says so when it is older).
+**Station Build.** The **Station Build (place station blocks + factory)** checkbox starts unticked, but with MSCore 0.8.0 or newer Station Build is on whether or not it is ticked: Build also places the station blocks of the JSON (Station 1x1, docks, elevators, ...), then the factory. Ticking it on an older MSCore stops Import and Build and the box says so.
 - A block of the JSON that is missing from your station is placed. A live block that stands in the way (and is not in the JSON) is removed first; the removed block is refunded and the new one charged as one net cost. The Blueprint Unit block itself is never removed.
-- Blocks locked by research are skipped, with a note. If the unit and you together cannot pay for all blocks, Build refuses with the list of missing items and builds nothing.
+- Blocks locked by research are skipped, with a note. If the unit and you together cannot pay for all station blocks, that is only a note (the missing items are listed) and the build goes ahead anyway. Only the cost of the factory machines can refuse: Build then stops with `not enough items: ...` before anything is sent (not in creative mode).
 - A splitter that already exists with different port settings is removed and placed again with the new settings.
 
 **Blueprint Unit inventory:** 120 slots, +1,000,000% stack size. Existing 1000-slot or 300-slot units keep their size: place a new unit.
@@ -63,7 +63,7 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 
 1. Research **Computation Science**.
 2. In the Designer, add a **Blueprint Unit** block to your station.
-3. Use the unit's console and press **F**. The window opens.
+3. Interact with the unit's console (the game's interact key, **F**). The window opens.
 
 ### 2. Import a blueprint
 
@@ -90,14 +90,14 @@ The **Modification Cost** list (left) is the net item cost: what the build place
 | **Import** | Paste a blueprint and compare it with your station. |
 | **Pin** / **Unpin** (on the cost list) | Pins the net cost to the game's pinned cost list. |
 | **Enable container item restoration** | On by default. Put the contents of removed containers back after Build. |
-| **Station Build (place station blocks + factory)** | Off by default. Also places the station blocks of the JSON. |
+| **Station Build (place station blocks + factory)** | Starts unticked. With MSCore 0.8.0 or newer the station blocks of the JSON are placed either way. |
 | **Build** | Builds. While it runs, the button reads **Abort**. |
 
 Click **Build**. The unit takes items from its own inventory first, then yours. While it runs, **Abort** (or closing the window) cancels it; items already moved stay where they are.
 
 ### 4. Station Build
 
-Tick **Station Build (place station blocks + factory)** before **Build** if the JSON has station blocks your station lacks (docks, elevators, Station 1x1 ...). Needs MSCore 0.8.0 or newer. Without it, a JSON block that is not on your station is refused.
+If the JSON has station blocks your station lacks (docks, elevators, Station 1x1 ...), **Build** places them when MSCore is 0.8.0 or newer; the **Station Build (place station blocks + factory)** box need not be ticked. On an older MSCore the box has no effect, and a JSON block that is not on your station is refused.
 
 ### 5. Container restore off
 
@@ -113,7 +113,7 @@ Untick **Enable container item restoration**, or create an empty file:
 |---|---|
 | `import first` | Import a blueprint before **Build**. |
 | `bad JSON: ...` / `the text is cut off ... paste it again` | The paste is incomplete or edited. Export again and paste the whole text. |
-| `These blocks are not on the station grid: ... Fix them in the blueprint or tick Station Build.` | Tick **Station Build**, or fix the blueprint. |
+| `These blocks are not on the station grid: ... Fix them in the blueprint or tick Station Build.` | Update MSCore to 0.8.0 or newer, or fix the blueprint. |
 | `not enough items: Name xN, ...` | Put the listed items in the unit or your inventory, then **Build**. Nothing was built. |
 | `items missing in unit and player: ...` | Same: add the items and **Build** again. |
 | `station changed since import, import again` | The station changed after the import. Click **Import** and paste again. |
