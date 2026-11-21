@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-22
+
+### Added
+- Removing the mod with MSCore Manager now converts the Blueprint Unit block and container in saves and designs to stock classes, so the game no longer crashes after removal (save_scrub lines in mscore.mod).
+
 ## [0.4.6] - 2026-11-20
 
 ### Fixed
