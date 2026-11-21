@@ -57,6 +57,75 @@ Use **MSCoreManager.exe** from the [MSCore releases](https://github.com/xxalex3x
 
 **Blueprint Unit inventory:** 120 slots, +1,000,000% stack size. Existing 1000-slot or 300-slot units keep their size: place a new unit.
 
+## How to use
+
+### 1. Get the unit
+
+1. Research **Computation Science**.
+2. In the Designer, add a **Blueprint Unit** block to your station.
+3. Use the unit's console and press **F**. The window opens.
+
+### 2. Import a blueprint
+
+1. Build or pick a factory on the [ms-factory-blueprint site](https://xxalex3xx97.github.io/ms-factory-blueprint/) and export the JSON.
+2. In the window click **Import**. A box titled **Import blueprint** opens.
+3. Click in the box, **Ctrl+V** to paste, then click **Import** (or **Cancel**).
+
+Paste the whole text exported by the site. Do not edit it by hand. Shape of a file (from `mods/BlueprintUnit/tests/fixtures/`, trimmed):
+
+```json
+{"Version":2,"DisplayName":"Tele",
+ "Blocks":[{"Class":"/Game/Blueprints/BuildingBlocks/BPO_Station_01.BPO_Station_01_C","GridLocation":{"X":0,"Y":0},"Height":0,"GridRotation":0}],
+ "DefaultMachines":[{"Class":"BP_ConveyorBeltObject","DefaultName":"DAT_ConveyorBelt","Transform":{"GridLocation":{"X":1,"Y":1},"Height":0,"GridRotation":0}}]}
+```
+
+`Blocks` are station blocks (only used with **Station Build**). `DefaultMachines` are the machines of the factory.
+
+### 3. Read the cost, then Build
+
+The **Modification Cost** list (left) is the net item cost: what the build places and changes, minus what the removals refund. Kept machines cost nothing.
+
+| Control | What it does |
+|---|---|
+| **Import** | Paste a blueprint and compare it with your station. |
+| **Pin** / **Unpin** (on the cost list) | Pins the net cost to the game's pinned cost list. |
+| **Enable container item restoration** | On by default. Put the contents of removed containers back after Build. |
+| **Station Build (place station blocks + factory)** | Off by default. Also places the station blocks of the JSON. |
+| **Build** | Builds. While it runs, the button reads **Abort**. |
+
+Click **Build**. The unit takes items from its own inventory first, then yours. While it runs, **Abort** (or closing the window) cancels it; items already moved stay where they are.
+
+### 4. Station Build
+
+Tick **Station Build (place station blocks + factory)** before **Build** if the JSON has station blocks your station lacks (docks, elevators, Station 1x1 ...). Needs MSCore 0.8.0 or newer. Without it, a JSON block that is not on your station is refused.
+
+### 5. Container restore off
+
+Untick **Enable container item restoration**, or create an empty file:
+
+```
+<game>\Windows\MainSequence\Binaries\Win64\ue4ss\Mods\BlueprintUnit\restore_off.txt
+```
+
+### Messages and what to do
+
+| Message | What to do |
+|---|---|
+| `import first` | Import a blueprint before **Build**. |
+| `bad JSON: ...` / `the text is cut off ... paste it again` | The paste is incomplete or edited. Export again and paste the whole text. |
+| `These blocks are not on the station grid: ... Fix them in the blueprint or tick Station Build.` | Tick **Station Build**, or fix the blueprint. |
+| `not enough items: Name xN, ...` | Put the listed items in the unit or your inventory, then **Build**. Nothing was built. |
+| `items missing in unit and player: ...` | Same: add the items and **Build** again. |
+| `station changed since import, import again` | The station changed after the import. Click **Import** and paste again. |
+| `the unit inventory is full, empty it and Build again` | Free slots in the unit inventory (shown in the window), then **Build**. |
+| `... does not fit the player inventory, empty your inventory and Build again` | Free slots in your inventory, then **Build**. |
+| `Station Build needs MSCore 0.8.0 or newer.` | Update MSCore with MSCoreManager, or untick **Station Build**. |
+| `These station blocks cannot be placed: ... The factory was not built.` | Remove those blocks from the blueprint. |
+| `nothing to build` | The station already matches the blueprint. |
+| `restore is off (restore_off.txt in Mods/BlueprintUnit)` | `restore_off.txt` exists. Delete it to restore container items. |
+
+If a message ends with `Build again`, fix what it says and click **Build** again. Technical detail goes to `bpu_trace.log`.
+
 ## Co-op
 
 Every player in a co-op session needs the mod installed.
